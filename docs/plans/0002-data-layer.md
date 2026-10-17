@@ -4,7 +4,7 @@
 | --- | --- |
 | 编号 | 0002 |
 | 分支 | `feat/data-layer` |
-| 状态 | 计划中（等待确认后开工） |
+| 状态 | 已完成（待合入 dev） |
 | 提出日期 | 2026-10-18 |
 
 ## 一、背景
@@ -127,17 +127,20 @@
 
 ## 五、完成点
 
-* [ ] `src/paths.rs`：解析 exe 目录、可写探测（写临时文件后删除）、返回 `Result<PathBuf>`
-* [ ] `src/config.rs`：`AppConfig`（serde）、默认值、缺失字段补齐、坏文件隔离、非法值回落
-* [ ] `src/accounts.rs`：`AccountsFile`/`Account` 结构、`load`/`save`（原子写）、
+* [x] `src/paths.rs`：解析 exe 目录、可写探测（写临时文件后删除）、返回 `Result<PathBuf>`
+* [x] `src/config.rs`：`AppConfig`（serde）、默认值、缺失字段补齐、坏文件隔离、非法值回落
+* [x] `src/accounts.rs`：`AccountsFile`/`Account` 结构、`load`/`save`（原子写）、
       `add`/`remove`/`find`、唯一性校验、按 `createdAt` 排序、损坏隔离
-* [ ] `src/secrets.rs`：`SecretStore` 抽象 + Windows DPAPI 实现 + macOS 钥匙串实现
-* [ ] `src/mask.rs`：`mask_email` 及其单元测试
-* [ ] 启动时初始化：解析目录 → 探测可写 → 加载/创建两个文件 → 打印日志
-* [ ] 新增依赖并在 `AGENTS.md` 技术栈表登记：`serde`、`serde_json`、`uuid`、`time`、`base64`、
+* [x] `src/secrets.rs`：`SecretStore` 抽象 + Windows DPAPI 实现 + macOS 钥匙串实现
+* [x] `src/mask.rs`：`mask_email` 及其单元测试
+* [x] 启动时初始化：解析目录 → 探测可写 → 加载/创建两个文件 → 打印日志
+* [x] 新增依赖并在 `AGENTS.md` 技术栈表登记：`serde`、`serde_json`、`uuid`、`time`、`base64`、
       （Windows）`windows-sys`、（macOS）`security-framework`，开发依赖 `tempfile`
-* [ ] 单元测试：打码 6 例、排序、去重、schema 往返、损坏隔离、原子写、DPAPI 往返（Windows）
-* [ ] 在 `docs/plans/0001` 的路线表与 `AGENTS.md` 阶段表里把阶段 1 标记为进行中
+* [x] 单元测试：打码 7 例、排序、去重、schema 往返、损坏隔离、原子写、DPAPI 往返（Windows）
+* [x] 在 `AGENTS.md` 阶段表里把数据层标记为已完成（阶段 1a）
+
+> 计划外的补充（见“结果”里的偏差记录）：新增 `src/data.rs` 门面模块；
+> 面板改为“顶/底固定 + 中间滚动”；调试开关在生效时不再因失焦收起。
 
 ## 六、验收标准
 
@@ -146,7 +149,8 @@
 2. 操作：删除 `app.json` 后重启 → 预期：自动重建默认配置，日志出现"已创建默认 app.json"。
 3. 操作：把 `app.json` 改成非法 JSON 后重启 → 预期：原文件被改名为
    `app.json.corrupt-<时间戳>`，程序用默认配置正常启动，日志有 `warn`。
-4. 操作：把 `app.json` 的 `maskAccounts` 改成 `true`、`refreshIntervalSeconds` 改成 `-5` → 预期：
+4. 操作：把 `app.json` 的 `maskAccounts` 改成 `true`、`refreshIntervalSeconds` 改成 `0`
+   （`u64` 无法表示负数，写 `-5` 属于类型错误，会走第 3 条的整份隔离路径）→ 预期：
    打码开关生效；非法间隔回落到 300 并在日志中 `warn`。
 5. 操作：把 `accounts.json` 改成非法 JSON 后重启 → 预期：原文件被隔离备份，账号列表为空，
    程序不崩溃，日志说明原因。
@@ -186,9 +190,12 @@
 
 ## 九、涉及文件
 
-* 新增：`src/paths.rs`、`src/config.rs`、`src/accounts.rs`、`src/secrets.rs`、`src/mask.rs`
-* 修改：`src/main.rs`（启动时初始化数据层并记录日志）、`Cargo.toml`（依赖）
-* 文档：`AGENTS.md`（技术栈表、阶段表）、`README.md`（数据文件位置说明）
+* 新增：`src/paths.rs`、`src/config.rs`、`src/accounts.rs`、`src/secrets.rs`、`src/mask.rs`、
+  `src/data.rs`（计划外补充：数据层门面）
+* 修改：`src/main.rs`（启动时初始化数据层并记录日志）、`src/app.rs`（数据目录提示、
+  红色错误横幅、面板滚动布局）、`Cargo.toml`（依赖）
+* 文档：`AGENTS.md`（技术栈表、阶段表、数据文件章节）、`README.md`（数据文件说明）、
+  `docs/panel-preview.png`（面板截图更新）
 * 测试：各模块内 `#[cfg(test)] mod tests`
 
 ## 十、后续计划依赖（预告）
@@ -200,4 +207,52 @@
 
 ## 十一、结果
 
-> 完成后填写。
+* 完成日期：2026-10-18
+* 分支：`feat/data-layer`
+
+### 验证记录
+
+**自动化**
+
+* `cargo fmt --check` → 通过；
+* `cargo clippy --all-targets -- -D warnings` → 通过，零警告；
+* `cargo test` → **44 passed / 0 failed**（新增：`mask` 7 例、`paths` 6 例、`config` 5 例、
+  `accounts` 13 例、`secrets` 5 例、`data` 2 例，其余为 0001 的定位用例）；
+* `cargo build` → 通过。
+
+**Windows 实机手工验证**（2560×1440，100% 缩放）
+
+1. 把 exe 单独拷到空目录运行 → 该目录生成
+   `app.json`（`schemaVersion=1, maskAccounts=false, refreshIntervalSeconds=300,
+   requestTimeoutSeconds=10`）与 `accounts.json`（`schemaVersion=1, accounts=[]`）；
+   启动日志打印数据目录与"已加载 0 个账号"。
+2. 删除 `app.json` 后重启 → 日志 `已创建默认配置文件`，文件重建为默认值。
+3. 把 `accounts.json` 写成非法 JSON 后重启 → 日志
+   `accounts.json 解析失败（expected value at line 1 column 1），将备份后用空列表重建`，
+   原文件被改名为 `accounts.json.corrupt-1792263620`，新文件为
+   `{"schemaVersion":1,"accounts":[]}`，程序正常启动。
+4. 用 `icacls /deny <用户>:(W)` 造出一个只读目录后运行 → 日志
+   `数据层初始化失败：数据目录不可写：…: 拒绝访问。 (os error 5)`；
+   目录内**只有 exe**，没有生成任何数据文件；面板顶部出现红色提示
+   “数据目录不可写，账号无法保存 / 请把程序移动到可写目录…后重启”。
+5. `maskAccounts=true` 的打码效果由单元测试 `data::tests::打码开关通过数据层生效` 与
+   `mask::tests::*` 覆盖（界面展示留到 0004 验收）。
+6. 日志中未出现任何明文密码或 token（`Credentials` 的 `Debug` 只打印长度）。
+
+### 与计划的偏差
+
+1. **新增 `src/data.rs`**：计划只列了 5 个数据模块。实现时需要一个把"目录 + 配置 + 账号 +
+   凭据存储"组装起来的门面，否则 `main` 与后续的 `app`/登录流程会各自拼装一遍。
+2. **验收标准 4 的样例从 `-5` 改为 `0`**：`refreshIntervalSeconds` 是 `u64`，
+   写负数会在 JSON 反序列化阶段就失败，走"整份隔离"而不是"字段回落"。
+3. **面板布局重构**：加红色横幅后原布局把页脚挤出面板，改为"顶部固定 + 底部固定 +
+   中间 ScrollArea"，并给页脚加不透明底色，避免滚动内容与页脚视觉重叠。
+4. **调试开关增加"不自动收起"**：自动化截图时窗口拿不到焦点，原逻辑会让面板在截图前消失。
+5. **`accounts.rs`/`secrets.rs` 顶部临时 `#![allow(dead_code)]`**：这批 API 的调用方在
+   0003/0004 才出现，先把噪声压掉；两个计划接入后必须删掉这两行。
+
+### 遗留问题
+
+* macOS 的钥匙串实现只做了 `cargo check` 层面的编译验证，未实机运行（按用户确认延后）；
+* 单实例互斥未做：两个副本同时运行会互相覆盖 `accounts.json`（已在 README 记录）；
+* API Key 字段只做了 schema 预留，没有读写接口（0005 待规划）。
