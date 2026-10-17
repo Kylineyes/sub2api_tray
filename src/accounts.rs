@@ -245,6 +245,22 @@ impl AccountsStore {
         Ok(true)
     }
 
+    /// 覆盖某个账号的 API Key 缓存（`apiKeys` 数组）。
+    ///
+    /// 缓存内容由 [`crate::api::ApiKeyInfo::to_cache_value`] 生成，**不含完整 Key**。
+    /// 返回 `false` 表示账号已不存在。
+    pub fn set_api_keys(&mut self, id: &str, api_keys: Vec<serde_json::Value>) -> Result<bool> {
+        let Some(index) = self.accounts.iter().position(|account| account.id == id) else {
+            return Ok(false);
+        };
+
+        let mut next = self.accounts.clone();
+        next[index].api_keys = api_keys;
+        self.persist(&next)?;
+        self.accounts = next;
+        Ok(true)
+    }
+
     /// 把当前内存状态写回磁盘。
     pub fn save(&self) -> Result<()> {
         self.persist(&self.accounts)

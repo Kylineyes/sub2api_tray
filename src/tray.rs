@@ -58,6 +58,9 @@ const MENU_ID_QUIT: &str = "quit";
 /// 而不是在安装时把每个 id 都捕获进闭包。
 const MENU_ID_DELETE_PREFIX: &str = "delete:";
 
+/// 账号子菜单里"查看 API Key…"的 id 前缀，形如 `keys:<uuid>`。
+const MENU_ID_KEYS_PREFIX: &str = "keys:";
+
 /// 托盘需要应用做的事。
 ///
 /// 这里不再是 `Copy`：删除账号要带上 id。投递成本仍然很低（Vec push）。
@@ -73,6 +76,8 @@ pub enum TrayCommand {
     RefreshNow,
     /// 删除某个账号（子菜单项，id 为账号 id；需要二次确认）。
     DeleteAccount(String),
+    /// 查看某个账号的 API Key（子菜单项，id 为账号 id）。
+    ShowApiKeys(String),
     /// 退出整个应用（菜单项）。
     Quit,
 }
@@ -286,16 +291,24 @@ pub fn build_menu(entries: &[TrayAccountEntry]) -> Result<Menu> {
     ])
     .context("构建托盘菜单失败")?;
 
-    // 每个账号一个子菜单：标题带状态，子菜单里目前只有"退出账号并删除记录"。
-    // 将来 API Key 管理也放在这里（见 0004 计划）。
+    // 每个账号一个子菜单：标题带状态；子菜单内是"查看 API Key"与"退出账号并删除记录"。
     for entry in entries {
         let submenu = Submenu::new(entry.title.as_str(), true);
+        let keys_item = MenuItem::with_id(
+            format!("{MENU_ID_KEYS_PREFIX}{}", entry.id),
+            "查看 API Key…",
+            true,
+            None,
+        );
         let delete_item = MenuItem::with_id(
             format!("{MENU_ID_DELETE_PREFIX}{}", entry.id),
             "退出账号并删除记录",
             true,
             None,
         );
+        submenu
+            .append(&keys_item)
+            .context("构建 API Key 菜单项失败")?;
         submenu.append(&delete_item).context("构建账号子菜单失败")?;
         menu.append(&submenu).context("追加账号子菜单失败")?;
     }
@@ -340,6 +353,8 @@ pub fn install(bridge: Arc<TrayBridge>) -> Result<TrayHandle> {
             other => {
                 if let Some(account_id) = other.strip_prefix(MENU_ID_DELETE_PREFIX) {
                     menu_bridge.push(TrayCommand::DeleteAccount(account_id.to_owned()));
+                } else if let Some(account_id) = other.strip_prefix(MENU_ID_KEYS_PREFIX) {
+                    menu_bridge.push(TrayCommand::ShowApiKeys(account_id.to_owned()));
                 }
                 // 版本项是禁用的，不会产生事件；其它未知 id 直接忽略
             }

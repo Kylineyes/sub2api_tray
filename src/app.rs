@@ -110,6 +110,30 @@ struct AccountCard {
     error: Option<String>,
 }
 
+/// API Key 弹窗的后台结果。
+enum ApiKeysReply {
+    /// 列表拉取结果（错误已是可展示文案）。
+    List(Result<Vec<crate::api::ApiKeyInfo>, String>),
+    /// 某个 Key 的完整值（仅用于复制）。
+    Value { result: Result<String, String> },
+}
+
+/// API Key 弹窗状态（0006：只读列表 + 复制）。
+struct ApiKeysDialog {
+    /// 所属账号 id。
+    account_id: String,
+    /// 标题（打码邮箱）。
+    title: String,
+    /// 是否正在拉取。
+    loading: bool,
+    /// 已拉取到的 Key 列表。
+    keys: Vec<crate::api::ApiKeyInfo>,
+    /// 错误提示。
+    error: Option<String>,
+    /// 后台线程结果通道。
+    receiver: Option<Receiver<ApiKeysReply>>,
+}
+
 /// 应用主体。
 pub struct TrayApp {
     /// 托盘图标句柄。**必须持有**：drop 之后托盘图标会消失。
@@ -189,6 +213,9 @@ pub struct TrayApp {
 
     /// 是否已经应用过一次徽标（区分"还没设过"和"设成无徽标"）。
     badge_initialized: bool,
+
+    /// API Key 弹窗（`None` 表示未打开）。
+    api_keys: Option<ApiKeysDialog>,
 }
 
 impl TrayApp {
@@ -246,6 +273,7 @@ impl TrayApp {
             pending_delete: None,
             badge_applied: None,
             badge_initialized: false,
+            api_keys: None,
         };
 
         // 启动时先按已加载的账号建一次菜单（此时状态都是"未知"）
@@ -441,11 +469,287 @@ impl TrayApp {
                     self.show_panel(ctx);
                     self.pending_delete = Some(id);
                 }
+                TrayCommand::ShowApiKeys(id) => {
+                    log::debug!("收到查看 API Key 请求：{id}");
+                    self.open_api_keys(ctx, &id);
+                }
                 TrayCommand::Quit => {
                     log::info!("收到退出指令，关闭应用");
                     ctx.send_viewport_cmd(egui::ViewportCommand::Close);
                 }
             }
+        }
+    }
+
+    /// 打开某个账号的 API Key 弹窗，并在后台拉取列表。
+    ///
+    /// 只读：不提供创建/删除（见 0006 计划的范围说明）。
+    fn open_api_keys(&mut self, ctx: &egui::Context, account_id: &str) {
+        self.show_panel(ctx);
+
+        let DataLayer::Ready(store) = &self.data else {
+            self.toast = Some(("数据目录不可用，无法读取账号".to_owned(), Instant::now()));
+            return;
+        };
+        let Some(account) = store.accounts().iter().find(|item| item.id == account_id) else {
+            self.toast = Some(("账号不存在".to_owned(), Instant::now()));
+            return;
+        };
+
+        let title = store.display_email(&account.email);
+        let base_url = account.base_url.clone();
+        let secrets_blob = account.secrets.clone();
+        let secret_store = store.secret_store();
+        let timeout = self.request_timeout();
+        let account_for_thread = account_id.to_owned();
+
+        let (sender, receiver) = std::sync::mpsc::channel();
+        self.api_keys = Some(ApiKeysDialog {
+            account_id: account_id.to_owned(),
+            title,
+            loading: true,
+            keys: Vec::new(),
+            error: None,
+            receiver: Some(receiver),
+        });
+
+        let repaint = ctx.clone();
+        std::thread::spawn(move || {
+            let reply = match crate::secrets::open_credentials(
+                secret_store.as_ref(),
+                &account_for_thread,
+                &secrets_blob,
+            ) {
+                Ok(credentials) => match crate::api::HttpClient::new(&base_url, timeout) {
+                    Ok(client) => client
+                        .list_api_keys(&credentials.access_token)
+                        .map_err(|err| err.user_message()),
+                    Err(err) => Err(err.user_message()),
+                },
+                Err(err) => Err(format!("凭据无法解密：{err:#}")),
+            };
+            let _ = sender.send(ApiKeysReply::List(reply));
+            repaint.request_repaint();
+        });
+    }
+
+    /// 取一次 API Key 弹窗的后台结果。
+    fn poll_api_keys(&mut self, ctx: &egui::Context) {
+        let Some(dialog) = self.api_keys.as_mut() else {
+            return;
+        };
+        let Some(receiver) = dialog.receiver.as_ref() else {
+            return;
+        };
+        let Ok(reply) = receiver.try_recv() else {
+            return;
+        };
+        dialog.receiver = None;
+
+        let account_id = dialog.account_id.clone();
+        let mut fetched: Option<Vec<crate::api::ApiKeyInfo>> = None;
+
+        match reply {
+            ApiKeysReply::List(Ok(keys)) => {
+                dialog.loading = false;
+                dialog.error = None;
+                fetched = Some(keys.clone());
+                dialog.keys = keys;
+            }
+            ApiKeysReply::List(Err(message)) => {
+                dialog.loading = false;
+                dialog.error = Some(message);
+            }
+            ApiKeysReply::Value { result: Ok(value) } => {
+                // 完整 Key 只进剪贴板：不写日志、不落盘
+                ctx.copy_text(value);
+                self.toast = Some(("已复制 API Key".to_owned(), Instant::now()));
+            }
+            ApiKeysReply::Value {
+                result: Err(message),
+            } => dialog.error = Some(message),
+        }
+
+        if let Some(keys) = fetched {
+            self.cache_api_keys(&account_id, &keys);
+        }
+        ctx.request_repaint();
+    }
+
+    /// 把 Key 摘要写进 `accounts.json` 的 `apiKeys`（不含完整 Key）。
+    fn cache_api_keys(&mut self, account_id: &str, keys: &[crate::api::ApiKeyInfo]) {
+        let DataLayer::Ready(store) = &mut self.data else {
+            return;
+        };
+        let values = keys.iter().map(|key| key.to_cache_value()).collect();
+        match store.accounts_mut().set_api_keys(account_id, values) {
+            Ok(true) => log::debug!("已缓存 {} 个 API Key 摘要", keys.len()),
+            Ok(false) => log::debug!("账号已不存在，跳过 API Key 缓存"),
+            Err(err) => log::warn!("API Key 缓存写盘失败：{err:#}"),
+        }
+    }
+
+    /// 后台拉取某个 Key 的完整值（仅用于复制）。
+    fn spawn_copy_api_key(&mut self, ctx: &egui::Context, key_id: &str) {
+        // 先算超时（它借用整个 self），再拿 `api_keys` 的可变借用，
+        // 否则两个借用会冲突。
+        let timeout = self.request_timeout();
+
+        let Some(dialog) = self.api_keys.as_mut() else {
+            return;
+        };
+        let account_id = dialog.account_id.clone();
+
+        let DataLayer::Ready(store) = &self.data else {
+            return;
+        };
+        let Some(account) = store.accounts().iter().find(|item| item.id == account_id) else {
+            return;
+        };
+        let base_url = account.base_url.clone();
+        let secrets_blob = account.secrets.clone();
+        let secret_store = store.secret_store();
+
+        let (sender, receiver) = std::sync::mpsc::channel();
+        dialog.receiver = Some(receiver);
+        let key_id = key_id.to_owned();
+        let repaint = ctx.clone();
+
+        std::thread::spawn(move || {
+            let reply = match crate::secrets::open_credentials(
+                secret_store.as_ref(),
+                &account_id,
+                &secrets_blob,
+            ) {
+                Ok(credentials) => match crate::api::HttpClient::new(&base_url, timeout) {
+                    Ok(client) => client
+                        .api_key_value(&credentials.access_token, &key_id)
+                        .map_err(|err| err.user_message()),
+                    Err(err) => Err(err.user_message()),
+                },
+                Err(err) => Err(format!("凭据无法解密：{err:#}")),
+            };
+            let _ = sender.send(ApiKeysReply::Value { result: reply });
+            repaint.request_repaint();
+        });
+    }
+
+    /// 绘制 API Key 弹窗。
+    fn draw_api_keys(&mut self, ctx: &egui::Context) {
+        let Some(dialog) = self.api_keys.as_mut() else {
+            return;
+        };
+
+        let mut close = false;
+        let mut copy_id: Option<String> = None;
+
+        let modal = egui::Modal::new(egui::Id::unique("api-keys-dialog"))
+            .backdrop_color(egui::Color32::from_black_alpha(150))
+            .frame(
+                egui::Frame::new()
+                    .fill(PANEL_BG)
+                    .corner_radius(egui::CornerRadius::same(12))
+                    .stroke(egui::Stroke::new(1.0, PANEL_BORDER))
+                    .inner_margin(egui::Margin::same(16)),
+            )
+            .show(ctx, |ui| {
+                ui.set_width(300.0);
+                ui.horizontal(|ui| {
+                    ui.label(
+                        egui::RichText::new(format!("API Key · {}", dialog.title))
+                            .size(13.0)
+                            .strong()
+                            .color(TEXT_PRIMARY),
+                    );
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui.button("关闭").clicked() {
+                            close = true;
+                        }
+                    });
+                });
+                ui.add_space(8.0);
+
+                if dialog.loading {
+                    ui.horizontal(|ui| {
+                        ui.spinner();
+                        ui.label(
+                            egui::RichText::new("正在拉取…")
+                                .size(11.0)
+                                .color(TEXT_SECONDARY),
+                        );
+                    });
+                }
+
+                if let Some(error) = dialog.error.as_deref() {
+                    ui.label(
+                        egui::RichText::new(error)
+                            .size(11.0)
+                            .color(egui::Color32::from_rgb(248, 113, 113)),
+                    );
+                }
+
+                if !dialog.loading && dialog.keys.is_empty() && dialog.error.is_none() {
+                    ui.label(
+                        egui::RichText::new("该账号还没有 API Key")
+                            .size(11.0)
+                            .color(TEXT_SECONDARY),
+                    );
+                }
+
+                egui::ScrollArea::vertical()
+                    .max_height(220.0)
+                    .show(ui, |ui| {
+                        for key in &dialog.keys {
+                            ui.horizontal(|ui| {
+                                ui.label(
+                                    egui::RichText::new(&key.name)
+                                        .size(12.0)
+                                        .color(TEXT_PRIMARY),
+                                );
+                                ui.with_layout(
+                                    egui::Layout::right_to_left(egui::Align::Center),
+                                    |ui| {
+                                        if ui
+                                            .add_sized(
+                                                [52.0, 20.0],
+                                                egui::Button::new(
+                                                    egui::RichText::new("复制").size(10.0),
+                                                ),
+                                            )
+                                            .clicked()
+                                        {
+                                            copy_id = Some(key.id.clone());
+                                        }
+                                    },
+                                );
+                            });
+                            ui.label(
+                                egui::RichText::new(&key.masked)
+                                    .size(10.0)
+                                    .color(TEXT_SECONDARY),
+                            );
+                            let mut meta = key.status.clone();
+                            if let Some(group) = &key.group {
+                                meta.push_str(&format!(" · {group}"));
+                            }
+                            if let Some(last_used) = &key.last_used_at {
+                                meta.push_str(&format!(" · 最近使用 {last_used}"));
+                            }
+                            ui.label(egui::RichText::new(meta).size(9.0).color(TEXT_DIM));
+                            ui.add_space(6.0);
+                        }
+                    });
+            });
+
+        if modal.backdrop_response.clicked() {
+            close = true;
+        }
+        if close {
+            self.api_keys = None;
+            return;
+        }
+        if let Some(key_id) = copy_id {
+            self.spawn_copy_api_key(ctx, &key_id);
         }
     }
 
@@ -712,7 +1016,10 @@ impl TrayApp {
         if !ctx.input(|input| input.key_pressed(egui::Key::Escape)) {
             return;
         }
-        if self.pending_delete.is_some() {
+        if self.api_keys.is_some() {
+            log::debug!("Esc：关闭 API Key 弹窗");
+            self.api_keys = None;
+        } else if self.pending_delete.is_some() {
             log::debug!("Esc：取消删除确认");
             self.pending_delete = None;
         } else if self.login.is_open() {
@@ -943,6 +1250,9 @@ impl TrayApp {
 
         // ---- 删除确认（从托盘子菜单进入） ----
         self.draw_delete_confirm(ctx);
+
+        // ---- API Key 弹窗（从托盘子菜单进入，只读 + 复制） ----
+        self.draw_api_keys(ctx);
     }
 
     /// 绘制"退出账号并删除记录"的确认框。
@@ -1058,6 +1368,7 @@ impl eframe::App for TrayApp {
         self.handle_escape(ctx);
         self.poll_login(ctx);
         self.poll_refresh(ctx);
+        self.poll_api_keys(ctx);
         self.maybe_start_refresh(ctx);
         self.handle_focus(ctx);
         self.update_toast(ctx);
