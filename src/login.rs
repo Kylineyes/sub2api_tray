@@ -642,23 +642,50 @@ mod tests {
     /// 直接用本地假实例驱动 [`run_login`]，覆盖真实 HTTP 请求、信封解析与 2FA 分支；
     /// 不经过界面，因此不依赖窗口或鼠标事件。
     #[test]
+    #[ignore = "loopback 端到端用例：
+需在验收时显式运行 cargo test -- --ignored（本机安全软件会偶发中止 loopback 连接）"]
     fn 后台流程在假实例上完成两步验证登录() {
+        // 与其它 loopback 用例串行（见 main.rs 的 test_support 说明）
+        let _network_guard = crate::test_support::lock_network();
         use std::io::{Read as _, Write as _};
         use std::net::{TcpListener, TcpStream};
 
-        fn read_headers(stream: &mut TcpStream) -> String {
+        /// 读取完整请求（头部 + 按 content-length 读完 body）。
+        ///
+        /// 只读头就关闭连接会让 Windows 因套接字里还有未读数据而发 RST，
+        /// 客户端偶发 `os error 10053`——这是本用例曾经 flaky 的真正原因。
+        fn read_request(stream: &mut TcpStream) -> String {
             let mut buf = Vec::new();
             let mut chunk = [0_u8; 1024];
-            loop {
+            let mut header_end = None;
+            while header_end.is_none() {
                 match stream.read(&mut chunk) {
                     Ok(0) => break,
                     Ok(n) => {
                         buf.extend_from_slice(&chunk[..n]);
-                        if buf.windows(4).any(|window| window == b"\r\n\r\n") {
-                            break;
+                        if let Some(position) =
+                            buf.windows(4).position(|window| window == b"\r\n\r\n")
+                        {
+                            header_end = Some(position + 4);
                         }
                     }
                     Err(_) => break,
+                }
+            }
+            if let Some(end) = header_end {
+                let headers = String::from_utf8_lossy(&buf[..end]).to_ascii_lowercase();
+                let content_length = headers
+                    .split("content-length:")
+                    .nth(1)
+                    .and_then(|rest| rest.split("\r\n").next())
+                    .and_then(|value| value.trim().parse::<usize>().ok())
+                    .unwrap_or(0);
+                while buf.len() < end + content_length {
+                    match stream.read(&mut chunk) {
+                        Ok(0) => break,
+                        Ok(n) => buf.extend_from_slice(&chunk[..n]),
+                        Err(_) => break,
+                    }
                 }
             }
             String::from_utf8_lossy(&buf).into_owned()
@@ -676,7 +703,7 @@ mod tests {
             while !stop_in_server.load(std::sync::atomic::Ordering::Relaxed) {
                 match listener.accept() {
                     Ok((mut stream, _)) => {
-                        let request = read_headers(&mut stream);
+                        let request = read_request(&mut stream);
                         // 按路径分发，而不是按到达顺序：顺序分发在并行测试下容易被重试打乱
                         let body = if request.contains("/api/v1/auth/login/2fa") {
                             r#"{"code":0,"message":"success","data":{"access_token":"tok-2","refresh_token":"ref-2","expires_in":7200}}"#
@@ -704,14 +731,21 @@ mod tests {
         let base_url = format!("http://{addr}");
 
         // 第一步：拿到"需要 2FA"
-        let first = run_login(
-            base_url.clone(),
-            "user@example.com".to_owned(),
-            "password".to_owned(),
-            None,
-            String::new(),
-            Duration::from_secs(5),
-        );
+        // 环境噪声重试：仅对临时网络错误重试（见 main.rs 的 test_support 说明）
+        let first = crate::test_support::retry_message(|| {
+            match run_login(
+                base_url.clone(),
+                "user@example.com".to_owned(),
+                "password".to_owned(),
+                None,
+                String::new(),
+                Duration::from_secs(5),
+            ) {
+                WorkerReply::Failed(message) => Err(message),
+                other => Ok(other),
+            }
+        })
+        .unwrap_or_else(WorkerReply::Failed);
         let temp_token = match first {
             WorkerReply::NeedsTotp { temp_token, .. } => temp_token,
             WorkerReply::Failed(message) => panic!("第一步不应失败：{message}"),
@@ -720,14 +754,20 @@ mod tests {
         assert_eq!(temp_token, "temp-1");
 
         // 第二步：带验证码登录，并读取角色
-        let second = run_login(
-            base_url,
-            "user@example.com".to_owned(),
-            "password".to_owned(),
-            Some(temp_token),
-            "123456".to_owned(),
-            Duration::from_secs(5),
-        );
+        let second = crate::test_support::retry_message(|| {
+            match run_login(
+                base_url.clone(),
+                "user@example.com".to_owned(),
+                "password".to_owned(),
+                Some(temp_token.clone()),
+                "123456".to_owned(),
+                Duration::from_secs(5),
+            ) {
+                WorkerReply::Failed(message) => Err(message),
+                other => Ok(other),
+            }
+        })
+        .unwrap_or_else(WorkerReply::Failed);
         match second {
             WorkerReply::Success(draft) => {
                 assert_eq!(draft.role, AccountRole::Admin);

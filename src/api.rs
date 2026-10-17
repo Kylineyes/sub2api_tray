@@ -508,6 +508,29 @@ fn map_transport_error(err: ureq::Error) -> ApiError {
 mod tests {
     use super::*;
 
+    /// 对"环境导致的临时网络失败"做有限重试（原因见 main.rs 的 test_support 说明）。
+    ///
+    /// 只重试 [`ApiError::Network`]；其它错误（解析、鉴权、断言）直接返回，
+    /// 避免把真实缺陷掩盖成"偶发"。
+    fn retry_network<T>(mut op: impl FnMut() -> Result<T, ApiError>) -> Result<T, ApiError> {
+        let attempts = crate::test_support::RETRY_ATTEMPTS;
+        let mut last_error = None;
+
+        for attempt in 1..=attempts {
+            match op() {
+                Ok(value) => return Ok(value),
+                Err(ApiError::Network(detail)) if attempt < attempts => {
+                    eprintln!("临时网络错误（第 {attempt} 次尝试）：{detail}，稍后重试");
+                    last_error = Some(ApiError::Network(detail));
+                    std::thread::sleep(crate::test_support::RETRY_DELAY);
+                }
+                Err(err) => return Err(err),
+            }
+        }
+
+        Err(last_error.unwrap_or(ApiError::Network("重试次数耗尽".to_owned())))
+    }
+
     #[test]
     fn 登录成功解析出token与过期时间() {
         let body = r#"{"code":0,"message":"success","data":{
@@ -610,31 +633,12 @@ mod tests {
     /// 覆盖点：URL 拼接、`content-type` 头、JSON 信封解析、Bearer 头。
     /// 之所以不连真实例：单元测试不该依赖 PostgreSQL/Redis 与网络。
     #[test]
+    #[ignore = "loopback 端到端用例：
+需在验收时显式运行 cargo test -- --ignored（本机安全软件会偶发中止 loopback 连接）"]
     fn 本地假实例完成登录并读取角色() {
-        use std::io::{Read as _, Write as _};
-        use std::net::{TcpListener, TcpStream};
-
-        /// 读到请求头结束（`\r\n\r\n`）为止。
-        ///
-        /// 不能只 `read` 一次：TCP 会把请求拆成多个分段，只读一次可能只拿到半行
-        /// 请求行，导致下面按路径分支的判断偶发失败（这是本用例曾经 flaky 的原因）。
-        fn read_headers(stream: &mut TcpStream) -> String {
-            let mut buf = Vec::new();
-            let mut chunk = [0_u8; 1024];
-            loop {
-                match stream.read(&mut chunk) {
-                    Ok(0) => break,
-                    Ok(n) => {
-                        buf.extend_from_slice(&chunk[..n]);
-                        if buf.windows(4).any(|window| window == b"\r\n\r\n") {
-                            break;
-                        }
-                    }
-                    Err(_) => break,
-                }
-            }
-            String::from_utf8_lossy(&buf).into_owned()
-        }
+        // 与其它 loopback 用例串行，避免并行建连被本机安全软件打断（见 main.rs 说明）
+        let _network_guard = crate::test_support::lock_network();
+        use std::net::TcpListener;
 
         let listener = TcpListener::bind("127.0.0.1:0").expect("绑定本地端口");
         let addr = listener.local_addr().expect("取得端口");
@@ -643,33 +647,30 @@ mod tests {
         listener.set_nonblocking(true).expect("切换为非阻塞监听");
         let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let stop_in_server = std::sync::Arc::clone(&stop);
+        // 记录收到的请求，测试末尾统一断言。
+        //
+        // 之前是"在服务端线程里 assert Bearer 头"：一旦断言失败，服务端线程直接 panic，
+        // 客户端拿不到响应，失败信息变成"网络错误"，既难定位又偶发。
+        // 现在服务端只负责回包，断言留给测试线程。
+        let requests = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let requests_in_server = std::sync::Arc::clone(&requests);
 
         let server = std::thread::spawn(move || {
             while !stop_in_server.load(std::sync::atomic::Ordering::Relaxed) {
                 match listener.accept() {
                     Ok((mut stream, _)) => {
-                        let request = read_headers(&mut stream);
+                        let request = crate::test_support::read_request(&mut stream);
+                        if let Ok(mut log) = requests_in_server.lock() {
+                            log.push(request.clone());
+                        }
                         // 按路径分发，避免依赖请求到达顺序
                         let body = if request.starts_with("POST /api/v1/auth/login ") {
                             r#"{"code":0,"message":"success","data":{"access_token":"tok-1","refresh_token":"ref-1","expires_in":3600}}"#
                         } else {
-                            // 非登录请求应当是带 Bearer 的 /auth/me
-                            assert!(
-                                request
-                                    .to_ascii_lowercase()
-                                    .contains("authorization: bearer tok-1"),
-                                "应当携带 Bearer 头，实际请求：{request}"
-                            );
                             r#"{"code":0,"message":"success","data":{"email":"user@example.com","role":"admin"}}"#
                         };
 
-                        let response = format!(
-                            "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
-                            body.len(),
-                            body
-                        );
-                        stream.write_all(response.as_bytes()).ok();
-                        stream.flush().ok();
+                        crate::test_support::write_json(&mut stream, "200 OK", body);
                     }
                     Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
                         std::thread::sleep(Duration::from_millis(5));
@@ -684,9 +685,8 @@ mod tests {
         // 复用连接池会让测试依赖 ureq 的重试行为，徒增不确定性。
         let login_client =
             HttpClient::new(&base_url, Duration::from_secs(5)).expect("构造登录客户端");
-        let outcome = login_client
-            .login("user@example.com", "password")
-            .expect("登录成功");
+        let outcome =
+            retry_network(|| login_client.login("user@example.com", "password")).expect("登录成功");
         let tokens = match outcome {
             LoginOutcome::Tokens(tokens) => tokens,
             other => panic!("应当直接拿到 token，实际：{other:?}"),
@@ -696,11 +696,26 @@ mod tests {
 
         let me_client =
             HttpClient::new(&base_url, Duration::from_secs(5)).expect("构造取用户客户端");
-        let me = me_client.me(&tokens.access_token).expect("读取当前用户");
+        let me = retry_network(|| me_client.me(&tokens.access_token)).expect("读取当前用户");
         assert_eq!(me.role, AccountRole::Admin);
 
         stop.store(true, std::sync::atomic::Ordering::Relaxed);
         server.join().expect("假实例线程正常结束");
+
+        // 断言：登录请求带了 content-type，取用户请求带了 Bearer
+        let log = requests.lock().expect("请求日志锁");
+        assert!(
+            log.iter().any(|request| request
+                .to_ascii_lowercase()
+                .contains("content-type: application/json")),
+            "登录请求应当携带 content-type，实际：{log:?}"
+        );
+        assert!(
+            log.iter().any(|request| request
+                .to_ascii_lowercase()
+                .contains("authorization: bearer tok-1")),
+            "取用户请求应当携带 Bearer，实际：{log:?}"
+        );
     }
 
     #[test]

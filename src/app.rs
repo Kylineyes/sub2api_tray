@@ -181,6 +181,14 @@ pub struct TrayApp {
     ///
     /// 点托盘子菜单里的"退出账号并删除记录"只设置它，真正的删除在面板的确认框里完成。
     pending_delete: Option<String>,
+
+    /// 当前已经应用到托盘图标上的徽标颜色。
+    ///
+    /// 用来做"只在变化时更新"：`set_icon` 会触发任务栏重绘，每轮刷新都换会闪。
+    badge_applied: Option<[u8; 3]>,
+
+    /// 是否已经应用过一次徽标（区分"还没设过"和"设成无徽标"）。
+    badge_initialized: bool,
 }
 
 impl TrayApp {
@@ -219,7 +227,7 @@ impl TrayApp {
         // 弹窗持有 egui 上下文：后台登录线程靠它唤醒界面
         let login = LoginDialog::new(cc.egui_ctx.clone());
 
-        let app = Self {
+        let mut app = Self {
             tray,
             bridge,
             panel_visible: false,
@@ -236,10 +244,13 @@ impl TrayApp {
             last_round: None,
             started_at: Instant::now(),
             pending_delete: None,
+            badge_applied: None,
+            badge_initialized: false,
         };
 
         // 启动时先按已加载的账号建一次菜单（此时状态都是"未知"）
         app.rebuild_menu();
+        app.update_badge();
 
         Ok(app)
     }
@@ -297,6 +308,51 @@ impl TrayApp {
         match &self.data {
             DataLayer::Ready(store) => store.accounts().len(),
             DataLayer::Unavailable(_) => 0,
+        }
+    }
+
+    /// 当前应该显示的徽标颜色（由运行态聚合而来）。
+    fn badge_color(&self) -> Option<[u8; 3]> {
+        let DataLayer::Ready(store) = &self.data else {
+            return None;
+        };
+
+        let mut online = 0_usize;
+        let mut offline = 0_usize;
+        let mut invalid = 0_usize;
+        for account in store.accounts() {
+            match self
+                .runtime
+                .get(&account.id)
+                .map(|runtime| runtime.status)
+                .unwrap_or_default()
+            {
+                AccountStatus::Online => online += 1,
+                AccountStatus::Offline => offline += 1,
+                AccountStatus::CredentialsInvalid => invalid += 1,
+                _ => {}
+            }
+        }
+
+        aggregate_badge(store.accounts().len(), online, offline, invalid)
+    }
+
+    /// 把聚合出的徽标应用到托盘图标（仅在变化时真正更新）。
+    fn update_badge(&mut self) {
+        let next = self.badge_color();
+        if self.badge_initialized && self.badge_applied == next {
+            return;
+        }
+
+        self.badge_applied = next;
+        self.badge_initialized = true;
+
+        match self.tray.set_badge(next) {
+            Ok(()) => log::info!(
+                "托盘图标状态徽标：{}",
+                next.map(badge_label).unwrap_or("无（状态未知或没有账号）")
+            ),
+            Err(err) => log::warn!("更新托盘徽标失败：{err:#}"),
         }
     }
 
@@ -370,6 +426,10 @@ impl TrayApp {
                     }
                 }
                 TrayCommand::ShowPanel => self.show_panel(ctx),
+                TrayCommand::RefreshNow => {
+                    log::info!("收到手动刷新请求");
+                    self.try_start_refresh(ctx, true);
+                }
                 TrayCommand::OpenLogin => {
                     // 菜单入口：先把面板叫出来，再打开弹窗（弹窗画在面板窗口里）
                     self.show_panel(ctx);
@@ -420,6 +480,7 @@ impl TrayApp {
         }
 
         self.rebuild_menu();
+        self.update_badge();
     }
 
     /// 取一轮刷新结果并写入运行态。
@@ -485,6 +546,7 @@ impl TrayApp {
                 );
 
                 self.rebuild_menu();
+                self.update_badge();
                 ctx.request_repaint();
             }
             Err(TryRecvError::Empty) => {
@@ -540,14 +602,25 @@ impl TrayApp {
         })
     }
 
-    /// 到点就起一轮刷新（同一时间只允许一轮）。
+    /// 定时路径：到点就起一轮刷新（同一时间只允许一轮）。
+    fn maybe_start_refresh(&mut self, ctx: &egui::Context) {
+        self.try_start_refresh(ctx, false);
+    }
+
+    /// 起一轮刷新；`force = true` 表示手动触发（跳过启动延迟与间隔判断）。
     ///
-    /// 触发条件（满足任一）：
+    /// 无论是否 `force`，都受"同一时间只跑一轮"约束：连点"立即刷新"不会并发发请求，
+    /// 否则小实例很容易被自己的手动刷新打成 429。
+    ///
+    /// 自动触发的条件（满足任一）：
     ///
     /// * 距上一轮已超过 `refreshIntervalSeconds`；
     /// * 面板正打开，且有账号数据过期（超过 [`STALE_AFTER`]）。
-    fn maybe_start_refresh(&mut self, ctx: &egui::Context) {
+    fn try_start_refresh(&mut self, ctx: &egui::Context, force: bool) {
         if self.refresh_rx.is_some() {
+            if force {
+                log::debug!("已有刷新在进行中，忽略本次手动刷新");
+            }
             return;
         }
 
@@ -559,16 +632,18 @@ impl TrayApp {
         }
 
         let now = Instant::now();
-        // 首轮延迟：等托盘图标与窗口就绪，避免启动瞬间就发请求
-        if now.saturating_duration_since(self.started_at) < FIRST_REFRESH_DELAY {
-            return;
-        }
+        if !force {
+            // 首轮延迟：等托盘图标与窗口就绪，避免启动瞬间就发请求
+            if now.saturating_duration_since(self.started_at) < FIRST_REFRESH_DELAY {
+                return;
+            }
 
-        let interval = Duration::from_secs(store.config().refresh_interval_seconds.max(1));
-        let due = refresh::should_start_round(now, self.last_round, interval);
-        let stale_while_open = self.panel_visible && self.accounts_need_refresh(now);
-        if !due && !stale_while_open {
-            return;
+            let interval = Duration::from_secs(store.config().refresh_interval_seconds.max(1));
+            let due = refresh::should_start_round(now, self.last_round, interval);
+            let stale_while_open = self.panel_visible && self.accounts_need_refresh(now);
+            if !due && !stale_while_open {
+                return;
+            }
         }
 
         let targets = store
@@ -584,9 +659,14 @@ impl TrayApp {
             self.runtime.mark(&account.id, AccountStatus::Refreshing);
         }
         self.refresh_rx = Some(refresh::spawn_round(targets, secret_store, timeout));
-        log::debug!("开始新一轮状态刷新：{} 个账号", store.accounts().len());
+        log::info!(
+            "开始新一轮状态刷新：{} 个账号（{}）",
+            store.accounts().len(),
+            if force { "手动" } else { "定时" }
+        );
 
         self.rebuild_menu();
+        self.update_badge();
         ctx.request_repaint();
     }
 
@@ -671,6 +751,7 @@ impl TrayApp {
                 self.login.close();
                 // 新账号要立刻出现在托盘菜单里，并尽快刷新一次状态
                 self.rebuild_menu();
+                self.update_badge();
                 self.last_round = None;
                 ctx.request_repaint();
             }
@@ -780,6 +861,8 @@ impl TrayApp {
 
         // 顶部按钮的点击结果：闭包里不能直接改 `self`，先记在局部变量里
         let mut open_login = false;
+        // 总览卡片里「立即刷新」的点击结果
+        let mut refresh_clicked = false;
 
         egui::CentralPanel::default()
             .frame(
@@ -833,7 +916,7 @@ impl TrayApp {
                             ui.add_space(16.0);
                             draw_empty_state(ui);
                         } else {
-                            draw_account_summary(ui, &cards);
+                            draw_account_summary(ui, &cards, &mut refresh_clicked);
                             ui.add_space(12.0);
                             for card in &cards {
                                 draw_account_card(ui, card);
@@ -848,6 +931,10 @@ impl TrayApp {
 
         if open_login {
             self.login.open();
+        }
+        if refresh_clicked {
+            // 手动刷新：绕过定时与启动延迟，但仍受"只跑一轮"约束
+            self.try_start_refresh(ctx, true);
         }
 
         // 弹窗画在面板之后，保证它在最上层（Modal 自带遮罩与输入拦截）
@@ -1145,6 +1232,48 @@ fn menu_title(display: &str, status: AccountStatus) -> String {
     format!("{short} · {}", status.label())
 }
 
+/// 徽标颜色：全部在线（品牌薄荷绿）。
+const BADGE_ONLINE: [u8; 3] = [121, 244, 189];
+
+/// 徽标颜色：有账号离线（琥珀）。
+const BADGE_OFFLINE: [u8; 3] = [251, 191, 36];
+
+/// 徽标颜色：有账号凭据损坏（红）。
+const BADGE_INVALID: [u8; 3] = [248, 113, 113];
+
+/// 根据账号状态数量决定托盘徽标颜色。
+///
+/// 优先级：凭据损坏（红）> 离线（黄）> 全部在线（绿）> 其它（无徽标）。
+/// "凭据损坏"排最前是因为它需要人工处理，比"临时离线"更值得提醒。
+///
+/// 抽成纯函数便于测试：徽标一旦算错，用户会看到误导性的颜色。
+fn aggregate_badge(total: usize, online: usize, offline: usize, invalid: usize) -> Option<[u8; 3]> {
+    if total == 0 {
+        return None;
+    }
+    if invalid > 0 {
+        return Some(BADGE_INVALID);
+    }
+    if offline > 0 {
+        return Some(BADGE_OFFLINE);
+    }
+    if online == total {
+        return Some(BADGE_ONLINE);
+    }
+    // 还有账号处于"未知/刷新中"，此时不给颜色，避免误导
+    None
+}
+
+/// 徽标颜色的中文说明（日志用）。
+fn badge_label(rgb: [u8; 3]) -> &'static str {
+    match rgb {
+        BADGE_ONLINE => "绿色（全部在线）",
+        BADGE_OFFLINE => "黄色（有账号离线）",
+        BADGE_INVALID => "红色（有账号凭据损坏）",
+        _ => "其它",
+    }
+}
+
 /// 状态点颜色。
 fn status_color(status: AccountStatus) -> egui::Color32 {
     match status {
@@ -1156,8 +1285,11 @@ fn status_color(status: AccountStatus) -> egui::Color32 {
     }
 }
 
-/// 绘制账号总览卡片：总数 + 在线/离线/凭据损坏的数量。
-fn draw_account_summary(ui: &mut egui::Ui, cards: &[AccountCard]) {
+/// 绘制账号总览卡片：总数 + 在线/离线/凭据损坏的数量 + 手动刷新按钮。
+///
+/// `refresh_clicked` 用来把"点了立即刷新"回传给调用方：
+/// 绘制函数拿不到 `&mut TrayApp`，只能通过局部标志传递。
+fn draw_account_summary(ui: &mut egui::Ui, cards: &[AccountCard], refresh_clicked: &mut bool) {
     let online = cards
         .iter()
         .filter(|card| card.status == AccountStatus::Online)
@@ -1181,6 +1313,18 @@ fn draw_account_summary(ui: &mut egui::Ui, cards: &[AccountCard]) {
                         .strong()
                         .color(TEXT_PRIMARY),
                 );
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui
+                        .add_sized(
+                            [76.0, 22.0],
+                            egui::Button::new(egui::RichText::new("立即刷新").size(10.0)),
+                        )
+                        .on_hover_text("立刻拉取一次状态，不必等定时刷新")
+                        .clicked()
+                    {
+                        *refresh_clicked = true;
+                    }
+                });
             });
             ui.add_space(4.0);
             ui.label(
@@ -1452,6 +1596,27 @@ mod tests {
     fn 菜单标题带状态且短邮箱不截断() {
         let title = menu_title("zh***@ex***.com", AccountStatus::Online);
         assert_eq!(title, "zh***@ex***.com · 在线");
+    }
+
+    #[test]
+    fn 徽标聚合规则() {
+        // 没有账号：不显示徽标
+        assert_eq!(aggregate_badge(0, 0, 0, 0), None);
+        // 全部在线：绿
+        assert_eq!(aggregate_badge(2, 2, 0, 0), Some(BADGE_ONLINE));
+        // 有离线：黄（即使也有在线的）
+        assert_eq!(aggregate_badge(2, 1, 1, 0), Some(BADGE_OFFLINE));
+        // 有凭据损坏：红（优先级最高，即使也有离线）
+        assert_eq!(aggregate_badge(3, 1, 1, 1), Some(BADGE_INVALID));
+        // 还有未知/刷新中：不给颜色，避免误导
+        assert_eq!(aggregate_badge(2, 1, 0, 0), None);
+    }
+
+    #[test]
+    fn 徽标颜色有中文说明() {
+        assert!(badge_label(BADGE_ONLINE).contains("在线"));
+        assert!(badge_label(BADGE_OFFLINE).contains("离线"));
+        assert!(badge_label(BADGE_INVALID).contains("凭据损坏"));
     }
 
     #[test]
