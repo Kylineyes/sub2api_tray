@@ -13,6 +13,7 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use crate::data::DataLayer;
 use crate::fonts;
 use crate::tray::{TrayBridge, TrayCommand, TrayHandle};
 
@@ -89,12 +90,21 @@ pub struct TrayApp {
     first_frame: bool,
 
     /// 调试开关：进程启动时若存在环境变量 `SUB2API_TRAY_DEBUG_VISIBLE`，
-    /// 就直接弹出面板。
+    /// 就直接弹出面板，并且**不因失焦自动收起**。
     ///
     /// 之所以需要它：托盘程序平时启动后处于“隐身”状态，自动化冒烟测试和
     /// 截图验收都没办法去点托盘图标；有了这个开关就能稳定复现“面板已打开”的画面。
     /// 正常使用时不设置该变量，行为与正式版本完全一致。
     debug_show_on_start: bool,
+
+    /// 数据层。
+    ///
+    /// `Unavailable` 表示 `app.json` / `accounts.json` 读不了或写不了
+    /// （最常见的原因：程序被放在 `Program Files` 这类只读目录）。
+    /// 此时面板顶部会显示红色提示，并且不提供登录入口。
+    ///
+    /// 目前只用到目录与配置；`accounts` / `secrets` 会在 0003、0004 里使用。
+    data: DataLayer,
 }
 
 impl TrayApp {
@@ -102,7 +112,10 @@ impl TrayApp {
     ///
     /// 这个函数在 winit 事件循环内部被调用，此时主线程与事件循环都已就绪，
     /// 满足 `tray-icon` 对“必须先有事件循环”的要求。
-    pub fn new(cc: &eframe::CreationContext<'_>) -> anyhow::Result<Self> {
+    ///
+    /// `data` 由 `main` 在启动时初始化好并移交给这里：数据层失败不应该阻止托盘与面板出现，
+    /// 否则用户会以为程序根本没启动。
+    pub fn new(cc: &eframe::CreationContext<'_>, data: DataLayer) -> anyhow::Result<Self> {
         // 中文字体必须在任何界面绘制之前装好，否则第一帧会是方块
         fonts::install(&cc.egui_ctx);
 
@@ -131,6 +144,7 @@ impl TrayApp {
             last_hidden_at: None,
             first_frame: true,
             debug_show_on_start,
+            data,
         })
     }
 
@@ -164,6 +178,13 @@ impl TrayApp {
     fn handle_focus(&mut self, ctx: &egui::Context) {
         let focused = ctx.input(|i| i.viewport().focused).unwrap_or(true);
         if !self.panel_visible || focused {
+            return;
+        }
+
+        // 调试模式下不自动收起：自动化截图时窗口通常拿不到焦点，
+        // 一旦按失焦处理，面板会在截图前就消失，验收就无从谈起。
+        // 正常运行时这个分支不生效（未设置 SUB2API_TRAY_DEBUG_VISIBLE）。
+        if self.debug_show_on_start {
             return;
         }
 
@@ -246,6 +267,18 @@ impl TrayApp {
             return;
         }
 
+        // 先在闭包外把需要的信息整理成"纯数据"：
+        // 闭包内若再借用 `self.data`，会和 `&mut self` 的方法签名打架，
+        // 提前算出字符串既避免了借用冲突，也让闭包只依赖局部变量。
+        let storage_error = match &self.data {
+            DataLayer::Unavailable(reason) => Some(reason.clone()),
+            DataLayer::Ready(_) => None,
+        };
+        let data_line = match &self.data {
+            DataLayer::Ready(store) => format!("数据目录：{}", shorten_path(store.dir())),
+            DataLayer::Unavailable(_) => "数据目录不可用".to_owned(),
+        };
+
         egui::CentralPanel::default()
             .frame(
                 egui::Frame::new()
@@ -256,17 +289,47 @@ impl TrayApp {
                     .inner_margin(egui::Margin::same(16)),
             )
             .show(ui, |ui| {
-                draw_header(ui);
-                ui.add_space(14.0);
-                draw_status_card(ui);
-                ui.add_space(12.0);
-                draw_primary_action(ui);
-                ui.add_space(16.0);
-                draw_empty_state(ui);
-                // 把页脚推到底部：面板高度固定，内容不足时也不会全部挤在顶部
-                ui.with_layout(egui::Layout::bottom_up(egui::Align::Min), |ui| {
-                    draw_footer(ui, ctx);
-                });
+                // 布局分三段：顶部（标题 + 错误提示）固定、底部（数据目录 + 退出）固定、
+                // 中间内容可滚动。这样即使账号很多或出现很长的错误提示，
+                // 也不会把页脚挤出去与正文重叠。
+                egui::Panel::top("panel_header")
+                    .frame(egui::Frame::NONE.fill(PANEL_BG))
+                    .show(ui, |ui| {
+                        draw_header(ui);
+
+                        if let Some(reason) = storage_error.as_deref() {
+                            ui.add_space(12.0);
+                            draw_storage_banner(ui, reason);
+                        }
+                    });
+
+                egui::Panel::bottom("panel_footer")
+                    .frame(
+                        // 页脚要不透明并留出上边距：滚动区的内容一旦超出，
+                        // 会正好被页脚裁掉，透明背景会让被裁的卡片文字"压"在页脚上。
+                        egui::Frame::NONE.fill(PANEL_BG).inner_margin(egui::Margin {
+                            left: 0,
+                            right: 0,
+                            top: 8,
+                            bottom: 0,
+                        }),
+                    )
+                    .show(ui, |ui| {
+                        draw_footer(ui, ctx, &data_line);
+                    });
+
+                egui::ScrollArea::vertical()
+                    .auto_shrink([false, false])
+                    .show(ui, |ui| {
+                        ui.add_space(14.0);
+                        draw_status_card(ui);
+                        ui.add_space(12.0);
+                        draw_primary_action(ui);
+                        ui.add_space(16.0);
+                        draw_empty_state(ui);
+                        // 给滚动区底部留一点空隙，避免最后一张卡片贴着页脚
+                        ui.add_space(6.0);
+                    });
             });
     }
 }
@@ -499,8 +562,14 @@ fn draw_primary_action(ui: &mut egui::Ui) {
     });
 }
 
-/// 绘制页脚：操作提示 + 退出按钮。
-fn draw_footer(ui: &mut egui::Ui, ctx: &egui::Context) {
+/// 绘制页脚：数据目录提示 + 操作提示 + 退出按钮。
+///
+/// `data_line` 由调用方提前算好（见 `draw_panel`），这样闭包里不需要再借用 `self`。
+fn draw_footer(ui: &mut egui::Ui, ctx: &egui::Context, data_line: &str) {
+    ui.horizontal(|ui| {
+        ui.label(egui::RichText::new(data_line).size(10.0).color(TEXT_DIM));
+    });
+
     ui.horizontal(|ui| {
         ui.label(
             egui::RichText::new("左键托盘图标显示 / 隐藏面板 · Esc 收起")
@@ -515,6 +584,55 @@ fn draw_footer(ui: &mut egui::Ui, ctx: &egui::Context) {
             }
         });
     });
+}
+
+/// 绘制"数据目录不可用"的红色提示条。
+///
+/// 出现这个提示时，程序**不会**创建/改写任何文件，也不会静默换一个目录：
+/// 需求方明确要求"报错并提示用户换目录"，避免用户以为账号已经保存成功。
+fn draw_storage_banner(ui: &mut egui::Ui, reason: &str) {
+    egui::Frame::new()
+        .fill(egui::Color32::from_rgb(69, 26, 26))
+        .corner_radius(egui::CornerRadius::same(10))
+        .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(153, 27, 27)))
+        .inner_margin(egui::Margin::same(10))
+        .show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.label(
+                egui::RichText::new("数据目录不可写，账号无法保存")
+                    .size(12.0)
+                    .strong()
+                    .color(egui::Color32::from_rgb(252, 165, 165)),
+            );
+            ui.add_space(4.0);
+            // 只显示首行：完整错误链可能很长，界面放不下，完整内容在日志里
+            ui.label(
+                egui::RichText::new(reason.lines().next().unwrap_or_default())
+                    .size(10.0)
+                    .color(egui::Color32::from_rgb(254, 202, 202)),
+            );
+            ui.add_space(4.0);
+            ui.label(
+                egui::RichText::new("请把程序移动到可写目录（例如桌面或 D 盘）后重启。")
+                    .size(10.0)
+                    .color(egui::Color32::from_rgb(254, 202, 202)),
+            );
+        });
+}
+
+/// 把路径缩短到适合放在面板底部的一行文字。
+///
+/// 规则：保留最后 40 个字符，前面加省略号。之所以保留"尾部"而不是"开头"，
+/// 是因为用户最需要确认的是"文件到底在哪个目录"，尾部信息量更大。
+fn shorten_path(path: &std::path::Path) -> String {
+    const MAX_CHARS: usize = 40;
+    let text = path.display().to_string();
+    let chars: Vec<char> = text.chars().collect();
+    if chars.len() <= MAX_CHARS {
+        return text;
+    }
+    let tail: String = chars[chars.len() - MAX_CHARS..].iter().collect();
+    format!("…{tail}")
 }
 
 #[cfg(test)]
