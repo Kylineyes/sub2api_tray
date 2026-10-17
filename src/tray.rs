@@ -46,6 +46,9 @@ const MENU_ID_SHOW: &str = "show";
 /// 菜单项 id：打开登录弹窗。
 const MENU_ID_LOGIN: &str = "login";
 
+/// 菜单项 id：立即刷新状态。
+const MENU_ID_REFRESH: &str = "refresh";
+
 /// 菜单项 id：退出程序。
 const MENU_ID_QUIT: &str = "quit";
 
@@ -66,6 +69,8 @@ pub enum TrayCommand {
     ShowPanel,
     /// 打开登录弹窗（菜单项，面板未显示时会先显示面板）。
     OpenLogin,
+    /// 立即刷新一轮状态（菜单项或面板按钮，绕过定时与启动延迟）。
+    RefreshNow,
     /// 删除某个账号（子菜单项，id 为账号 id；需要二次确认）。
     DeleteAccount(String),
     /// 退出整个应用（菜单项）。
@@ -165,6 +170,68 @@ impl TrayHandle {
             .set_tooltip(Some(text))
             .context("更新托盘提示失败")
     }
+
+    /// 更新图标右下角的状态徽标。
+    ///
+    /// * `Some(rgb)`：在基础图标上合成一个该颜色的圆点；
+    /// * `None`：恢复基础图标（没有账号、或状态还不明确时）。
+    ///
+    /// 只在聚合状态变化时由 `app` 调用：`set_icon` 会触发任务栏重绘，
+    /// 每轮都换会闪。失败时保留旧图标，不影响功能。
+    pub fn set_badge(&self, rgb: Option<[u8; 3]>) -> Result<()> {
+        let (mut rgba, width, height) = load_icon_rgba()?;
+        if let Some(rgb) = rgb {
+            compose_badge(&mut rgba, width, height, rgb);
+        }
+        let icon = Icon::from_rgba(rgba, width, height).context("合成状态徽标失败")?;
+        self.icon.set_icon(Some(icon)).context("更新托盘图标失败")
+    }
+}
+
+/// 在 RGBA 缓冲的右下角画一个带深色描边的实心圆点。
+///
+/// 参数：
+///
+/// * `rgba`：`width * height * 4` 的像素缓冲，就地修改；
+/// * `width` / `height`：图标尺寸；
+/// * `rgb`：圆点颜色。
+///
+/// 圆点半径取 `width / 5`（128 图标即 25px），外圈再画 2px 深色描边——
+/// 托盘背景可能是浅色也可能是深色，没有描边的纯色圆点在浅色任务栏上会糊成一片。
+///
+/// 实现上不做抗锯齿：图标会被系统缩放到 16~24px，硬边缘反而更清晰，
+/// 也省掉混合运算。
+pub fn compose_badge(rgba: &mut [u8], width: u32, height: u32, rgb: [u8; 3]) {
+    let radius = (width / 5).max(6) as i32;
+    let ring = radius + 2;
+    // 圆点贴着右下角，留 2px 边距，避免被任务栏裁掉
+    let center_x = width as i32 - radius - 2;
+    let center_y = height as i32 - radius - 2;
+
+    let ring_color = [15_u8, 23, 42];
+
+    for y in 0..height as i32 {
+        for x in 0..width as i32 {
+            let dx = x - center_x;
+            let dy = y - center_y;
+            let distance_sq = dx * dx + dy * dy;
+            if distance_sq > ring * ring {
+                continue;
+            }
+
+            let color = if distance_sq <= radius * radius {
+                rgb
+            } else {
+                ring_color
+            };
+
+            let index = ((y as u32 * width + x as u32) * 4) as usize;
+            rgba[index] = color[0];
+            rgba[index + 1] = color[1];
+            rgba[index + 2] = color[2];
+            rgba[index + 3] = 255;
+        }
+    }
 }
 
 /// 读取并解码内嵌的托盘图标。
@@ -185,6 +252,7 @@ pub fn load_icon_rgba() -> Result<(Vec<u8>, u32, u32)> {
 ///
 /// ```text
 /// 显示面板
+/// 立即刷新
 /// 登陆新用户…
 /// ─────────────
 /// <账号 1> ▸ 退出账号并删除记录
@@ -200,6 +268,7 @@ pub fn build_menu(entries: &[TrayAccountEntry]) -> Result<Menu> {
     let menu = Menu::new();
 
     let show_item = MenuItem::with_id(MENU_ID_SHOW, "显示面板", true, None);
+    let refresh_item = MenuItem::with_id(MENU_ID_REFRESH, "立即刷新", true, None);
     let login_item = MenuItem::with_id(MENU_ID_LOGIN, "登陆新用户…", true, None);
     let version_item = MenuItem::with_id(
         "version",
@@ -209,8 +278,13 @@ pub fn build_menu(entries: &[TrayAccountEntry]) -> Result<Menu> {
     );
     let quit_item = MenuItem::with_id(MENU_ID_QUIT, "退出", true, None);
 
-    menu.append_items(&[&show_item, &login_item, &PredefinedMenuItem::separator()])
-        .context("构建托盘菜单失败")?;
+    menu.append_items(&[
+        &show_item,
+        &refresh_item,
+        &login_item,
+        &PredefinedMenuItem::separator(),
+    ])
+    .context("构建托盘菜单失败")?;
 
     // 每个账号一个子菜单：标题带状态，子菜单里目前只有"退出账号并删除记录"。
     // 将来 API Key 管理也放在这里（见 0004 计划）。
@@ -260,6 +334,7 @@ pub fn install(bridge: Arc<TrayBridge>) -> Result<TrayHandle> {
         let id = event.id.as_ref();
         match id {
             MENU_ID_SHOW => menu_bridge.push(TrayCommand::ShowPanel),
+            MENU_ID_REFRESH => menu_bridge.push(TrayCommand::RefreshNow),
             MENU_ID_LOGIN => menu_bridge.push(TrayCommand::OpenLogin),
             MENU_ID_QUIT => menu_bridge.push(TrayCommand::Quit),
             other => {
@@ -332,5 +407,61 @@ mod tests {
         assert_ne!(MENU_ID_SHOW, MENU_ID_LOGIN);
         assert_ne!(MENU_ID_SHOW, MENU_ID_QUIT);
         assert_ne!(MENU_ID_LOGIN, MENU_ID_QUIT);
+        assert_ne!(MENU_ID_REFRESH, MENU_ID_SHOW);
+        assert_ne!(MENU_ID_REFRESH, MENU_ID_LOGIN);
+        assert_ne!(MENU_ID_REFRESH, MENU_ID_QUIT);
+    }
+
+    /// 构造一个纯色缓冲，便于断言像素。
+    fn solid_rgba(width: u32, height: u32, rgb: [u8; 3]) -> Vec<u8> {
+        let mut rgba = vec![0_u8; (width * height * 4) as usize];
+        // 按 4 字节步进写像素；比 chunks_exact_mut 更直白，也避免 clippy 的常量块提示
+        for index in (0..rgba.len()).step_by(4) {
+            rgba[index] = rgb[0];
+            rgba[index + 1] = rgb[1];
+            rgba[index + 2] = rgb[2];
+            rgba[index + 3] = 255;
+        }
+        rgba
+    }
+
+    #[test]
+    fn 徽标中心是状态色且角落保持原样() {
+        let width = 128_u32;
+        let height = 128_u32;
+        let base = [10_u8, 20, 30];
+        let badge = [121_u8, 244, 189];
+        let mut rgba = solid_rgba(width, height, base);
+
+        compose_badge(&mut rgba, width, height, badge);
+
+        // 圆心附近（右下角）应当变成徽标色
+        let radius = (width / 5).max(6) as i32;
+        let center_x = (width as i32 - radius - 2) as u32;
+        let center_y = (height as i32 - radius - 2) as u32;
+        let index = ((center_y * width + center_x) * 4) as usize;
+        assert_eq!(&rgba[index..index + 3], &badge);
+
+        // 左上角远离徽标，必须保持原样（否则说明圆画大了）
+        assert_eq!(&rgba[0..3], &base);
+
+        // 描边：圆心上方 radius+1 处应当是深色环
+        let ring_y = (center_y as i32 - radius - 1) as u32;
+        let ring_index = ((ring_y * width + center_x) * 4) as usize;
+        assert_ne!(&rgba[ring_index..ring_index + 3], &badge);
+        assert_eq!(rgba[ring_index + 3], 255, "描边必须不透明");
+    }
+
+    #[test]
+    fn 徽标在小图标上不越界() {
+        // 小图标（例如 32px）也要能安全合成
+        let width = 32_u32;
+        let height = 32_u32;
+        let mut rgba = solid_rgba(width, height, [0, 0, 0]);
+
+        compose_badge(&mut rgba, width, height, [255, 0, 0]);
+
+        assert_eq!(rgba.len(), (width * height * 4) as usize);
+        assert_eq!(rgba[3], 255, "alpha 通道应保持有效");
     }
 }
