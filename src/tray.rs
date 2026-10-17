@@ -1,18 +1,24 @@
 //! 系统托盘（Windows 通知区域 / macOS 菜单栏）的封装。
 //!
-//! 这里只负责“图标 + 菜单 + 事件”，不涉及任何业务状态，也没有界面布局。
+//! 这里只负责"图标 + 菜单 + 事件"，不涉及任何业务状态，也没有界面布局。
 //!
 //! # 线程模型（重要）
 //!
 //! `tray-icon` 的事件回调在平台事件循环线程里执行（Windows 上就是 winit 的消息泵线程），
 //! 回调里**不能**直接操作窗口或应用状态。因此这里的做法是：
 //!
-//! 1. 回调只把“用户意图”（[`TrayCommand`]）塞进 [`TrayBridge`] 的队列；
+//! 1. 回调只把"用户意图"（[`TrayCommand`]）塞进 [`TrayBridge`] 的队列；
 //! 2. 顺带调用 `egui::Context::request_repaint()` 唤醒界面；
-//! 3. 下一帧由 `app` 模块取走队列里的指令并真正执行（显示面板、退出等）。
+//! 3. 下一帧由 `app` 模块取走队列里的指令并真正执行（显示面板、打开登录弹窗、删除账号等）。
 //!
 //! 面板隐藏时 eframe 依然会以“只跑逻辑、不绘制”的模式执行 `App::logic`，
 //! 所以这个唤醒链路在窗口不可见时也是通的。
+//!
+//! # 菜单是"快照"
+//!
+//! `muda` 的菜单对象不是 `Send`，只能在主线程创建；而且**一旦创建就无法增删项**。
+//! 所以账号变化（新增/删除/状态刷新）时，做法是"整份重建再 `set_menu`"，
+//! 而不是去改某个子项。重建只发生在状态真正变化时，不会每帧都做。
 //!
 //! # 生命周期
 //!
@@ -23,7 +29,7 @@
 use std::sync::{Arc, Mutex};
 
 use anyhow::{Context as _, Result};
-use tray_icon::menu::{Menu, MenuEvent, MenuItem, PredefinedMenuItem};
+use tray_icon::menu::{Menu, MenuEvent, MenuItem, PredefinedMenuItem, Submenu};
 use tray_icon::{
     Icon, MouseButton, MouseButtonState, Rect as TrayRect, TrayIcon, TrayIconBuilder, TrayIconEvent,
 };
@@ -34,17 +40,35 @@ use tray_icon::{
 /// 不依赖安装目录结构。图标本身是 128×128，交给系统缩放到 16/20/24 像素。
 const TRAY_ICON_PNG: &[u8] = include_bytes!("../assets/tray-icon.png");
 
+/// 菜单项 id：显示面板。
+const MENU_ID_SHOW: &str = "show";
+
+/// 菜单项 id：打开登录弹窗。
+const MENU_ID_LOGIN: &str = "login";
+
+/// 菜单项 id：退出程序。
+const MENU_ID_QUIT: &str = "quit";
+
+/// 账号子菜单里"退出账号并删除记录"的 id 前缀。
+///
+/// 形如 `delete:<uuid>`；菜单重建后 id 会跟着账号变化，所以回调里按前缀解析，
+/// 而不是在安装时把每个 id 都捕获进闭包。
+const MENU_ID_DELETE_PREFIX: &str = "delete:";
+
 /// 托盘需要应用做的事。
 ///
-/// 这是一个很小的枚举，故意不携带复杂数据：托盘回调只做“投递”，
-/// 具体怎么处理（要不要定位、要不要抢焦点）留给 `app` 模块决定。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// 这里不再是 `Copy`：删除账号要带上 id。投递成本仍然很低（Vec push）。
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TrayCommand {
     /// 切换面板显示状态（左键单击托盘图标）。
     TogglePanel,
-    /// 显示面板（右键菜单里的“显示面板”）。
+    /// 显示面板（菜单项）。
     ShowPanel,
-    /// 退出整个应用（右键菜单里的“退出”）。
+    /// 打开登录弹窗（菜单项，面板未显示时会先显示面板）。
+    OpenLogin,
+    /// 删除某个账号（子菜单项，id 为账号 id；需要二次确认）。
+    DeleteAccount(String),
+    /// 退出整个应用（菜单项）。
     Quit,
 }
 
@@ -98,9 +122,16 @@ impl TrayBridge {
     }
 }
 
+/// 账号子菜单需要的信息（由 `app` 根据运行态生成，托盘不关心状态怎么来的）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TrayAccountEntry {
+    /// 账号 id（删除指令要用）。
+    pub id: String,
+    /// 子菜单标题，例如 `zh***@ex***.com · 在线`。
+    pub title: String,
+}
+
 /// 托盘图标的持有者。
-///
-/// 只有两个职责：保持图标存活，以及对外暴露图标在屏幕上的位置（用于面板定位）。
 pub struct TrayHandle {
     /// 真正注册到系统里的托盘图标；drop 即从托盘消失
     icon: TrayIcon,
@@ -117,6 +148,23 @@ impl TrayHandle {
     pub fn rect(&self) -> Option<TrayRect> {
         self.icon.rect()
     }
+
+    /// 用新菜单替换当前菜单。
+    ///
+    /// 必须在主线程调用（`muda` 菜单不是 `Send`）。菜单项发生变化（账号增删、
+    /// 状态刷新）时由 `app` 重建后调用。
+    pub fn set_menu(&self, menu: Menu) {
+        self.icon.set_menu(Some(Box::new(menu)));
+    }
+
+    /// 更新托盘图标的悬停提示。
+    ///
+    /// 失败只影响提示文字，不影响功能，因此返回 `Result` 但调用方可以忽略。
+    pub fn set_tooltip(&self, text: &str) -> Result<()> {
+        self.icon
+            .set_tooltip(Some(text))
+            .context("更新托盘提示失败")
+    }
 }
 
 /// 读取并解码内嵌的托盘图标。
@@ -131,7 +179,65 @@ pub fn load_icon_rgba() -> Result<(Vec<u8>, u32, u32)> {
     Ok((image.into_raw(), width, height))
 }
 
-/// 创建托盘图标、注册右键菜单与事件回调。
+/// 构建整份托盘菜单。
+///
+/// 结构（与 `docs/plans/0004-account-menu.md` 第 4.1 节一致）：
+///
+/// ```text
+/// 显示面板
+/// 登陆新用户…
+/// ─────────────
+/// <账号 1> ▸ 退出账号并删除记录
+/// <账号 2> ▸ 退出账号并删除记录
+/// ─────────────
+/// 版本 v0.1.0（禁用）
+/// ─────────────
+/// 退出
+/// ```
+///
+/// `entries` 的顺序由调用方决定（`app` 按 `createdAt` 升序传入，即添加从早到晚）。
+pub fn build_menu(entries: &[TrayAccountEntry]) -> Result<Menu> {
+    let menu = Menu::new();
+
+    let show_item = MenuItem::with_id(MENU_ID_SHOW, "显示面板", true, None);
+    let login_item = MenuItem::with_id(MENU_ID_LOGIN, "登陆新用户…", true, None);
+    let version_item = MenuItem::with_id(
+        "version",
+        format!("版本 v{}", crate::APP_VERSION),
+        false,
+        None,
+    );
+    let quit_item = MenuItem::with_id(MENU_ID_QUIT, "退出", true, None);
+
+    menu.append_items(&[&show_item, &login_item, &PredefinedMenuItem::separator()])
+        .context("构建托盘菜单失败")?;
+
+    // 每个账号一个子菜单：标题带状态，子菜单里目前只有"退出账号并删除记录"。
+    // 将来 API Key 管理也放在这里（见 0004 计划）。
+    for entry in entries {
+        let submenu = Submenu::new(entry.title.as_str(), true);
+        let delete_item = MenuItem::with_id(
+            format!("{MENU_ID_DELETE_PREFIX}{}", entry.id),
+            "退出账号并删除记录",
+            true,
+            None,
+        );
+        submenu.append(&delete_item).context("构建账号子菜单失败")?;
+        menu.append(&submenu).context("追加账号子菜单失败")?;
+    }
+
+    menu.append_items(&[
+        &PredefinedMenuItem::separator(),
+        &version_item,
+        &PredefinedMenuItem::separator(),
+        &quit_item,
+    ])
+    .context("构建托盘菜单尾部失败")?;
+
+    Ok(menu)
+}
+
+/// 创建托盘图标、注册菜单事件与点击事件。
 ///
 /// 必须在事件循环已经开始运行、且处于主线程时调用（eframe 的 `AppCreator`
 /// 正好满足这个条件）。
@@ -139,38 +245,30 @@ pub fn load_icon_rgba() -> Result<(Vec<u8>, u32, u32)> {
 /// # 菜单设计
 ///
 /// * 左键单击：切换面板（不弹菜单），符合 Windows 托盘工具的常见习惯；
-/// * 右键单击：弹出菜单，包含“显示面板”“版本信息（禁用态）”“退出”。
+/// * 右键单击：弹出菜单（含账号子菜单）。
 pub fn install(bridge: Arc<TrayBridge>) -> Result<TrayHandle> {
     let (rgba, width, height) = load_icon_rgba()?;
     let icon = Icon::from_rgba(rgba, width, height).context("托盘图标 RGBA 数据非法")?;
 
-    // ---- 菜单 ----
-    let menu = Menu::new();
-    let show_item = MenuItem::new("显示面板", true, None);
-    // 版本号做成禁用项，纯展示用途；放在分隔线之间，避免误点
-    let version_item = MenuItem::new(format!("版本 v{}", crate::APP_VERSION), false, None);
-    let quit_item = MenuItem::new("退出", true, None);
-    menu.append_items(&[
-        &show_item,
-        &PredefinedMenuItem::separator(),
-        &version_item,
-        &PredefinedMenuItem::separator(),
-        &quit_item,
-    ])
-    .context("构建托盘菜单失败")?;
+    // 初始菜单没有账号；`app` 拿到数据层后会立刻用真实账号重建一次。
+    let menu = build_menu(&[])?;
 
     // ---- 菜单事件 ----
-    // 先克隆出菜单 id 再 move 进闭包：菜单项本身要交给托盘持有，不能一并移走。
+    // 只注册一次：菜单会被整份替换，但 id 规则不变，所以按 id 字符串分发即可。
     let menu_bridge = Arc::clone(&bridge);
-    let show_id = show_item.id().clone();
-    let quit_id = quit_item.id().clone();
     MenuEvent::set_event_handler(Some(move |event: MenuEvent| {
-        if event.id == show_id {
-            menu_bridge.push(TrayCommand::ShowPanel);
-        } else if event.id == quit_id {
-            menu_bridge.push(TrayCommand::Quit);
+        let id = event.id.as_ref();
+        match id {
+            MENU_ID_SHOW => menu_bridge.push(TrayCommand::ShowPanel),
+            MENU_ID_LOGIN => menu_bridge.push(TrayCommand::OpenLogin),
+            MENU_ID_QUIT => menu_bridge.push(TrayCommand::Quit),
+            other => {
+                if let Some(account_id) = other.strip_prefix(MENU_ID_DELETE_PREFIX) {
+                    menu_bridge.push(TrayCommand::DeleteAccount(account_id.to_owned()));
+                }
+                // 版本项是禁用的，不会产生事件；其它未知 id 直接忽略
+            }
         }
-        // 其他菜单项（例如版本信息）是禁用的，不会产生事件，直接忽略即可
     }));
 
     // ---- 托盘图标事件 ----
@@ -205,4 +303,34 @@ pub fn install(bridge: Arc<TrayBridge>) -> Result<TrayHandle> {
     log::info!("托盘图标已就绪");
 
     Ok(TrayHandle { icon: icon_handle })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn 菜单标题允许中文与状态后缀() {
+        // 只验证"标题是可构造的字符串"，不涉及系统菜单对象（那需要事件循环）
+        let entry = TrayAccountEntry {
+            id: "8f14e45f".to_owned(),
+            title: "zh***@ex***.com · 在线".to_owned(),
+        };
+        assert!(entry.title.contains("在线"));
+    }
+
+    #[test]
+    fn 删除菜单id可以还原出账号id() {
+        let id = format!("{MENU_ID_DELETE_PREFIX}abc-123");
+        let restored = id.strip_prefix(MENU_ID_DELETE_PREFIX).expect("前缀应匹配");
+        assert_eq!(restored, "abc-123");
+    }
+
+    #[test]
+    fn 菜单常量互不相同() {
+        // 防止将来改常量时把两个入口写成同一个 id（会导致点击行为串台）
+        assert_ne!(MENU_ID_SHOW, MENU_ID_LOGIN);
+        assert_ne!(MENU_ID_SHOW, MENU_ID_QUIT);
+        assert_ne!(MENU_ID_LOGIN, MENU_ID_QUIT);
+    }
 }

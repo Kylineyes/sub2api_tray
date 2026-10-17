@@ -1,0 +1,513 @@
+//! 账号状态刷新：串行请求 + token 失效恢复链。
+//!
+//! # 为什么要有恢复链
+//!
+//! 登录拿到的 access token 24 小时就过期。如果每轮刷新遇到 401 就标"离线"，
+//! 用户第二天打开面板会看到一片红点，却不知道为什么。恢复链的顺序是：
+//!
+//! ```text
+//! 401 ──▶ 用 refresh_token 续期 ──成功──▶ 重试 /auth/me
+//!          │失败
+//!          ▼
+//!        用加密保存的密码重新登录 ──成功──▶ 重试 /auth/me
+//!          │失败
+//!          ▼
+//!        标记「凭据损坏」，等用户手动重新登录
+//! ```
+//!
+//! 每次续期/重登成功后都会把新凭据回传给主线程落库（`rotated`），
+//! 所以重启后不需要再走一遍恢复链。
+//!
+//! # 为什么串行
+//!
+//! 一轮刷新会打 2N 个请求（每个账号 me + summary）。并行虽然快，但小实例很容易被
+//! 打成 429，反而把状态弄成"离线"。这里串行执行，账号之间留 200ms 间隔。
+
+use std::sync::Arc;
+use std::sync::mpsc::{self, Receiver};
+use std::time::{Duration, Instant};
+
+use crate::accounts::Account;
+use crate::api::{ApiError, HttpClient, LoginOutcome, MeInfo, SubscriptionSummary};
+use crate::secrets::{self, Credentials, SecretStore};
+
+/// 相邻账号之间的等待，避免一轮刷新把实例打满。
+const ACCOUNT_GAP: Duration = Duration::from_millis(200);
+
+/// 一次刷新的结果。
+#[derive(Debug)]
+pub enum RefreshOutcome {
+    /// 刷新成功；`rotated` 非空表示 token 被续期或账号被重新登录过，需要落库。
+    Online {
+        /// 最新的用户信息（角色、余额）。
+        status: MeInfo,
+        /// 订阅摘要；接口失败时为 `None`（不影响在线判定）。
+        summary: Option<SubscriptionSummary>,
+        /// 续期/重登后的新凭据。
+        rotated: Option<Credentials>,
+    },
+    /// 网络或服务端错误；token 可能仍然有效，下一轮会重试。
+    Offline(String),
+    /// token 与密码都无法恢复，必须人工重新登录。
+    CredentialsInvalid(String),
+}
+
+/// 单个账号的刷新结果。
+#[derive(Debug)]
+pub struct RoundResult {
+    /// 账号 id。
+    pub id: String,
+    /// 结果。
+    pub outcome: RefreshOutcome,
+}
+
+/// 一轮刷新要处理的账号快照。
+///
+/// 只带线程需要的最小字段：id（钥匙串条目）、地址、邮箱（重登用）、加密凭据。
+#[derive(Debug, Clone)]
+pub struct RefreshTarget {
+    /// 账号 id。
+    pub id: String,
+    /// 实例地址（已归一化）。
+    pub base_url: String,
+    /// 登录邮箱。
+    pub email: String,
+    /// 加密凭据块。
+    pub secrets: String,
+}
+
+impl RefreshTarget {
+    /// 从持久化账号构造刷新目标。
+    pub fn from_account(account: &Account) -> Self {
+        Self {
+            id: account.id.clone(),
+            base_url: account.base_url.clone(),
+            email: account.email.clone(),
+            secrets: account.secrets.clone(),
+        }
+    }
+}
+
+/// 401 之后该做什么。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RecoverAction {
+    /// 先用 refresh token 续期。
+    Refresh,
+    /// 再用保存的密码重新登录。
+    Relogin,
+    /// 都失败过，标记凭据损坏。
+    MarkInvalid,
+}
+
+/// 根据"已经尝试过几次恢复"决定下一步动作。
+///
+/// 抽成纯函数是为了能直接测：恢复链一旦写错，用户会看到账号被误判为"凭据损坏"，
+/// 这比"刷新慢一点"严重得多。
+pub fn next_recovery_action(attempts_done: u8) -> RecoverAction {
+    match attempts_done {
+        0 => RecoverAction::Refresh,
+        1 => RecoverAction::Relogin,
+        _ => RecoverAction::MarkInvalid,
+    }
+}
+
+/// 是否该开始新一轮刷新。
+///
+/// * 从未刷新过 → 立刻开始（首刷由调用方延后几秒，等托盘/窗口就绪）；
+/// * 距离上一轮已超过间隔 → 开始。
+pub fn should_start_round(now: Instant, last_round: Option<Instant>, interval: Duration) -> bool {
+    match last_round {
+        None => true,
+        Some(at) => now.saturating_duration_since(at) >= interval,
+    }
+}
+
+/// 起一个后台线程跑一轮刷新，返回结果通道。
+///
+/// 线程按顺序处理账号，全部结束后一次性回传结果；调用方在界面线程里
+/// 用 `try_recv` 取（`Ok` 即整轮完成，`Empty` 表示还在跑）。
+pub fn spawn_round(
+    targets: Vec<RefreshTarget>,
+    store: Arc<dyn SecretStore>,
+    timeout: Duration,
+) -> Receiver<Vec<RoundResult>> {
+    let (sender, receiver) = mpsc::channel();
+
+    std::thread::spawn(move || {
+        let mut results = Vec::with_capacity(targets.len());
+        for (index, target) in targets.iter().enumerate() {
+            if index > 0 {
+                std::thread::sleep(ACCOUNT_GAP);
+            }
+            results.push(refresh_one(target, store.as_ref(), timeout));
+        }
+        // 通道关闭说明应用已退出：忽略发送错误
+        let _ = sender.send(results);
+    });
+
+    receiver
+}
+
+/// 刷新单个账号（在后台线程里执行）。
+fn refresh_one(target: &RefreshTarget, store: &dyn SecretStore, timeout: Duration) -> RoundResult {
+    let id = target.id.clone();
+
+    let mut credentials = match secrets::open_credentials(store, &target.id, &target.secrets) {
+        Ok(credentials) => credentials,
+        Err(err) => {
+            // 解密失败（换了 Windows 用户/机器，或钥匙串条目被删）属于"凭据损坏"
+            log::warn!("账号 {id} 凭据解密失败：{err:#}");
+            return RoundResult {
+                id,
+                outcome: RefreshOutcome::CredentialsInvalid(
+                    "凭据无法解密，请重新登录该账号".to_owned(),
+                ),
+            };
+        }
+    };
+
+    let client = match HttpClient::new(&target.base_url, timeout) {
+        Ok(client) => client,
+        Err(err) => {
+            return RoundResult {
+                id,
+                outcome: RefreshOutcome::Offline(err.user_message()),
+            };
+        }
+    };
+
+    let mut attempts = 0_u8;
+    let mut rotated = false;
+
+    loop {
+        match client.me(&credentials.access_token) {
+            Ok(status) => {
+                // 订阅摘要失败不影响"在线"判定：余额/登录态才是主信息
+                let summary = match client.subscription_summary(&credentials.access_token) {
+                    Ok(summary) => Some(summary),
+                    Err(err) => {
+                        log::debug!("账号 {id} 订阅摘要获取失败：{}", err.detail());
+                        None
+                    }
+                };
+                return RoundResult {
+                    id,
+                    outcome: RefreshOutcome::Online {
+                        status,
+                        summary,
+                        rotated: rotated.then(|| credentials.clone()),
+                    },
+                };
+            }
+            Err(ApiError::Unauthorized) => match next_recovery_action(attempts) {
+                RecoverAction::Refresh => {
+                    attempts += 1;
+                    log::info!("账号 {id} token 失效，尝试续期");
+                    match client.refresh(&credentials.refresh_token) {
+                        Ok(tokens) => {
+                            credentials.access_token = tokens.access_token;
+                            if !tokens.refresh_token.is_empty() {
+                                credentials.refresh_token = tokens.refresh_token;
+                            }
+                            rotated = true;
+                        }
+                        Err(err) => {
+                            log::warn!("账号 {id} 续期失败：{}", err.detail());
+                        }
+                    }
+                }
+                RecoverAction::Relogin => {
+                    attempts += 1;
+                    log::info!("账号 {id} 续期失败，尝试用保存的密码重新登录");
+                    match client.login(&target.email, &credentials.password) {
+                        Ok(LoginOutcome::Tokens(tokens)) => {
+                            credentials.access_token = tokens.access_token;
+                            if !tokens.refresh_token.is_empty() {
+                                credentials.refresh_token = tokens.refresh_token;
+                            }
+                            rotated = true;
+                        }
+                        Ok(LoginOutcome::NeedsTotp { .. }) => {
+                            return RoundResult {
+                                id,
+                                outcome: RefreshOutcome::CredentialsInvalid(
+                                    "该账号开启了 2FA，自动重登不可用，请手动重新登录".to_owned(),
+                                ),
+                            };
+                        }
+                        Err(err) => {
+                            return RoundResult {
+                                id,
+                                outcome: RefreshOutcome::CredentialsInvalid(format!(
+                                    "账号密码已失效，请重新登录（{}）",
+                                    err.user_message()
+                                )),
+                            };
+                        }
+                    }
+                }
+                RecoverAction::MarkInvalid => {
+                    return RoundResult {
+                        id,
+                        outcome: RefreshOutcome::CredentialsInvalid(
+                            "登录状态与密码均无法恢复，请重新登录".to_owned(),
+                        ),
+                    };
+                }
+            },
+            Err(err) => {
+                // 网络/5xx/限流：保持账号记录，标记离线，下一轮重试
+                return RoundResult {
+                    id,
+                    outcome: RefreshOutcome::Offline(err.user_message()),
+                };
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn 恢复链顺序为续期再重登最后判死() {
+        assert_eq!(next_recovery_action(0), RecoverAction::Refresh);
+        assert_eq!(next_recovery_action(1), RecoverAction::Relogin);
+        assert_eq!(next_recovery_action(2), RecoverAction::MarkInvalid);
+        assert_eq!(next_recovery_action(9), RecoverAction::MarkInvalid);
+    }
+
+    #[test]
+    fn 首轮刷新立即开始() {
+        assert!(should_start_round(
+            Instant::now(),
+            None,
+            Duration::from_secs(300)
+        ));
+    }
+
+    #[test]
+    fn 未到间隔不刷新() {
+        let now = Instant::now();
+        let last = now - Duration::from_secs(10);
+        assert!(!should_start_round(
+            now,
+            Some(last),
+            Duration::from_secs(300)
+        ));
+    }
+
+    #[test]
+    fn 超过间隔刷新() {
+        let now = Instant::now();
+        let last = now - Duration::from_secs(400);
+        assert!(should_start_round(
+            now,
+            Some(last),
+            Duration::from_secs(300)
+        ));
+    }
+
+    /// 端到端：假实例先对旧 token 返回 401，续期后接受新 token。
+    #[test]
+    fn 续期成功后状态在线并回传新凭据() {
+        use std::io::{Read as _, Write as _};
+        use std::net::{TcpListener, TcpStream};
+
+        fn read_headers(stream: &mut TcpStream) -> String {
+            let mut buf = Vec::new();
+            let mut chunk = [0_u8; 1024];
+            loop {
+                match stream.read(&mut chunk) {
+                    Ok(0) => break,
+                    Ok(n) => {
+                        buf.extend_from_slice(&chunk[..n]);
+                        if buf.windows(4).any(|window| window == b"\r\n\r\n") {
+                            break;
+                        }
+                    }
+                    Err(_) => break,
+                }
+            }
+            String::from_utf8_lossy(&buf).into_owned()
+        }
+
+        let listener = TcpListener::bind("127.0.0.1:0").expect("绑定端口");
+        let addr = listener.local_addr().expect("取得端口");
+        listener.set_nonblocking(true).expect("非阻塞监听");
+        let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let stop_in_server = Arc::clone(&stop);
+
+        let server = std::thread::spawn(move || {
+            while !stop_in_server.load(std::sync::atomic::Ordering::Relaxed) {
+                match listener.accept() {
+                    Ok((mut stream, _)) => {
+                        let request = read_headers(&mut stream);
+                        let lower = request.to_ascii_lowercase();
+
+                        let (status_line, body) = if lower.contains("/api/v1/auth/refresh") {
+                            (
+                                "200 OK",
+                                r#"{"code":0,"message":"success","data":{"access_token":"tok-new","refresh_token":"ref-new","expires_in":3600}}"#.to_owned(),
+                            )
+                        } else if lower.contains("/api/v1/subscriptions/summary") {
+                            (
+                                "200 OK",
+                                r#"{"code":0,"message":"success","data":{"active_count":1,"total_used_usd":2.5,"subscriptions":[{"group_name":"默认分组"}]}}"#.to_owned(),
+                            )
+                        } else if lower.contains("authorization: bearer tok-new") {
+                            (
+                                "200 OK",
+                                r#"{"code":0,"message":"success","data":{"email":"user@example.com","role":"admin","balance":5.0}}"#.to_owned(),
+                            )
+                        } else {
+                            (
+                                "401 Unauthorized",
+                                r#"{"code":401,"message":"expired"}"#.to_owned(),
+                            )
+                        };
+
+                        let response = format!(
+                            "HTTP/1.1 {status_line}\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                            body.len()
+                        );
+                        stream.write_all(response.as_bytes()).ok();
+                        stream.flush().ok();
+                    }
+                    Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
+                        std::thread::sleep(Duration::from_millis(5));
+                    }
+                    Err(_) => break,
+                }
+            }
+        });
+
+        let store: Arc<dyn SecretStore> = Arc::from(crate::secrets::system_store());
+        let account_id = "account-rotated";
+        let credentials = Credentials {
+            password: "password".to_owned(),
+            access_token: "tok-old".to_owned(),
+            refresh_token: "ref-old".to_owned(),
+        };
+        let sealed =
+            secrets::seal_credentials(store.as_ref(), account_id, &credentials).expect("加密凭据");
+
+        let target = RefreshTarget {
+            id: account_id.to_owned(),
+            base_url: format!("http://{addr}"),
+            email: "user@example.com".to_owned(),
+            secrets: sealed,
+        };
+
+        let receiver = spawn_round(vec![target], Arc::clone(&store), Duration::from_secs(5));
+        let results = receiver
+            .recv_timeout(Duration::from_secs(15))
+            .expect("等待刷新结果");
+
+        stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        server.join().expect("假实例线程结束");
+
+        assert_eq!(results.len(), 1);
+        match &results[0].outcome {
+            RefreshOutcome::Online {
+                status,
+                summary,
+                rotated,
+            } => {
+                assert_eq!(status.balance, Some(5.0));
+                assert_eq!(
+                    summary.as_ref().map(|item| item.active_count),
+                    Some(1),
+                    "订阅摘要应当被解析"
+                );
+                let rotated = rotated.as_ref().expect("续期成功后应回传新凭据");
+                assert_eq!(rotated.access_token, "tok-new");
+                assert_eq!(rotated.refresh_token, "ref-new");
+            }
+            other => panic!("应当在线，实际：{other:?}"),
+        }
+    }
+
+    #[test]
+    fn 凭据无法解密时标记损坏() {
+        let store: Arc<dyn SecretStore> = Arc::from(crate::secrets::system_store());
+        let target = RefreshTarget {
+            id: "broken".to_owned(),
+            base_url: "http://127.0.0.1:9".to_owned(),
+            email: "user@example.com".to_owned(),
+            secrets: "enc:dpapi:v1:not-a-real-cipher".to_owned(),
+        };
+
+        let receiver = spawn_round(vec![target], store, Duration::from_secs(2));
+        let results = receiver
+            .recv_timeout(Duration::from_secs(10))
+            .expect("等待结果");
+
+        match &results[0].outcome {
+            RefreshOutcome::CredentialsInvalid(message) => {
+                assert!(message.contains("重新登录"));
+            }
+            other => panic!("应当判定凭据损坏，实际：{other:?}"),
+        }
+    }
+
+    /// 手工验收：对**真实**实例刷新状态并取回余额/订阅摘要。
+    ///
+    /// 需要数据目录里已经有账号（先用 `真实实例完成登录流程并可落库` 播种）：
+    ///
+    /// ```powershell
+    /// $env:SUB2API_ACCEPTANCE_DATA_DIR = "target/portable-test"
+    /// cargo test 真实实例刷新 -- --ignored --nocapture
+    /// ```
+    #[test]
+    #[ignore = "需要真实实例与已播种的账号，见函数文档"]
+    fn 真实实例刷新状态并取回余额() {
+        let dir = std::env::var("SUB2API_ACCEPTANCE_DATA_DIR")
+            .expect("缺少环境变量 SUB2API_ACCEPTANCE_DATA_DIR（见用例文档）");
+        let dir = std::path::PathBuf::from(dir);
+
+        let (accounts, _) = crate::accounts::load_or_create(&dir).expect("加载账号文件");
+        assert!(
+            !accounts.accounts().is_empty(),
+            "数据目录里还没有账号，请先跑登录验收用例"
+        );
+
+        let targets = accounts
+            .accounts()
+            .iter()
+            .map(RefreshTarget::from_account)
+            .collect::<Vec<_>>();
+        let secret_store: Arc<dyn SecretStore> = Arc::from(crate::secrets::system_store());
+
+        let receiver = spawn_round(targets, secret_store, Duration::from_secs(15));
+        let results = receiver
+            .recv_timeout(Duration::from_secs(60))
+            .expect("等待真实实例刷新结果");
+
+        assert_eq!(results.len(), accounts.accounts().len());
+        for result in &results {
+            match &result.outcome {
+                RefreshOutcome::Online {
+                    status,
+                    summary,
+                    rotated,
+                } => {
+                    assert!(status.balance.is_some(), "应当取回余额");
+                    eprintln!(
+                        "真实刷新通过：balance={:?} 订阅数={:?} 续期={}",
+                        status.balance,
+                        summary.as_ref().map(|item| item.active_count),
+                        rotated.is_some()
+                    );
+                }
+                RefreshOutcome::Offline(message) => {
+                    panic!("真实实例刷新失败（离线）：{message}")
+                }
+                RefreshOutcome::CredentialsInvalid(message) => {
+                    panic!("真实实例刷新失败（凭据损坏）：{message}")
+                }
+            }
+        }
+    }
+}

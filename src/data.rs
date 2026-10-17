@@ -11,6 +11,7 @@
 //! [`DataLayer::Unavailable`]：面板会显示一条红色提示，登录入口保持不可用。
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use anyhow::Result;
 
@@ -37,7 +38,10 @@ pub struct DataStore {
     /// 账号存储（已按添加时间排序）。
     accounts: AccountsStore,
     /// 系统凭据存储（DPAPI / 钥匙串）。
-    secrets: Box<dyn SecretStore>,
+    ///
+    /// 用 `Arc` 而不是 `Box`：刷新线程需要在后台解密凭据，必须能把存储实现
+    /// 克隆一份送进线程（`SecretStore: Send + Sync`）。
+    secrets: Arc<dyn SecretStore>,
 }
 
 impl DataStore {
@@ -63,7 +67,7 @@ impl DataStore {
             dir,
             config,
             accounts,
-            secrets: secrets::system_store(),
+            secrets: Arc::from(secrets::system_store()),
         })
     }
 
@@ -90,6 +94,11 @@ impl DataStore {
     /// 系统凭据存储：加密保存密码/token、删除账号时清钥匙串条目。
     pub fn secrets(&self) -> &dyn SecretStore {
         self.secrets.as_ref()
+    }
+
+    /// 可克隆的凭据存储句柄（刷新线程用）。
+    pub fn secret_store(&self) -> Arc<dyn SecretStore> {
+        Arc::clone(&self.secrets)
     }
 
     /// 按 `app.json` 的 `maskAccounts` 决定是否打码账号名。

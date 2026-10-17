@@ -218,6 +218,33 @@ impl AccountsStore {
         Ok(Some(removed))
     }
 
+    /// 更新某个账号的加密凭据与时间戳（token 续期 / 自动重登之后调用）。
+    ///
+    /// 返回 `false` 表示账号已不存在（例如刷新期间被用户删除），调用方忽略即可。
+    /// 与其它写操作一致：先落盘成功，再提交内存状态。
+    pub fn update_credentials(
+        &mut self,
+        id: &str,
+        secrets: String,
+        token_expires_at: Option<String>,
+        last_login_at: Option<String>,
+    ) -> Result<bool> {
+        let Some(index) = self.accounts.iter().position(|account| account.id == id) else {
+            return Ok(false);
+        };
+
+        let mut next = self.accounts.clone();
+        next[index].secrets = secrets;
+        next[index].token_expires_at = token_expires_at;
+        if last_login_at.is_some() {
+            next[index].last_login_at = last_login_at;
+        }
+
+        self.persist(&next)?;
+        self.accounts = next;
+        Ok(true)
+    }
+
     /// 把当前内存状态写回磁盘。
     pub fn save(&self) -> Result<()> {
         self.persist(&self.accounts)

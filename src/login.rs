@@ -743,4 +743,101 @@ mod tests {
         stop.store(true, std::sync::atomic::Ordering::Relaxed);
         server.join().expect("假实例线程正常结束");
     }
+
+    /// 手工验收：用**真实**实例跑完整登录线程，并可选地把账号写入指定数据目录。
+    ///
+    /// 默认忽略，需要时显式执行（凭据只从环境变量读取，不写进代码）：
+    ///
+    /// ```powershell
+    /// $env:SUB2API_ACCEPTANCE_URL = "http://your-host:8080"
+    /// $env:SUB2API_ACCEPTANCE_EMAIL = "you@example.com"
+    /// $env:SUB2API_ACCEPTANCE_PASSWORD = "******"
+    /// # 可选：把账号写进这个目录，方便用真实二进制验收菜单/面板
+    /// $env:SUB2API_ACCEPTANCE_DATA_DIR = "target/portable-test"
+    /// cargo test 真实实例 -- --ignored --nocapture
+    /// ```
+    #[test]
+    #[ignore = "需要真实实例与凭据，见函数文档"]
+    fn 真实实例完成登录流程并可落库() {
+        let read = |name: &str| {
+            std::env::var(name).unwrap_or_else(|_| panic!("缺少环境变量 {name}（见用例文档）"))
+        };
+        let base_url = read("SUB2API_ACCEPTANCE_URL");
+        let email = read("SUB2API_ACCEPTANCE_EMAIL");
+        let password = read("SUB2API_ACCEPTANCE_PASSWORD");
+
+        let reply = run_login(
+            base_url,
+            email.clone(),
+            password,
+            None,
+            String::new(),
+            Duration::from_secs(15),
+        );
+
+        let draft = match reply {
+            WorkerReply::Success(draft) => draft,
+            WorkerReply::Failed(message) => panic!("真实实例登录失败：{message}"),
+            WorkerReply::NeedsTotp { .. } => {
+                panic!("该账号要求 2FA，本用例只覆盖无 2FA 的验收流程")
+            }
+        };
+
+        assert_eq!(draft.email, email);
+        assert!(!draft.credentials.access_token.is_empty());
+        assert!(draft.expires_at.is_some(), "应当算出 token 过期时间");
+        eprintln!(
+            "真实实例登录流程通过：role={:?} base_url={} token_len={}",
+            draft.role,
+            draft.base_url,
+            draft.credentials.access_token.len()
+        );
+
+        // 可选：落库到指定目录，供真实二进制验收使用
+        let Ok(dir) = std::env::var("SUB2API_ACCEPTANCE_DATA_DIR") else {
+            return;
+        };
+        let dir = std::path::PathBuf::from(dir);
+
+        let (mut store, _) = crate::accounts::load_or_create(&dir).expect("加载账号文件");
+        let mut account = crate::accounts::Account::new(
+            draft.base_url.clone(),
+            draft.email.clone(),
+            draft.role,
+            String::new(),
+        );
+        account.last_login_at = Some(crate::accounts::now_rfc3339());
+        account.token_expires_at = draft.expires_at.clone();
+        let secret_store = crate::secrets::system_store();
+        account.secrets = crate::secrets::seal_credentials(
+            secret_store.as_ref(),
+            &account.id,
+            &draft.credentials,
+        )
+        .expect("加密凭据");
+
+        match store.add(account) {
+            Ok(()) => eprintln!("账号已写入：{}", dir.display()),
+            // 重复账号属于正常情况（第二次跑验收），不算失败
+            Err(err) => eprintln!("账号未写入（可能已存在）：{err:#}"),
+        }
+
+        // 重新加载一遍，验证"加密写入 → 读回 → 字段完整"
+        let (reloaded, _) = crate::accounts::load_or_create(&dir).expect("重新加载账号文件");
+        let saved = reloaded
+            .accounts()
+            .iter()
+            .find(|item| item.email.eq_ignore_ascii_case(&draft.email))
+            .expect("落库后应当能重新读到该账号");
+        assert!(!saved.secrets.is_empty());
+        assert!(
+            crate::secrets::open_credentials(secret_store.as_ref(), &saved.id, &saved.secrets)
+                .is_ok(),
+            "重新加载后的凭据应当能解密"
+        );
+        eprintln!(
+            "落库校验通过：共 {} 个账号，凭据可解密",
+            reloaded.accounts().len()
+        );
+    }
 }
