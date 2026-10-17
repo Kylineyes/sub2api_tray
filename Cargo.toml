@@ -28,6 +28,7 @@ serde_json = "1.0.154"
 # createdAt / tokenExpiresAt 等时间的 RFC3339 解析与格式化
 time = { version = "0.3.55", features = ["formatting", "parsing", "macros"] }
 tray-icon = "0.26.1"
+ureq = "3.4.2"
 # 实例地址的解析、校验与归一化（去尾斜杠、小写主机名）
 url = "2.5.8"
 # 账号 id（UUID v4）

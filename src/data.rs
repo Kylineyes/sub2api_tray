@@ -83,25 +83,18 @@ impl DataStore {
     }
 
     /// 可变账号存储：登录成功后落库、删除账号时使用。
-    ///
-    /// 目前（0002）还没有调用方，留给 0003/0004。
-    #[allow(dead_code, reason = "0003 登录落库与 0004 删除账号使用")]
     pub fn accounts_mut(&mut self) -> &mut AccountsStore {
         &mut self.accounts
     }
 
     /// 系统凭据存储：加密保存密码/token、删除账号时清钥匙串条目。
-    ///
-    /// 目前（0002）还没有调用方，留给 0003/0004。
-    #[allow(dead_code, reason = "0003 保存凭据与 0004 删除凭据使用")]
     pub fn secrets(&self) -> &dyn SecretStore {
         self.secrets.as_ref()
     }
 
     /// 按 `app.json` 的 `maskAccounts` 决定是否打码账号名。
     ///
-    /// 目前（0002）还没有调用方，留给 0004 的菜单标题与面板列表。
-    #[allow(dead_code, reason = "0004 托盘菜单与面板展示使用")]
+    /// 日志、面板、托盘菜单都应走这里，避免各处各自判断开关导致展示不一致。
     pub fn display_email(&self, email: &str) -> String {
         mask::mask_if(self.config.mask_accounts, email)
     }
