@@ -27,10 +27,12 @@
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 
 mod accounts;
+mod api;
 mod app;
 mod config;
 mod data;
 mod fonts;
+mod login;
 mod mask;
 mod paths;
 mod secrets;
