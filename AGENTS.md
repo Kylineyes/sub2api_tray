@@ -3,7 +3,7 @@
 > 本文件是本仓库的**唯一权威开发约定**。人类开发者与 AI 代理都按本文执行；
 > 若其他文档（README、历史注释、聊天记录）与本文冲突，以本文为准。
 >
-> 修订本文必须单独提交，并在[文末的变更记录](#十一变更记录)中登记。
+> 修订本文必须单独提交，并在[文末的变更记录](#十三变更记录)中登记。
 
 ---
 
@@ -21,10 +21,12 @@
 
 | 阶段 | 内容 | 状态 |
 | --- | --- | --- |
-| 0 | 工程骨架：托盘图标 + 右键菜单 + 可弹出/收起的面板窗口 | ✅ 已完成 |
-| 1 | 与 Sub2API 实例通信：配置实例地址、登录、拉取账户与用量 | ⏳ 待描述 |
-| 2 | 状态刷新策略、托盘图标状态化（在线/离线/异常着色） | ⏳ 待描述 |
-| 3 | 设置页、开机自启、单实例、自动更新 | ⏳ 待描述 |
+| 0 | 工程骨架：托盘图标 + 右键菜单 + 可弹出/收起的面板窗口 | ✅ 已完成（0001） |
+| 1a | 数据层：`app.json`、`accounts.json`、凭据加密、账号名打码 | ✅ 已完成（0002，待合入 dev） |
+| 1b | 登录：面板顶部入口、登录弹窗、2FA、错误分类 | ⏳ 计划已评审（0003） |
+| 1c | 托盘账号菜单：子菜单、状态刷新、删除确认 | ⏳ 计划已评审（0004） |
+| 2 | 托盘图标状态化（在线/离线/异常着色）、手动刷新 | ⏳ 待规划 |
+| 3 | 设置页、开机自启、单实例、自动更新 | ⏳ 待规划 |
 
 **现阶段明确的非目标**（不要顺手做）：
 
@@ -42,6 +44,14 @@
 | 窗口 / 事件循环 | `eframe` + `egui` | 0.37 | 渲染后端**固定 glow**，原因见下 |
 | 系统托盘 | `tray-icon`（内含 `muda` 菜单） | 0.26 | 托盘图标必须在事件循环启动后创建 |
 | 图片解码 | `image`（仅 `png` 特性） | 0.25 | 托盘图标以 PNG 内嵌进二进制 |
+| 配置 / 账号序列化 | `serde` + `serde_json` | 1.x | `app.json`、`accounts.json` |
+| 实例地址解析 | `url` | 2.5 | 归一化与校验（只允许 http/https） |
+| 账号标识 | `uuid`（v4） | 1.x | 每个账号的稳定 id |
+| 时间格式 | `time`（RFC3339） | 0.3 | `createdAt` / `tokenExpiresAt` |
+| 密文编码 | `base64` | 0.23 | DPAPI 密文与钥匙串引用的文本化 |
+| Windows 凭据加密 | `windows-sys`（DPAPI） | 0.61 | 当前用户作用域 + 固定附加熵 |
+| macOS 凭据存储 | `security-framework`（钥匙串） | 3.7 | 密文入钥匙串，文件只留引用 |
+| 测试临时目录 | `tempfile`（dev） | 3 | 单元测试不污染 exe 目录 |
 | 错误处理 | `anyhow` | 1.0 | 库/边界处加 `context` |
 | 日志 | `log` + `env_logger` | 0.4 / 0.11 | 默认 `info`，可用 `RUST_LOG` 覆盖 |
 
@@ -66,14 +76,24 @@ sub2api_tray/
 ├── assets/
 │   └── tray-icon.png         # 托盘图标（内嵌进二进制，临时占位图）
 ├── docs/
+│   ├── panel-preview.png     # 面板截图（README 引用）
 │   └── plans/
 │       ├── TEMPLATE.md       # 功能计划模板
-│       └── 0001-*.md         # 按编号递增的功能计划（含验收标准）
+│       ├── 0001-*.md         # 骨架
+│       ├── 0002-*.md         # 数据层
+│       ├── 0003-*.md         # 登录弹窗
+│       └── 0004-*.md         # 托盘账号菜单
 └── src/
-    ├── main.rs               # 入口：日志、根视口配置、启动 eframe
+    ├── main.rs               # 入口：日志、数据层初始化、根视口配置、启动 eframe
     ├── app.rs                # 面板状态机（显示/隐藏/失焦收起）+ 界面绘制
     ├── tray.rs               # 托盘图标、右键菜单、托盘事件 → 应用指令
-    └── fonts.rs              # 运行时加载系统中文字体
+    ├── fonts.rs              # 运行时加载系统中文字体
+    ├── paths.rs              # 数据目录、可写探测、原子写入、损坏隔离
+    ├── config.rs             # app.json 的读取、默认值与修复
+    ├── accounts.rs           # accounts.json 的 schema、排序、去重、增删
+    ├── secrets.rs            # Windows DPAPI / macOS 钥匙串的凭据加解密
+    ├── mask.rs               # 账号名打码（只影响展示）
+    └── data.rs               # 数据层门面，供 app / 后续登录流程调用
 ```
 
 模块边界（改代码前先确认改在哪个文件里）：
@@ -268,8 +288,8 @@ cargo build --release                  # 产物：target/release/sub2api_tray
 
 调试开关说明：
 
-* `SUB2API_TRAY_DEBUG_VISIBLE`：存在即生效，启动后直接弹出面板；
-  原因是托盘程序平时“隐身”，自动化截图无法点击托盘图标。
+* `SUB2API_TRAY_DEBUG_VISIBLE`：存在即生效，启动后直接弹出面板，并且**不因失焦自动收起**；
+  原因是托盘程序平时“隐身”，而自动化截图时窗口通常拿不到焦点，否则面板会在截图前消失。
 * `RUST_LOG`：`debug` 可看到托盘点击、失焦收起等细节。
 
 ---
@@ -303,8 +323,55 @@ cargo build --release                  # 产物：target/release/sub2api_tray
 
 ---
 
-## 十二、变更记录
+## 十二、数据文件与配置
+
+`app.json` 与 `accounts.json` 都放在**可执行文件所在目录**（便携式）；目录不可写时
+程序直接报错、不创建文件、不静默换目录（0002 的验收标准之一）。
+
+### `app.json`
+
+| 字段 | 类型 | 默认值 | 说明 |
+| --- | --- | --- | --- |
+| `schemaVersion` | number | `1` | 文件版本，将来迁移用 |
+| `maskAccounts` | bool | `false` | 账号名是否打码展示（只影响 UI） |
+| `refreshIntervalSeconds` | number | `300` | 状态刷新间隔，合法范围 30～86400 |
+| `requestTimeoutSeconds` | number | `10` | 单次 HTTP 超时，合法范围 1～120 |
+
+* 缺失字段用默认值补齐；非法值回落到默认值并写 `warn` 日志，同时**回写**文件；
+* 语法损坏时改名为 `app.json.corrupt-<时间戳>` 后用默认值重建；
+* **改完需要重启**（不做热加载）。
+
+### `accounts.json`
+
+| 字段 | 说明 |
+| --- | --- |
+| `schemaVersion` | 文件版本 |
+| `accounts[].id` | UUID v4，稳定标识 |
+| `accounts[].baseUrl` | 实例地址，已归一化（无尾斜杠、无查询参数） |
+| `accounts[].email` | 登录邮箱，原样保存（展示时才打码） |
+| `accounts[].role` | `admin` / `user` / `unknown` |
+| `accounts[].secrets` | 不透明加密块，格式由 `secrets.rs` 决定 |
+| `accounts[].createdAt` | RFC3339 UTC，**决定展示顺序（升序）** |
+| `accounts[].lastLoginAt` / `tokenExpiresAt` | 可选，RFC3339 |
+| `accounts[].apiKeys` | 预留数组，当前恒为空 |
+
+不变量：`baseUrl + email` 唯一（忽略大小写与尾斜杠）；排序由程序维护，不要手改 `createdAt`；
+语法损坏时同样改名备份并重建为空列表。
+
+### 凭据
+
+| 平台 | `secrets` 形态 | 解密条件 |
+| --- | --- | --- |
+| Windows | `enc:dpapi:v1:<base64>` | 同机 + 同 Windows 用户 |
+| macOS | `enc:keychain:v1:<账号 id>` | 同 macOS 用户（首次弹钥匙串授权） |
+
+明文只包含 `{ password, accessToken, refreshToken }`，解密失败一律视为“凭据损坏、需重新登录”。
+
+---
+
+## 十三、变更记录
 
 | 日期 | 变更 | 说明 |
 | --- | --- | --- |
 | 2026-10-18 | 初版 | 建立工程定位、注释规范、分支流程、功能计划与验收标准 |
+| 2026-10-18 | 补充数据层约定 | 新增第七节技术栈条目（serde/url/uuid/time/base64/DPAPI/钥匙串）、第十二节数据文件与配置；阶段表拆分为 1a/1b/1c；调试开关补充“不自动收起” |
