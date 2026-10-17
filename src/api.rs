@@ -1,0 +1,623 @@
+//! 与 Sub2API 实例通信的最小 HTTP 客户端（登录、2FA、当前用户）。
+//!
+//! # 为什么单独一个模块
+//!
+//! 登录涉及"网络 + 协议信封 + 错误分类"三件事，如果塞进 `login.rs`（界面状态机），
+//! 就没法对错误分类做单元测试。这里把**纯解析/分类函数**与**真正发请求的函数**分开：
+//!
+//! * `parse_*` 与 `classify_*`：纯函数，喂 JSON 字符串即可测试，不碰网络；
+//! * [`HttpClient`] 的方法：负责发请求，再交给上面的纯函数解释结果。
+//!
+//! # 协议事实（已核对后端源码）
+//!
+//! | 用途 | 请求 | 成功响应 |
+//! | --- | --- | --- |
+//! | 登录 | `POST /api/v1/auth/login` `{email, password}` | `{code:0, data:{access_token, refresh_token, expires_in, ...}}` |
+//! | 需要 2FA | 同上 | `{code:0, data:{requires_2fa:true, temp_token, user_email_masked}}` |
+//! | 完成 2FA | `POST /api/v1/auth/login/2fa` `{temp_token, totp_code}` | 同登录成功 |
+//! | 当前用户 | `GET /api/v1/auth/me` `Authorization: Bearer <token>` | `{code:0, data:{email, role, balance, ...}}` |
+//!
+//! 所有响应都套一层 `{code, message, data}` 信封；`code != 0` 即为业务错误。
+//!
+//! # 线程
+//!
+//! 本模块全部是**阻塞**调用（`ureq`）。调用方必须在后台线程里执行，
+//! 不能在 egui 的 `logic()` / `ui()` 里直接调用，否则面板会卡住。
+
+use std::time::Duration;
+
+use serde::Deserialize;
+use time::OffsetDateTime;
+use time::format_description::well_known::Rfc3339;
+
+use crate::accounts::AccountRole;
+
+/// 登录路径。
+pub const LOGIN_PATH: &str = "/api/v1/auth/login";
+
+/// 2FA 登录路径。
+pub const LOGIN_2FA_PATH: &str = "/api/v1/auth/login/2fa";
+
+/// 当前用户路径。
+pub const ME_PATH: &str = "/api/v1/auth/me";
+
+/// 请求种类。错误分类需要它来区分"密码错"和"验证码错"。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RequestKind {
+    /// 账号密码登录。
+    Login,
+    /// 6 位 TOTP 验证码登录。
+    LoginTotp,
+    /// 读取当前用户信息。
+    Me,
+}
+
+/// 面向用户的错误分类。
+///
+/// 需求方确认按"三类提示"：连不上地址 / 凭据错误 / 频率限制；
+/// 2FA、人机验证、非 Sub2API 地址这类特殊情况单独成类，避免把网络问题误报成密码错误。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ApiError {
+    /// 连接层失败：DNS、连接被拒、超时、TLS 等。
+    Network(String),
+    /// 401/403（且不是验证码错误）：账号或密码不对。
+    Unauthorized,
+    /// 429：请求过于频繁。
+    RateLimited,
+    /// 地址存在但不像 Sub2API（404 或响应不是本协议的信封）。
+    NotSub2Api,
+    /// 服务端要求人机验证（Turnstile / 腾讯验证码）。
+    CaptchaRequired,
+    /// 2FA 验证码错误或已过期。
+    TotpInvalid,
+    /// 其它 4xx / 5xx。
+    Server(String),
+    /// 本地输入不合法（地址格式、邮箱格式等），根本没发请求。
+    InvalidInput(String),
+}
+
+impl ApiError {
+    /// 转换成弹窗里直接展示的中文文案。
+    ///
+    /// 文案与 `docs/plans/0003-account-login.md` 第 4.3 节的映射表一一对应。
+    pub fn user_message(&self) -> String {
+        match self {
+            Self::Network(_) => "无法连接到该地址，请检查链接与网络".to_owned(),
+            Self::Unauthorized => "账号或密码可能有误".to_owned(),
+            Self::RateLimited => "请求过于频繁，请稍后再试".to_owned(),
+            Self::NotSub2Api => "该地址不是有效的 Sub2API 实例".to_owned(),
+            Self::CaptchaRequired => "该实例要求人机验证，请先在 Web 端登录或关闭验证".to_owned(),
+            Self::TotpInvalid => "验证码不正确或已过期".to_owned(),
+            Self::Server(detail) => format!("实例返回异常：{detail}"),
+            Self::InvalidInput(detail) => detail.clone(),
+        }
+    }
+
+    /// 详细的错误原因（写日志用，不进界面）。
+    pub fn detail(&self) -> String {
+        match self {
+            Self::Network(detail) | Self::Server(detail) | Self::InvalidInput(detail) => {
+                detail.clone()
+            }
+            other => format!("{other:?}"),
+        }
+    }
+}
+
+/// 登录成功后的 token 集合。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LoginTokens {
+    /// access token。
+    pub access_token: String,
+    /// refresh token（后端可能为空）。
+    pub refresh_token: String,
+    /// access token 过期时间（RFC3339 UTC）；后端没给 `expires_in` 时为 `None`。
+    pub expires_at: Option<String>,
+}
+
+/// 一次登录调用可能得到的两种结果。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LoginOutcome {
+    /// 直接拿到 token。
+    Tokens(LoginTokens),
+    /// 该账号开启了两步验证，需要用 `temp_token` + 6 位验证码继续。
+    NeedsTotp {
+        /// 2FA 会话令牌，过期后需要重新登录。
+        temp_token: String,
+        /// 后端已经打码过的邮箱（仅供提示展示）。
+        masked_email: Option<String>,
+    },
+}
+
+/// `/auth/me` 的关键信息。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MeInfo {
+    /// 角色，用于后续"管理员 / 普通用户"分岔展示。
+    pub role: AccountRole,
+    /// 服务端返回的邮箱（可能与用户输入的大小写不同）。
+    pub email: Option<String>,
+}
+
+/// 套在外面的响应信封。
+#[derive(Debug, Deserialize)]
+struct Envelope {
+    #[serde(default)]
+    code: i64,
+    #[serde(default)]
+    message: String,
+    #[serde(default)]
+    data: Option<serde_json::Value>,
+}
+
+/// 登录/2FA 接口的 `data` 字段。
+#[derive(Debug, Default, Deserialize)]
+struct LoginData {
+    #[serde(default)]
+    access_token: String,
+    #[serde(default)]
+    refresh_token: String,
+    #[serde(default)]
+    expires_in: Option<i64>,
+    #[serde(default)]
+    requires_2fa: bool,
+    #[serde(default)]
+    temp_token: Option<String>,
+    #[serde(default)]
+    user_email_masked: Option<String>,
+}
+
+/// 把状态码 + 信封 message 分类成 [`ApiError`]。
+///
+/// 判定顺序很重要：
+///
+/// 1. 401/403：2FA 请求下认为是验证码错误，其它请求认为是凭据错误；
+/// 2. 429：频率限制；
+/// 3. 404：多半是把别的服务当成了 Sub2API；
+/// 4. message 里出现人机验证关键字：单独提示，避免用户反复试密码；
+/// 5. 其余按服务端异常兜底。
+pub fn classify_error(status: u16, message: &str, kind: RequestKind) -> ApiError {
+    match status {
+        401 | 403 => {
+            if kind == RequestKind::LoginTotp {
+                ApiError::TotpInvalid
+            } else {
+                ApiError::Unauthorized
+            }
+        }
+        429 => ApiError::RateLimited,
+        404 => ApiError::NotSub2Api,
+        _ => {
+            if looks_like_captcha(message) {
+                ApiError::CaptchaRequired
+            } else if status >= 500 {
+                ApiError::Server(format!("HTTP {status}"))
+            } else {
+                // 4xx 通常带服务端原因，附上去便于排查；没有就只报状态码
+                let trimmed = message.trim();
+                if trimmed.is_empty() {
+                    ApiError::Server(format!("HTTP {status}"))
+                } else {
+                    ApiError::Server(format!("HTTP {status}：{trimmed}"))
+                }
+            }
+        }
+    }
+}
+
+/// 判断服务端消息是否在说"人机验证"。
+///
+/// 只匹配英文关键字，避免把中文"验证码"（2FA 场景）误判成人机验证。
+fn looks_like_captcha(message: &str) -> bool {
+    let lower = message.to_ascii_lowercase();
+    lower.contains("captcha") || lower.contains("turnstile")
+}
+
+/// 从响应体里取出信封；不是本协议格式时按"不是 Sub2API"处理。
+fn parse_envelope(body: &str) -> Result<Envelope, ApiError> {
+    serde_json::from_str(body).map_err(|_| ApiError::NotSub2Api)
+}
+
+/// 读取信封并处理"HTTP 200 但 code != 0"的情况，返回 `data`。
+fn read_data(status: u16, body: &str, kind: RequestKind) -> Result<serde_json::Value, ApiError> {
+    let envelope = parse_envelope(body)?;
+    if status != 200 || envelope.code != 0 {
+        // 后端把业务错误码同时写进 HTTP 状态与 code；code 优先，因为有些代理会改写状态码
+        let effective = if envelope.code != 0 {
+            envelope.code.clamp(0, u16::MAX as i64) as u16
+        } else {
+            status
+        };
+        return Err(classify_error(effective, &envelope.message, kind));
+    }
+    Ok(envelope.data.unwrap_or(serde_json::Value::Null))
+}
+
+/// 纯函数：把登录接口的响应解释成 [`LoginOutcome`]。
+///
+/// 抽出来是为了能在没有网络的情况下覆盖"直接成功 / 需要 2FA / 各种错误"这几条分支。
+pub fn parse_login_response(
+    status: u16,
+    body: &str,
+    kind: RequestKind,
+) -> Result<LoginOutcome, ApiError> {
+    let data = read_data(status, body, kind)?;
+    let login: LoginData = serde_json::from_value(data).map_err(|_| ApiError::NotSub2Api)?;
+
+    if login.requires_2fa {
+        let temp_token = login.temp_token.ok_or(ApiError::NotSub2Api)?;
+        return Ok(LoginOutcome::NeedsTotp {
+            temp_token,
+            masked_email: login.user_email_masked,
+        });
+    }
+
+    // 没有 requires_2fa 却没有 token：响应结构不对，按"不是 Sub2API"处理，避免误报登录成功
+    if login.access_token.is_empty() {
+        return Err(ApiError::NotSub2Api);
+    }
+
+    Ok(LoginOutcome::Tokens(LoginTokens {
+        access_token: login.access_token,
+        refresh_token: login.refresh_token,
+        expires_at: login.expires_in.and_then(expires_at_from_now),
+    }))
+}
+
+/// 纯函数：把 `/auth/me` 的响应解释成 [`MeInfo`]。
+pub fn parse_me_response(status: u16, body: &str) -> Result<MeInfo, ApiError> {
+    let data = read_data(status, body, RequestKind::Me)?;
+    let role = data
+        .get("role")
+        .and_then(|value| value.as_str())
+        .map(role_from_str)
+        .unwrap_or_default();
+    let email = data
+        .get("email")
+        .and_then(|value| value.as_str())
+        .map(ToOwned::to_owned);
+
+    Ok(MeInfo { role, email })
+}
+
+/// 角色字符串映射；未知值统一为 `Unknown`，不让新角色导致登录失败。
+pub fn role_from_str(role: &str) -> AccountRole {
+    match role.to_ascii_lowercase().as_str() {
+        "admin" => AccountRole::Admin,
+        "user" => AccountRole::User,
+        _ => AccountRole::Unknown,
+    }
+}
+
+/// 把"多少秒后过期"换算成 RFC3339 时间点。
+///
+/// 非法值（负数、0）返回 `None`：宁可不展示过期时间，也不要算出过去的时间点。
+fn expires_at_from_now(seconds: i64) -> Option<String> {
+    if seconds <= 0 {
+        return None;
+    }
+    let expires = OffsetDateTime::now_utc() + time::Duration::seconds(seconds);
+    expires.format(&Rfc3339).ok()
+}
+
+/// 阻塞式 HTTP 客户端。
+///
+/// 每个实例绑定一个实例地址与超时；超时来自 `app.json` 的 `requestTimeoutSeconds`。
+/// `ureq` 默认不跟随 POST 重定向（把正文一起转发不安全），因此遇到 307/308 会报
+/// `RedirectFailed`，这里统一归类为网络错误。
+pub struct HttpClient {
+    base_url: String,
+    agent: ureq::Agent,
+}
+
+impl HttpClient {
+    /// 创建客户端；地址会先走 [`crate::accounts::normalize_base_url`] 归一化。
+    pub fn new(base_url: &str, timeout: Duration) -> Result<Self, ApiError> {
+        let normalized = crate::accounts::normalize_base_url(base_url)
+            .map_err(|err| ApiError::InvalidInput(format!("{err}")))?;
+
+        let config = ureq::Agent::config_builder()
+            // 统一超时：连接、读、写都受它约束，避免登录卡住不返回
+            .timeout_global(Some(timeout))
+            // 自己看状态码：ureq 默认把 4xx/5xx 变成 Err，那样就拿不到响应体里的原因了
+            .http_status_as_error(false)
+            .build();
+
+        Ok(Self {
+            base_url: normalized,
+            agent: config.new_agent(),
+        })
+    }
+
+    /// 实际使用的实例地址（已归一化）。
+    pub fn base_url(&self) -> &str {
+        &self.base_url
+    }
+
+    /// 账号密码登录。
+    pub fn login(&self, email: &str, password: &str) -> Result<LoginOutcome, ApiError> {
+        let body = serde_json::json!({ "email": email, "password": password });
+        let (status, text) = self.post_json(LOGIN_PATH, &body)?;
+        parse_login_response(status, &text, RequestKind::Login)
+    }
+
+    /// 用 `temp_token` + 6 位验证码完成登录。
+    pub fn login_totp(&self, temp_token: &str, totp_code: &str) -> Result<LoginOutcome, ApiError> {
+        let body = serde_json::json!({ "temp_token": temp_token, "totp_code": totp_code });
+        let (status, text) = self.post_json(LOGIN_2FA_PATH, &body)?;
+        parse_login_response(status, &text, RequestKind::LoginTotp)
+    }
+
+    /// 读取当前用户信息（用于确定角色）。
+    pub fn me(&self, access_token: &str) -> Result<MeInfo, ApiError> {
+        let url = format!("{}{ME_PATH}", self.base_url);
+        let mut response = self
+            .agent
+            .get(&url)
+            .header("accept", "application/json")
+            .header("authorization", &format!("Bearer {access_token}"))
+            .call()
+            .map_err(map_transport_error)?;
+        let status = response.status().as_u16();
+        // 原地读 body：ureq 3 的响应类型没有从 crate 根重导出，
+        // 拆成独立函数就得额外依赖 `http` 包，不值得。
+        let text = response
+            .body_mut()
+            .read_to_string()
+            .map_err(map_transport_error)?;
+        parse_me_response(status, &text)
+    }
+
+    /// 发一个 JSON POST，返回 `(状态码, 响应体文本)`。
+    fn post_json(&self, path: &str, body: &serde_json::Value) -> Result<(u16, String), ApiError> {
+        let url = format!("{}{path}", self.base_url);
+        let payload = serde_json::to_string(body)
+            .map_err(|err| ApiError::InvalidInput(format!("序列化请求失败：{err}")))?;
+
+        let mut response = self
+            .agent
+            .post(&url)
+            .header("content-type", "application/json")
+            .header("accept", "application/json")
+            .send(payload.as_str())
+            .map_err(map_transport_error)?;
+
+        let status = response.status().as_u16();
+        let text = response
+            .body_mut()
+            .read_to_string()
+            // 读 body 失败在 ureq 里也归到 `ureq::Error`，与连接错误同一类处理
+            .map_err(map_transport_error)?;
+        Ok((status, text))
+    }
+}
+
+/// 把 `ureq` 的传输层错误映射成 [`ApiError::Network`]。
+///
+/// 这里保留原始错误文本（写日志用），但界面统一显示"无法连接到该地址"，
+/// 因为对普通用户来说，"DNS 解析失败"和"连接被拒绝"的下一步操作是一样的。
+fn map_transport_error(err: ureq::Error) -> ApiError {
+    ApiError::Network(format!("{err}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn 登录成功解析出token与过期时间() {
+        let body = r#"{"code":0,"message":"success","data":{
+            "access_token":"a-token","refresh_token":"r-token","expires_in":86400,"token_type":"Bearer"
+        }}"#;
+
+        let outcome = parse_login_response(200, body, RequestKind::Login).unwrap();
+
+        match outcome {
+            LoginOutcome::Tokens(tokens) => {
+                assert_eq!(tokens.access_token, "a-token");
+                assert_eq!(tokens.refresh_token, "r-token");
+                let expires = tokens.expires_at.expect("应当算出过期时间");
+                assert!(
+                    expires.ends_with('Z'),
+                    "过期时间应为 RFC3339 UTC：{expires}"
+                );
+            }
+            other => panic!("应当直接拿到 token，实际：{other:?}"),
+        }
+    }
+
+    #[test]
+    fn 需要两步验证时返回临时令牌() {
+        let body = r#"{"code":0,"message":"success","data":{
+            "requires_2fa":true,"temp_token":"temp-123","user_email_masked":"u***@e***.com"
+        }}"#;
+
+        let outcome = parse_login_response(200, body, RequestKind::Login).unwrap();
+
+        assert_eq!(
+            outcome,
+            LoginOutcome::NeedsTotp {
+                temp_token: "temp-123".to_owned(),
+                masked_email: Some("u***@e***.com".to_owned()),
+            }
+        );
+    }
+
+    #[test]
+    fn 密码错误归类为凭据错误() {
+        let body = r#"{"code":401,"message":"invalid email or password"}"#;
+        let err = parse_login_response(401, body, RequestKind::Login).unwrap_err();
+        assert_eq!(err, ApiError::Unauthorized);
+        assert_eq!(err.user_message(), "账号或密码可能有误");
+    }
+
+    #[test]
+    fn 频率限制单独提示() {
+        let body = r#"{"code":429,"message":"too many requests"}"#;
+        let err = parse_login_response(429, body, RequestKind::Login).unwrap_err();
+        assert_eq!(err, ApiError::RateLimited);
+    }
+
+    #[test]
+    fn 非sub2api地址被识别() {
+        let err =
+            parse_login_response(404, "<html>not found</html>", RequestKind::Login).unwrap_err();
+        // 404 优先按"地址不对"处理，比"响应格式不对"更好操作
+        assert_eq!(err, ApiError::NotSub2Api);
+
+        let err = parse_login_response(200, "<html>hello</html>", RequestKind::Login).unwrap_err();
+        assert_eq!(err, ApiError::NotSub2Api);
+    }
+
+    #[test]
+    fn 人机验证有专门文案() {
+        let body = r#"{"code":400,"message":"turnstile verification failed"}"#;
+        let err = parse_login_response(400, body, RequestKind::Login).unwrap_err();
+        assert_eq!(err, ApiError::CaptchaRequired);
+        assert!(err.user_message().contains("人机验证"));
+    }
+
+    #[test]
+    fn 验证码错误与密码错误区分开() {
+        let body = r#"{"code":401,"message":"invalid totp code"}"#;
+        let err = parse_login_response(401, body, RequestKind::LoginTotp).unwrap_err();
+        assert_eq!(err, ApiError::TotpInvalid);
+
+        let err = parse_login_response(401, body, RequestKind::Login).unwrap_err();
+        assert_eq!(err, ApiError::Unauthorized, "密码请求仍应提示凭据错误");
+    }
+
+    #[test]
+    fn 服务端异常带上状态码() {
+        let body = r#"{"code":502,"message":"bad gateway"}"#;
+        let err = parse_login_response(502, body, RequestKind::Login).unwrap_err();
+        assert!(err.user_message().contains("HTTP 502"));
+    }
+
+    #[test]
+    fn 缺少token视为地址不对() {
+        let body = r#"{"code":0,"message":"success","data":{"requires_2fa":false}}"#;
+        let err = parse_login_response(200, body, RequestKind::Login).unwrap_err();
+        assert_eq!(err, ApiError::NotSub2Api);
+    }
+
+    /// 端到端验证：用本地 `TcpListener` 假扮 Sub2API，检查真实的 ureq 请求路径。
+    ///
+    /// 覆盖点：URL 拼接、`content-type` 头、JSON 信封解析、Bearer 头。
+    /// 之所以不连真实例：单元测试不该依赖 PostgreSQL/Redis 与网络。
+    #[test]
+    fn 本地假实例完成登录并读取角色() {
+        use std::io::{Read as _, Write as _};
+        use std::net::{TcpListener, TcpStream};
+
+        /// 读到请求头结束（`\r\n\r\n`）为止。
+        ///
+        /// 不能只 `read` 一次：TCP 会把请求拆成多个分段，只读一次可能只拿到半行
+        /// 请求行，导致下面按路径分支的判断偶发失败（这是本用例曾经 flaky 的原因）。
+        fn read_headers(stream: &mut TcpStream) -> String {
+            let mut buf = Vec::new();
+            let mut chunk = [0_u8; 1024];
+            loop {
+                match stream.read(&mut chunk) {
+                    Ok(0) => break,
+                    Ok(n) => {
+                        buf.extend_from_slice(&chunk[..n]);
+                        if buf.windows(4).any(|window| window == b"\r\n\r\n") {
+                            break;
+                        }
+                    }
+                    Err(_) => break,
+                }
+            }
+            String::from_utf8_lossy(&buf).into_owned()
+        }
+
+        let listener = TcpListener::bind("127.0.0.1:0").expect("绑定本地端口");
+        let addr = listener.local_addr().expect("取得端口");
+        // 非阻塞 accept + 停止标志：客户端可能因连接池重试而多连一次，
+        // "固定 accept 两次"会让服务端线程卡住、测试挂死。
+        listener.set_nonblocking(true).expect("切换为非阻塞监听");
+        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let stop_in_server = std::sync::Arc::clone(&stop);
+
+        let server = std::thread::spawn(move || {
+            while !stop_in_server.load(std::sync::atomic::Ordering::Relaxed) {
+                match listener.accept() {
+                    Ok((mut stream, _)) => {
+                        let request = read_headers(&mut stream);
+                        // 按路径分发，避免依赖请求到达顺序
+                        let body = if request.starts_with("POST /api/v1/auth/login ") {
+                            r#"{"code":0,"message":"success","data":{"access_token":"tok-1","refresh_token":"ref-1","expires_in":3600}}"#
+                        } else {
+                            // 非登录请求应当是带 Bearer 的 /auth/me
+                            assert!(
+                                request
+                                    .to_ascii_lowercase()
+                                    .contains("authorization: bearer tok-1"),
+                                "应当携带 Bearer 头，实际请求：{request}"
+                            );
+                            r#"{"code":0,"message":"success","data":{"email":"user@example.com","role":"admin"}}"#
+                        };
+
+                        let response = format!(
+                            "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+                            body.len(),
+                            body
+                        );
+                        stream.write_all(response.as_bytes()).ok();
+                        stream.flush().ok();
+                    }
+                    Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
+                        std::thread::sleep(Duration::from_millis(5));
+                    }
+                    Err(_) => break,
+                }
+            }
+        });
+
+        let base_url = format!("http://{addr}");
+        // 每次调用用一个独立客户端：服务端响应后立即关闭连接，
+        // 复用连接池会让测试依赖 ureq 的重试行为，徒增不确定性。
+        let login_client =
+            HttpClient::new(&base_url, Duration::from_secs(5)).expect("构造登录客户端");
+        let outcome = login_client
+            .login("user@example.com", "password")
+            .expect("登录成功");
+        let tokens = match outcome {
+            LoginOutcome::Tokens(tokens) => tokens,
+            other => panic!("应当直接拿到 token，实际：{other:?}"),
+        };
+        assert_eq!(tokens.access_token, "tok-1");
+        assert_eq!(tokens.refresh_token, "ref-1");
+
+        let me_client =
+            HttpClient::new(&base_url, Duration::from_secs(5)).expect("构造取用户客户端");
+        let me = me_client.me(&tokens.access_token).expect("读取当前用户");
+        assert_eq!(me.role, AccountRole::Admin);
+
+        stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        server.join().expect("假实例线程正常结束");
+    }
+
+    #[test]
+    fn 角色映射() {
+        assert_eq!(role_from_str("admin"), AccountRole::Admin);
+        assert_eq!(role_from_str("USER"), AccountRole::User);
+        assert_eq!(role_from_str("superuser"), AccountRole::Unknown);
+    }
+
+    #[test]
+    fn 当前用户解析角色与邮箱() {
+        let body = r#"{"code":0,"message":"success","data":{
+            "id":1,"email":"User@Example.com","role":"admin","balance":12.5
+        }}"#;
+        let me = parse_me_response(200, body).unwrap();
+        assert_eq!(me.role, AccountRole::Admin);
+        assert_eq!(me.email.as_deref(), Some("User@Example.com"));
+    }
+
+    #[test]
+    fn 过期时间非法时不返回时间() {
+        assert!(expires_at_from_now(0).is_none());
+        assert!(expires_at_from_now(-5).is_none());
+    }
+}

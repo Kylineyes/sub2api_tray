@@ -12,6 +12,8 @@ categories = ["gui"]
 
 [dependencies]
 anyhow = "1.0.104"
+# 凭据密文（DPAPI 输出）与钥匙串引用的 base64 编码
+base64 = "0.23.1"
 # 同时启用 glow（OpenGL）与默认的 wgpu 后端，运行时固定使用 glow：
 # Windows 上 wgpu 的交换链拿不到带 alpha 的合成模式（会打印警告），
 # 圆角面板会露出一块方形底色；glow 走 OpenGL，两个平台都能实现真正的透明窗口。
@@ -20,7 +22,21 @@ egui = "0.37.0"
 env_logger = "0.11.11"
 image = { version = "0.25.10", default-features = false, features = ["png"] }
 log = "0.4.34"
+# app.json / accounts.json 的序列化与反序列化
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
+# createdAt / tokenExpiresAt 等时间的 RFC3339 解析与格式化
+time = { version = "0.3.55", features = ["formatting", "parsing", "macros"] }
 tray-icon = "0.26.1"
+ureq = "3.4.2"
+# 实例地址的解析、校验与归一化（去尾斜杠、小写主机名）
+url = "2.5.8"
+# 账号 id（UUID v4）
+uuid = { version = "1.28.0", features = ["v4", "serde"] }
+
+[dev-dependencies]
+# 单元测试里创建临时目录，避免读写真实 exe 目录
+tempfile = "3"
 
 [profile.release]
 # 托盘常驻程序体积越小越好：优先体积，开启 LTO 并去掉符号表
@@ -28,3 +44,11 @@ opt-level = "s"
 lto = true
 codegen-units = 1
 strip = true
+
+[target.'cfg(windows)'.dependencies]
+# DPAPI：把凭据加密成只有当前 Windows 用户能解开的密文
+windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_Security_Cryptography"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+# 钥匙串：凭据存进系统钥匙串，accounts.json 里只留引用
+security-framework = "3.7.0"

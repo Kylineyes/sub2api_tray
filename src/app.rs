@@ -13,7 +13,10 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use crate::accounts::{self, Account};
+use crate::data::DataLayer;
 use crate::fonts;
+use crate::login::{LoginDialog, LoginDraft};
 use crate::tray::{TrayBridge, TrayCommand, TrayHandle};
 
 /// 面板逻辑宽度（单位：egui 点；100% 缩放下等于像素）。
@@ -42,28 +45,31 @@ const FOCUS_GRACE: Duration = Duration::from_millis(400);
 const TOGGLE_DEBOUNCE: Duration = Duration::from_millis(250);
 
 /// 面板背景色（深色，接近 sub2api logo 的深蓝黑）。
-const PANEL_BG: egui::Color32 = egui::Color32::from_rgb(15, 23, 42);
+pub const PANEL_BG: egui::Color32 = egui::Color32::from_rgb(15, 23, 42);
 
 /// 面板边框色，用来在浅色桌面上勾勒出气泡的轮廓。
-const PANEL_BORDER: egui::Color32 = egui::Color32::from_rgb(51, 65, 85);
+pub const PANEL_BORDER: egui::Color32 = egui::Color32::from_rgb(51, 65, 85);
 
 /// 卡片（状态区）背景色。
-const CARD_BG: egui::Color32 = egui::Color32::from_rgb(30, 41, 59);
+pub const CARD_BG: egui::Color32 = egui::Color32::from_rgb(30, 41, 59);
 
 /// 空状态占位区的背景色，比卡片再暗一点，形成层次。
 const EMPTY_BG: egui::Color32 = egui::Color32::from_rgb(22, 33, 51);
 
 /// 主要文字颜色。
-const TEXT_PRIMARY: egui::Color32 = egui::Color32::from_rgb(226, 232, 240);
+pub const TEXT_PRIMARY: egui::Color32 = egui::Color32::from_rgb(226, 232, 240);
 
 /// 次要文字颜色（说明文字、版本号、快捷键提示）。
-const TEXT_SECONDARY: egui::Color32 = egui::Color32::from_rgb(148, 163, 184);
+pub const TEXT_SECONDARY: egui::Color32 = egui::Color32::from_rgb(148, 163, 184);
 
 /// 更弱的文字颜色，用于占位说明一类的“可读但不打扰”的内容。
-const TEXT_DIM: egui::Color32 = egui::Color32::from_rgb(100, 116, 139);
+pub const TEXT_DIM: egui::Color32 = egui::Color32::from_rgb(100, 116, 139);
 
 /// 品牌强调色（取自 sub2api logo 的薄荷绿渐变起始色）。
 pub const ACCENT: egui::Color32 = egui::Color32::from_rgb(121, 244, 189);
+
+/// 操作成功提示在面板底部的停留时长。
+const TOAST_DURATION: Duration = Duration::from_secs(4);
 
 /// 应用主体。
 pub struct TrayApp {
@@ -89,12 +95,34 @@ pub struct TrayApp {
     first_frame: bool,
 
     /// 调试开关：进程启动时若存在环境变量 `SUB2API_TRAY_DEBUG_VISIBLE`，
-    /// 就直接弹出面板。
+    /// 就直接弹出面板，并且**不因失焦自动收起**。
     ///
     /// 之所以需要它：托盘程序平时启动后处于“隐身”状态，自动化冒烟测试和
     /// 截图验收都没办法去点托盘图标；有了这个开关就能稳定复现“面板已打开”的画面。
     /// 正常使用时不设置该变量，行为与正式版本完全一致。
     debug_show_on_start: bool,
+
+    /// 调试开关：存在环境变量 `SUB2API_TRAY_DEBUG_LOGIN` 时，启动后自动打开登录弹窗。
+    ///
+    /// 仅用于截图验收弹窗布局：自动化无法真的去点“登陆新用户”按钮。
+    /// 打开时会连带显示面板，否则弹窗没有可绘制的窗口。
+    debug_open_login: bool,
+
+    /// 数据层。
+    ///
+    /// `Unavailable` 表示 `app.json` / `accounts.json` 读不了或写不了
+    /// （最常见的原因：程序被放在 `Program Files` 这类只读目录）。
+    /// 此时面板顶部会显示红色提示，并且不提供登录入口。
+    data: DataLayer,
+
+    /// 登录弹窗（含后台线程与表单状态）。
+    login: LoginDialog,
+
+    /// 操作成功提示：内容 + 出现时刻。
+    ///
+    /// 用一个临时的 `(String, Instant)` 而不是完整的通知系统，是因为目前只有
+    /// "账号已保存 / 已删除" 两种提示，等 0004 做完再考虑抽象。
+    toast: Option<(String, Instant)>,
 }
 
 impl TrayApp {
@@ -102,7 +130,10 @@ impl TrayApp {
     ///
     /// 这个函数在 winit 事件循环内部被调用，此时主线程与事件循环都已就绪，
     /// 满足 `tray-icon` 对“必须先有事件循环”的要求。
-    pub fn new(cc: &eframe::CreationContext<'_>) -> anyhow::Result<Self> {
+    ///
+    /// `data` 由 `main` 在启动时初始化好并移交给这里：数据层失败不应该阻止托盘与面板出现，
+    /// 否则用户会以为程序根本没启动。
+    pub fn new(cc: &eframe::CreationContext<'_>, data: DataLayer) -> anyhow::Result<Self> {
         // 中文字体必须在任何界面绘制之前装好，否则第一帧会是方块
         fonts::install(&cc.egui_ctx);
 
@@ -122,6 +153,13 @@ impl TrayApp {
         if debug_show_on_start {
             log::warn!("检测到 SUB2API_TRAY_DEBUG_VISIBLE：启动后直接显示面板（仅用于调试）");
         }
+        let debug_open_login = std::env::var_os("SUB2API_TRAY_DEBUG_LOGIN").is_some();
+        if debug_open_login {
+            log::warn!("检测到 SUB2API_TRAY_DEBUG_LOGIN：启动后直接打开登录弹窗（仅用于调试）");
+        }
+
+        // 弹窗持有 egui 上下文：后台登录线程靠它唤醒界面
+        let login = LoginDialog::new(cc.egui_ctx.clone());
 
         Ok(Self {
             tray,
@@ -131,6 +169,10 @@ impl TrayApp {
             last_hidden_at: None,
             first_frame: true,
             debug_show_on_start,
+            debug_open_login,
+            data,
+            login,
+            toast: None,
         })
     }
 
@@ -167,6 +209,19 @@ impl TrayApp {
             return;
         }
 
+        // 登录弹窗打开时不收起面板：用户正在输密码，
+        // 因为"去看了一眼别的窗口"就把面板连带表单一起关掉，等于让输入白费。
+        if self.login.is_open() {
+            return;
+        }
+
+        // 调试模式下不自动收起：自动化截图时窗口通常拿不到焦点，
+        // 一旦按失焦处理，面板会在截图前就消失，验收就无从谈起。
+        // 正常运行时这个分支不生效（未设置 SUB2API_TRAY_DEBUG_VISIBLE）。
+        if self.debug_show_on_start {
+            return;
+        }
+
         // 宽限期内不响应：窗口刚弹出时 focused 可能还没更新
         let in_grace = self
             .shown_at
@@ -176,6 +231,78 @@ impl TrayApp {
             log::debug!("面板失焦，自动收起");
             self.hide_panel(ctx);
         }
+    }
+
+    /// 处理 `Esc`：弹窗开着就关弹窗，否则收起面板。
+    ///
+    /// 放在 `logic()` 里而不是绘制里，是因为"关窗"是状态变更，
+    /// 与这一帧是否需要绘制无关（面板隐藏时也要能响应）。
+    fn handle_escape(&mut self, ctx: &egui::Context) {
+        if !ctx.input(|input| input.key_pressed(egui::Key::Escape)) {
+            return;
+        }
+        if self.login.is_open() {
+            log::debug!("Esc：关闭登录弹窗");
+            self.login.close();
+        } else if self.panel_visible {
+            log::debug!("Esc：收起面板");
+            self.hide_panel(ctx);
+        }
+    }
+
+    /// 取一次登录结果并落库。
+    ///
+    /// 落库失败（重复账号、磁盘满、加密失败）不会丢掉已输入的凭据：
+    /// 弹窗保持打开并显示具体原因，用户可以改地址/账号后重试。
+    fn poll_login(&mut self, ctx: &egui::Context) {
+        let Some(draft) = self.login.poll() else {
+            return;
+        };
+
+        match &mut self.data {
+            DataLayer::Unavailable(reason) => {
+                self.login
+                    .set_error(format!("数据目录不可用，无法保存账号：{reason}"));
+            }
+            DataLayer::Ready(store) => {
+                if let Err(message) = save_login(store, &draft) {
+                    self.login.set_error(message);
+                    return;
+                }
+
+                // 日志只留打码后的账号，避免明文邮箱长期堆积在日志里
+                let display = store.display_email(&draft.email);
+                log::info!("账号已保存：{display}");
+                self.toast = Some((format!("已登录 {display}"), Instant::now()));
+                self.login.close();
+                ctx.request_repaint();
+            }
+        }
+    }
+
+    /// 维护成功提示的过期。
+    fn update_toast(&mut self, ctx: &egui::Context) {
+        let Some((_, shown_at)) = &self.toast else {
+            return;
+        };
+        let elapsed = shown_at.elapsed();
+        if elapsed >= TOAST_DURATION {
+            self.toast = None;
+            ctx.request_repaint();
+        } else {
+            // 只在这一条提示消失时唤醒一次，避免空转重绘
+            ctx.request_repaint_after(TOAST_DURATION - elapsed);
+        }
+    }
+
+    /// 当前生效的请求超时（来自 `app.json`）。
+    fn request_timeout(&self) -> Duration {
+        let seconds = match &self.data {
+            DataLayer::Ready(store) => store.config().request_timeout_seconds,
+            // 数据层不可用时用内置默认值：弹窗此时不会真的发请求（入口被禁用）
+            DataLayer::Unavailable(_) => crate::config::DEFAULT_REQUEST_TIMEOUT_SECONDS,
+        };
+        Duration::from_secs(seconds.max(1))
     }
 
     /// 弹出面板：先把窗口移到托盘图标旁边，再显示并抢焦点。
@@ -240,11 +367,21 @@ impl TrayApp {
     /// `ui` 是 eframe 提供的根 Ui（没有边距也没有背景），因此这里用 [`egui::CentralPanel`]
     /// 再包一层，才能得到带圆角/内边距的气泡外观。
     fn draw_panel(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
-        // Esc 收起：托盘气泡的通用习惯，也方便键盘用户
-        if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
-            self.hide_panel(ctx);
-            return;
-        }
+        // 先在闭包外把需要的信息整理成"纯数据"：
+        // 闭包内若再借用 `self.data`，会和 `&mut self` 的方法签名打架，
+        // 提前算出字符串既避免了借用冲突，也让闭包只依赖局部变量。
+        let storage_error = match &self.data {
+            DataLayer::Unavailable(reason) => Some(reason.clone()),
+            DataLayer::Ready(_) => None,
+        };
+        let data_line = match &self.data {
+            DataLayer::Ready(store) => format!("数据目录：{}", shorten_path(store.dir())),
+            DataLayer::Unavailable(_) => "数据目录不可用".to_owned(),
+        };
+        let toast = self.toast.as_ref().map(|(text, _)| text.clone());
+
+        // 顶部按钮的点击结果：闭包里不能直接改 `self`，先记在局部变量里
+        let mut open_login = false;
 
         egui::CentralPanel::default()
             .frame(
@@ -256,18 +393,56 @@ impl TrayApp {
                     .inner_margin(egui::Margin::same(16)),
             )
             .show(ui, |ui| {
-                draw_header(ui);
-                ui.add_space(14.0);
-                draw_status_card(ui);
-                ui.add_space(12.0);
-                draw_primary_action(ui);
-                ui.add_space(16.0);
-                draw_empty_state(ui);
-                // 把页脚推到底部：面板高度固定，内容不足时也不会全部挤在顶部
-                ui.with_layout(egui::Layout::bottom_up(egui::Align::Min), |ui| {
-                    draw_footer(ui, ctx);
-                });
+                // 布局分三段：顶部（标题 + 入口按钮 + 错误提示）固定、
+                // 底部（数据目录 + 退出）固定、中间内容可滚动。
+                // 这样即使账号很多或出现很长的错误提示，也不会把页脚挤出去与正文重叠。
+                egui::Panel::top("panel_header")
+                    .frame(egui::Frame::NONE.fill(PANEL_BG))
+                    .show(ui, |ui| {
+                        if draw_header(ui) {
+                            open_login = true;
+                        }
+
+                        if let Some(reason) = storage_error.as_deref() {
+                            ui.add_space(12.0);
+                            draw_storage_banner(ui, reason);
+                        }
+                    });
+
+                egui::Panel::bottom("panel_footer")
+                    .frame(
+                        // 页脚要不透明并留出上边距：滚动区的内容一旦超出，
+                        // 会正好被页脚裁掉，透明背景会让被裁的卡片文字"压"在页脚上。
+                        egui::Frame::NONE.fill(PANEL_BG).inner_margin(egui::Margin {
+                            left: 0,
+                            right: 0,
+                            top: 8,
+                            bottom: 0,
+                        }),
+                    )
+                    .show(ui, |ui| {
+                        draw_footer(ui, ctx, &data_line, toast.as_deref());
+                    });
+
+                egui::ScrollArea::vertical()
+                    .auto_shrink([false, false])
+                    .show(ui, |ui| {
+                        ui.add_space(14.0);
+                        draw_status_card(ui);
+                        ui.add_space(16.0);
+                        draw_empty_state(ui);
+                        // 给滚动区底部留一点空隙，避免最后一张卡片贴着页脚
+                        ui.add_space(6.0);
+                    });
             });
+
+        if open_login {
+            self.login.open();
+        }
+
+        // 弹窗画在面板之后，保证它在最上层（Modal 自带遮罩与输入拦截）
+        let timeout = self.request_timeout();
+        self.login.show(ctx, timeout);
     }
 }
 
@@ -288,17 +463,25 @@ impl eframe::App for TrayApp {
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         if self.first_frame {
             self.first_frame = false;
-            if self.debug_show_on_start {
+            if self.debug_show_on_start || self.debug_open_login {
                 // 调试模式：启动就弹出面板，方便截图与手工验收
                 self.show_panel(ctx);
             } else {
                 // 启动后立刻收起：托盘程序不该在启动时弹出一个空面板
                 ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
             }
+
+            if self.debug_open_login {
+                // 打开弹窗必须在面板显示之后：弹窗画在面板窗口里
+                self.login.open();
+            }
         }
 
         self.handle_tray_commands(ctx);
+        self.handle_escape(ctx);
+        self.poll_login(ctx);
         self.handle_focus(ctx);
+        self.update_toast(ctx);
     }
 
     /// 每帧的“绘制阶段”：只有面板应当可见时才画。
@@ -389,8 +572,12 @@ fn fallback_position(monitor: egui::Vec2, size: egui::Vec2) -> (f32, f32) {
     }
 }
 
-/// 绘制标题区：产品名 + 版本号 + 一句话说明。
-fn draw_header(ui: &mut egui::Ui) {
+/// 绘制标题区：产品名 + 版本号 + 一句话说明 + 顶部登录入口。
+///
+/// 返回 `true` 表示用户点击了「登陆新用户」按钮。
+/// 之所以把按钮放在标题区（面板最顶部），是需求方明确的位置要求：
+/// 登录是这块面板最主要的新增操作，必须第一眼可见。
+fn draw_header(ui: &mut egui::Ui) -> bool {
     ui.horizontal(|ui| {
         ui.label(
             egui::RichText::new("Sub2API 托盘")
@@ -423,8 +610,21 @@ fn draw_header(ui: &mut egui::Ui) {
         ui.allocate_exact_size(egui::vec2(ui.available_width(), 2.0), egui::Sense::hover());
     ui.painter()
         .rect_filled(line_rect, egui::CornerRadius::same(1), ACCENT);
-}
 
+    // ---- 顶部登录入口 ----
+    ui.add_space(12.0);
+    let button = egui::Button::new(
+        egui::RichText::new("＋ 登陆新用户")
+            .size(13.0)
+            .strong()
+            // 亮色底上要用深色字，否则对比度不足
+            .color(egui::Color32::from_rgb(15, 23, 42)),
+    )
+    .fill(ACCENT);
+    ui.add_sized([ui.available_width(), 32.0], button)
+        .on_hover_text("填写实例地址与账号密码，登录后账号会出现在托盘里")
+        .clicked()
+}
 /// 绘制实例登录状态卡片。
 ///
 /// 目前是占位内容；实例配置与登录接入后，这里会显示实例地址与连接状态。
@@ -485,22 +685,25 @@ fn draw_empty_state(ui: &mut egui::Ui) {
         });
 }
 
-/// 绘制主操作区。
+/// 绘制页脚：成功提示（可选）+ 数据目录提示 + 操作提示 + 退出按钮。
 ///
-/// “登录账户”暂时禁用：按钮先占位，避免等登录流程做好后界面结构大改。
-fn draw_primary_action(ui: &mut egui::Ui) {
-    ui.horizontal(|ui| {
-        ui.add_enabled(false, egui::Button::new("登录账户"));
-        ui.label(
-            egui::RichText::new("登录功能开发中")
-                .size(11.0)
-                .color(TEXT_SECONDARY),
-        );
-    });
-}
+/// `data_line` 与 `toast` 由调用方提前算好（见 `draw_panel`），
+/// 这样闭包里不需要再借用 `self`。
+fn draw_footer(ui: &mut egui::Ui, ctx: &egui::Context, data_line: &str, toast: Option<&str>) {
+    if let Some(text) = toast {
+        ui.horizontal(|ui| {
+            ui.label(
+                egui::RichText::new(format!("✓ {text}"))
+                    .size(11.0)
+                    .color(ACCENT),
+            );
+        });
+    }
 
-/// 绘制页脚：操作提示 + 退出按钮。
-fn draw_footer(ui: &mut egui::Ui, ctx: &egui::Context) {
+    ui.horizontal(|ui| {
+        ui.label(egui::RichText::new(data_line).size(10.0).color(TEXT_DIM));
+    });
+
     ui.horizontal(|ui| {
         ui.label(
             egui::RichText::new("左键托盘图标显示 / 隐藏面板 · Esc 收起")
@@ -515,6 +718,87 @@ fn draw_footer(ui: &mut egui::Ui, ctx: &egui::Context) {
             }
         });
     });
+}
+
+/// 把登录成功的草稿落库：加密凭据 → 组装账号 → 去重并写盘。
+///
+/// 返回 `Err` 时携带的是**可以直接展示**的中文原因（弹窗会原样显示），
+/// 这样"重复账号""磁盘满""DPAPI 失败"都能给用户一个可行动的提示。
+///
+/// 这里刻意先加密再 `add`：
+/// `add` 内部会做唯一性校验并原子写盘，任何一步失败都不会留下半条记录。
+fn save_login(store: &mut crate::data::DataStore, draft: &LoginDraft) -> Result<(), String> {
+    // 先用空 secrets 建出账号，拿到它的 id（macOS 钥匙串条目以 id 为 account）
+    let mut account = Account::new(
+        draft.base_url.clone(),
+        draft.email.clone(),
+        draft.role,
+        String::new(),
+    );
+    account.last_login_at = Some(accounts::now_rfc3339());
+    account.token_expires_at = draft.expires_at.clone();
+
+    account.secrets =
+        crate::secrets::seal_credentials(store.secrets(), &account.id, &draft.credentials)
+            .map_err(|err| {
+                log::warn!("凭据加密失败：{err:#}");
+                "凭据加密失败，无法保存账号".to_owned()
+            })?;
+
+    store
+        .accounts_mut()
+        .add(account)
+        // `add` 的错误已经带上下文（"该账号已存在…" / "写入失败…"），直接展示
+        .map_err(|err| format!("保存账号失败：{err:#}"))
+}
+
+/// 绘制"数据目录不可用"的红色提示条。
+///
+/// 出现这个提示时，程序**不会**创建/改写任何文件，也不会静默换一个目录：
+/// 需求方明确要求"报错并提示用户换目录"，避免用户以为账号已经保存成功。
+fn draw_storage_banner(ui: &mut egui::Ui, reason: &str) {
+    egui::Frame::new()
+        .fill(egui::Color32::from_rgb(69, 26, 26))
+        .corner_radius(egui::CornerRadius::same(10))
+        .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(153, 27, 27)))
+        .inner_margin(egui::Margin::same(10))
+        .show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.label(
+                egui::RichText::new("数据目录不可写，账号无法保存")
+                    .size(12.0)
+                    .strong()
+                    .color(egui::Color32::from_rgb(252, 165, 165)),
+            );
+            ui.add_space(4.0);
+            // 只显示首行：完整错误链可能很长，界面放不下，完整内容在日志里
+            ui.label(
+                egui::RichText::new(reason.lines().next().unwrap_or_default())
+                    .size(10.0)
+                    .color(egui::Color32::from_rgb(254, 202, 202)),
+            );
+            ui.add_space(4.0);
+            ui.label(
+                egui::RichText::new("请把程序移动到可写目录（例如桌面或 D 盘）后重启。")
+                    .size(10.0)
+                    .color(egui::Color32::from_rgb(254, 202, 202)),
+            );
+        });
+}
+
+/// 把路径缩短到适合放在面板底部的一行文字。
+///
+/// 规则：保留最后 40 个字符，前面加省略号。之所以保留"尾部"而不是"开头"，
+/// 是因为用户最需要确认的是"文件到底在哪个目录"，尾部信息量更大。
+fn shorten_path(path: &std::path::Path) -> String {
+    const MAX_CHARS: usize = 40;
+    let text = path.display().to_string();
+    let chars: Vec<char> = text.chars().collect();
+    if chars.len() <= MAX_CHARS {
+        return text;
+    }
+    let tail: String = chars[chars.len() - MAX_CHARS..].iter().collect();
+    format!("…{tail}")
 }
 
 #[cfg(test)]

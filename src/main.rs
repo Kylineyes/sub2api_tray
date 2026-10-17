@@ -1,27 +1,41 @@
 //! Sub2API 托盘应用的入口。
 //!
-//! 这个文件有意保持“薄”：只做三件事，其余细节都交给下面三个模块。
+//! 这个文件有意保持“薄”：只做三件事，其余细节都交给下面的模块。
 //!
 //! 1. 初始化日志（开发期观察托盘与面板行为的主要手段）；
 //! 2. 描述根视口（也就是那块靠托盘弹出的面板窗口）的初始形态；
-//! 3. 把 [`app::TrayApp`] 交给 eframe/winit 的事件循环。
+//! 3. 初始化数据层，并把 [`app::TrayApp`] 交给 eframe/winit 的事件循环。
 //!
 //! 模块划分：
 //!
 //! * [`tray`]：系统托盘图标、右键菜单、托盘事件到应用指令的转发；
 //! * [`app`]：面板窗口的显示/隐藏/定位以及界面绘制；
-//! * [`fonts`]：加载系统中文字体，避免界面里的中文变成“豆腐块”。
+//! * [`fonts`]：加载系统中文字体，避免界面里的中文变成“豆腐块”；
+//! * [`paths`]：数据目录解析、可写探测、原子写入；
+//! * [`config`]：`app.json` 的读取、默认值与修复；
+//! * [`accounts`]：`accounts.json` 的 schema、排序、去重与增删；
+//! * [`secrets`]：Windows DPAPI / macOS 钥匙串的凭据加解密；
+//! * [`mask`]：账号名打码（只影响展示）；
+//! * [`data`]：把上述能力组装成对上层友好的门面。
 //!
-//! 之所以要把“托盘”“面板”“字体”拆开，是因为后续的账户状态、设置页、
-//! 自动刷新等功能都会分别落在这些模块里，提前分好边界可以减少互相改动。
+//! 之所以这样拆，是因为托盘、面板、数据、加密、展示各自独立演进：
+//! 后续的登录流程（0003）与账号菜单（0004）只会改其中一两个模块。
 
 // Windows 的 release 构建不弹出额外的控制台窗口。
 // 代价是 release 版本看不到日志输出；排障请用 debug 构建，
 // 或者按 docs/plans 里“日志落盘”的规划，后续把日志写入本地文件。
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 
+mod accounts;
+mod api;
 mod app;
+mod config;
+mod data;
 mod fonts;
+mod login;
+mod mask;
+mod paths;
+mod secrets;
 mod tray;
 
 /// 应用显示名称：同时用作窗口标题和托盘提示文字的前缀。
@@ -41,6 +55,12 @@ fn main() -> anyhow::Result<()> {
     init_logging();
 
     log::info!("{APP_NAME} v{APP_VERSION} 启动");
+
+    // 数据层初始化放在创建窗口之前：
+    // 一来失败时能立刻写进日志，二来面板第一帧就要决定是否显示"数据目录不可写"提示。
+    // 这里刻意不返回 Err：托盘程序即使读不到配置，也应该能启动并把问题告诉用户，
+    // 而不是在用户双击图标后什么都不发生。
+    let data_layer = data::init();
 
     // 根视口的初始形态。
     // 这些属性只是“初值”：运行期间面板会被反复隐藏/显示，
@@ -76,7 +96,9 @@ fn main() -> anyhow::Result<()> {
         // 创建回调在 winit 事件循环开始运行之后、主线程上执行，
         // 这一点很关键：tray-icon 要求事件循环已经在运行（macOS 尤其严格），
         // 因此托盘图标必须在这里创建，而不能在 main 的最前面创建。
-        Box::new(|cc| Ok(Box::new(app::TrayApp::new(cc)?))),
+        //
+        // 数据层用 `move` 送进闭包：创建回调是 `FnOnce`，移动所有权可以避免额外的共享状态。
+        Box::new(move |cc| Ok(Box::new(app::TrayApp::new(cc, data_layer)?))),
     )
     .map_err(|err| anyhow::anyhow!("eframe 事件循环启动失败：{err}"))
 }
