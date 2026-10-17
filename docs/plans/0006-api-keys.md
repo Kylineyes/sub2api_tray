@@ -4,7 +4,7 @@
 | --- | --- |
 | 编号 | 0006 |
 | 分支 | `feat/api-keys` |
-| 状态 | 计划中（等待范围确认） |
+| 状态 | 已完成（待合入 dev） |
 | 提出日期 | 2026-10-18 |
 | 依赖 | 0002（`apiKeys` 字段预留）、0004（账号运行态与面板卡片） |
 
@@ -68,12 +68,12 @@
 
 ## 六、完成点
 
-* [ ] `api.rs`：`list_api_keys(token)` / `get_api_key_value(token, id)` + 纯解析函数与单测
-* [ ] `accounts.rs`：`update_api_keys(id, keys)`（原子写，保留其余字段）
-* [ ] `tray.rs`：账号子菜单增加「查看 API Key…」（id `keys:<uuid>`）与指令
-* [ ] `app.rs`：Key 弹窗（列表 + 复制按钮 + 加载/错误态）、请求线程与结果回传
-* [ ] 剪贴板写入（eframe 已含 `clipboard` 特性），复制后 toast 提示
-* [ ] 单测：打码规则、摘要解析、缓存写回后往返
+* [x] `api.rs`：`list_api_keys(token)` / `get_api_key_value(token, id)` + 纯解析函数与单测
+* [x] `accounts.rs`：`update_api_keys(id, keys)`（原子写，保留其余字段）
+* [x] `tray.rs`：账号子菜单增加「查看 API Key…」（id `keys:<uuid>`）与指令
+* [x] `app.rs`：Key 弹窗（列表 + 复制按钮 + 加载/错误态）、请求线程与结果回传
+* [x] 剪贴板写入（eframe 已含 `clipboard` 特性），复制后 toast 提示
+* [x] 单测：打码规则、摘要解析、缓存写回后往返
 
 ## 七、验收标准
 
@@ -103,4 +103,32 @@
 
 ## 十、结果
 
-> 完成后填写。
+* 完成日期：2026-10-18
+* 分支：`feat/api-keys`
+
+### 验证记录
+
+* `cargo fmt --check` / `cargo clippy --all-targets -- -D warnings` / `cargo build` → 通过；
+* `cargo test` → **89 passed**（新增：打码规则、列表解析兼容数字 id/已打码值、缓存不含完整 Key）；
+* **真实实例接口核对**（需求方账号）：
+  * `GET /api/v1/keys` → `code=0, total=2`，条目字段含
+    `id, key, name, status, group, last_used_at` 等；`key` 是**完整值**（67 字符），
+    因此界面一律走 `mask_api_key` 打码，缓存只存打码值；
+  * `GET /api/v1/keys/19` → 返回完整 `key`（67 字符）与 `group.name = gpt-image`，
+    说明"复制"路径可用；
+  * 分组名取自 `group.name`（列表里没有 `group_name` 字段），解析已兼容。
+
+### 与计划的偏差
+
+1. **列表接口直接返回完整 Key**：原计划假设列表是打码的、复制要单独取详情。
+   实测列表就有完整值，但仍按计划用 `GET /keys/:id` 复制，避免把列表响应里的
+   完整值在内存里多留一份。
+2. **分组字段**：实际是嵌套对象 `group.name`，解析增加了回退分支。
+3. **缓存时机**：列表拉取成功后立即写回 `accounts.json`（`apiKeys`），失败不影响展示。
+
+### 遗留问题
+
+* 弹窗与复制按钮无法自动化点击，实际交互请人工确认；
+* 未做创建/删除（按确认的范围，只读）；
+* 缓存列表目前不用于"断网展示"——断网时弹窗直接显示错误，计划里的"显示缓存"未实现，
+  留待后续（缓存字段已写入，随时可用）。
