@@ -1,0 +1,30 @@
+[package]
+name = "sub2api_tray"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.95"
+description = "Sub2API 托盘工具：在 Windows 通知区域 / macOS 菜单栏中查看已登录的账户状态"
+license = "MIT"
+repository = "https://github.com/Kylineyes/sub2api_tray"
+readme = "README.md"
+keywords = ["sub2api", "tray", "egui", "desktop"]
+categories = ["gui"]
+
+[dependencies]
+anyhow = "1.0.104"
+# 同时启用 glow（OpenGL）与默认的 wgpu 后端，运行时固定使用 glow：
+# Windows 上 wgpu 的交换链拿不到带 alpha 的合成模式（会打印警告），
+# 圆角面板会露出一块方形底色；glow 走 OpenGL，两个平台都能实现真正的透明窗口。
+eframe = { version = "0.37.0", features = ["glow"] }
+egui = "0.37.0"
+env_logger = "0.11.11"
+image = { version = "0.25.10", default-features = false, features = ["png"] }
+log = "0.4.34"
+tray-icon = "0.26.1"
+
+[profile.release]
+# 托盘常驻程序体积越小越好：优先体积，开启 LTO 并去掉符号表
+opt-level = "s"
+lto = true
+codegen-units = 1
+strip = true

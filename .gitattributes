@@ -1,0 +1,15 @@
+# 统一换行符，避免 Windows / macOS 之间来回产生整文件差异。
+# 文本文件在仓库内一律使用 LF，Git 检出时不做自动转换。
+* text=auto eol=lf
+
+# 二进制文件：不要做换行符转换，也不要尝试文本合并
+*.png binary
+*.ico binary
+*.icns binary
+*.exe binary
+*.dll binary
+*.dylib binary
+
+# Windows 脚本保留 CRLF，方便直接用 PowerShell / 记事本打开
+*.ps1 text eol=crlf
+*.bat text eol=crlf
