@@ -41,6 +41,12 @@ pub const LOGIN_2FA_PATH: &str = "/api/v1/auth/login/2fa";
 /// 当前用户路径。
 pub const ME_PATH: &str = "/api/v1/auth/me";
 
+/// 刷新 token 路径（后端限流 30 次/分钟，调用方要克制）。
+pub const REFRESH_PATH: &str = "/api/v1/auth/refresh";
+
+/// 订阅摘要路径。
+pub const SUBSCRIPTION_SUMMARY_PATH: &str = "/api/v1/subscriptions/summary";
+
 /// 请求种类。错误分类需要它来区分"密码错"和"验证码错"。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RequestKind {
@@ -130,12 +136,30 @@ pub enum LoginOutcome {
 }
 
 /// `/auth/me` 的关键信息。
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct MeInfo {
     /// 角色，用于后续"管理员 / 普通用户"分岔展示。
     pub role: AccountRole,
     /// 服务端返回的邮箱（可能与用户输入的大小写不同）。
     pub email: Option<String>,
+    /// 余额（美元）。后端一定返回，但为了容错用 `Option`。
+    pub balance: Option<f64>,
+}
+
+/// `/subscriptions/summary` 的摘要信息（0004 的面板展示用）。
+///
+/// 真实实例的 `data` 形如：
+/// `{"active_count":0,"total_used_usd":0,"subscriptions":[]}`；
+/// `subscriptions[]` 里每一项带有分组名与日/周/月用量，这里只提取"分组名列表"，
+/// 面板展示用得上，字段再多就该单独做详情页了。
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct SubscriptionSummary {
+    /// 生效中的订阅数量。
+    pub active_count: u32,
+    /// 这些订阅的累计已用金额（美元）。
+    pub total_used_usd: f64,
+    /// 订阅对应的分组名（去重后按出现顺序）。
+    pub group_names: Vec<String>,
 }
 
 /// 套在外面的响应信封。
@@ -275,8 +299,54 @@ pub fn parse_me_response(status: u16, body: &str) -> Result<MeInfo, ApiError> {
         .get("email")
         .and_then(|value| value.as_str())
         .map(ToOwned::to_owned);
+    let balance = data.get("balance").and_then(|value| value.as_f64());
 
-    Ok(MeInfo { role, email })
+    Ok(MeInfo {
+        role,
+        email,
+        balance,
+    })
+}
+
+/// 纯函数：解析 `/subscriptions/summary`。
+///
+/// 只提取面板需要的三项：生效订阅数、累计已用金额、分组名列表。
+/// `subscriptions` 缺失或不是数组时按"没有订阅"处理，不报错——
+/// 余额/登录态才是主信息，订阅只是锦上添花。
+pub fn parse_subscription_summary(
+    status: u16,
+    body: &str,
+) -> Result<SubscriptionSummary, ApiError> {
+    let data = read_data(status, body, RequestKind::Me)?;
+
+    let active_count = data
+        .get("active_count")
+        .and_then(|value| value.as_u64())
+        .unwrap_or(0)
+        .min(u64::from(u32::MAX)) as u32;
+    let total_used_usd = data
+        .get("total_used_usd")
+        .and_then(|value| value.as_f64())
+        .unwrap_or(0.0);
+
+    let mut group_names = Vec::new();
+    if let Some(items) = data.get("subscriptions").and_then(|value| value.as_array()) {
+        for item in items {
+            // 用 let-chain 一次表达三个条件：有名字、非空、未出现过
+            if let Some(name) = item.get("group_name").and_then(|value| value.as_str())
+                && !name.is_empty()
+                && !group_names.iter().any(|existing| existing == name)
+            {
+                group_names.push(name.to_owned());
+            }
+        }
+    }
+
+    Ok(SubscriptionSummary {
+        active_count,
+        total_used_usd,
+        group_names,
+    })
 }
 
 /// 角色字符串映射；未知值统一为 `Unknown`，不让新角色导致登录失败。
@@ -388,6 +458,41 @@ impl HttpClient {
             // 读 body 失败在 ureq 里也归到 `ureq::Error`，与连接错误同一类处理
             .map_err(map_transport_error)?;
         Ok((status, text))
+    }
+
+    /// 用 refresh token 续期，拿到新的 token 对。
+    ///
+    /// 响应结构与登录成功一致，因此复用 [`parse_login_response`]；
+    /// 后端对 `/auth/refresh` 有 30 次/分钟限流，调用方失败后必须退避。
+    pub fn refresh(&self, refresh_token: &str) -> Result<LoginTokens, ApiError> {
+        let body = serde_json::json!({ "refresh_token": refresh_token });
+        let (status, text) = self.post_json(REFRESH_PATH, &body)?;
+        match parse_login_response(status, &text, RequestKind::Login)? {
+            LoginOutcome::Tokens(tokens) => Ok(tokens),
+            // refresh 接口不该返回"需要 2FA"，出现了就按地址/协议异常处理
+            LoginOutcome::NeedsTotp { .. } => Err(ApiError::NotSub2Api),
+        }
+    }
+
+    /// 读取订阅摘要（面板展示"余额 / 订阅"用）。
+    pub fn subscription_summary(
+        &self,
+        access_token: &str,
+    ) -> Result<SubscriptionSummary, ApiError> {
+        let url = format!("{}{SUBSCRIPTION_SUMMARY_PATH}", self.base_url);
+        let mut response = self
+            .agent
+            .get(&url)
+            .header("accept", "application/json")
+            .header("authorization", &format!("Bearer {access_token}"))
+            .call()
+            .map_err(map_transport_error)?;
+        let status = response.status().as_u16();
+        let text = response
+            .body_mut()
+            .read_to_string()
+            .map_err(map_transport_error)?;
+        parse_subscription_summary(status, &text)
     }
 }
 
@@ -606,18 +711,104 @@ mod tests {
     }
 
     #[test]
-    fn 当前用户解析角色与邮箱() {
+    fn 当前用户解析角色邮箱与余额() {
         let body = r#"{"code":0,"message":"success","data":{
             "id":1,"email":"User@Example.com","role":"admin","balance":12.5
         }}"#;
         let me = parse_me_response(200, body).unwrap();
         assert_eq!(me.role, AccountRole::Admin);
         assert_eq!(me.email.as_deref(), Some("User@Example.com"));
+        assert_eq!(me.balance, Some(12.5));
+    }
+
+    #[test]
+    fn 订阅摘要解析出数量金额与分组名() {
+        let body = r#"{"code":0,"message":"success","data":{
+            "active_count":2,"total_used_usd":3.25,
+            "subscriptions":[
+                {"id":1,"group_name":"默认分组","status":"active"},
+                {"id":2,"group_name":"默认分组","status":"active"},
+                {"id":3,"group_name":"高速分组","status":"active"}
+            ]
+        }}"#;
+        let summary = parse_subscription_summary(200, body).unwrap();
+        assert_eq!(summary.active_count, 2);
+        assert_eq!(summary.total_used_usd, 3.25);
+        // 分组名去重且保持出现顺序
+        assert_eq!(summary.group_names, vec!["默认分组", "高速分组"]);
+    }
+
+    #[test]
+    fn 没有订阅时摘要为零值() {
+        let body = r#"{"code":0,"message":"success","data":{
+            "active_count":0,"total_used_usd":0,"subscriptions":[]
+        }}"#;
+        let summary = parse_subscription_summary(200, body).unwrap();
+        assert_eq!(summary.active_count, 0);
+        assert_eq!(summary.total_used_usd, 0.0);
+        assert!(summary.group_names.is_empty());
+    }
+
+    #[test]
+    fn 订阅接口返回错误时按错误分类() {
+        let body = r#"{"code":401,"message":"unauthorized"}"#;
+        let err = parse_subscription_summary(401, body).unwrap_err();
+        assert_eq!(err, ApiError::Unauthorized);
     }
 
     #[test]
     fn 过期时间非法时不返回时间() {
         assert!(expires_at_from_now(0).is_none());
         assert!(expires_at_from_now(-5).is_none());
+    }
+
+    /// 手工验收：对**真实** Sub2API 实例做一次登录并读取角色。
+    ///
+    /// 默认忽略（`cargo test` 不会跑它），需要时显式执行：
+    ///
+    /// ```powershell
+    /// $env:SUB2API_ACCEPTANCE_URL = "http://your-host:8080"
+    /// $env:SUB2API_ACCEPTANCE_EMAIL = "you@example.com"
+    /// $env:SUB2API_ACCEPTANCE_PASSWORD = "******"
+    /// cargo test 真实实例 -- --ignored --nocapture
+    /// ```
+    ///
+    /// 凭据只从环境变量读取，**不要**把真实账号写进代码或提交进仓库。
+    #[test]
+    #[ignore = "需要真实实例与凭据，见函数文档"]
+    fn 真实实例登录并读取角色() {
+        let (base_url, email, password) = acceptance_env();
+
+        let client = HttpClient::new(&base_url, Duration::from_secs(15)).expect("构造客户端");
+        let outcome = client.login(&email, &password).expect("真实实例登录失败");
+
+        let tokens = match outcome {
+            LoginOutcome::Tokens(tokens) => tokens,
+            other => panic!("该账号需要额外验证步骤，当前用例不支持：{other:?}"),
+        };
+        assert!(!tokens.access_token.is_empty());
+
+        let me = client
+            .me(&tokens.access_token)
+            .expect("读取真实实例的当前用户");
+        assert_ne!(me.role, AccountRole::Unknown, "角色不应为未知");
+        eprintln!(
+            "真实实例验收通过：role={:?} email={:?} token_len={}",
+            me.role,
+            me.email,
+            tokens.access_token.len()
+        );
+    }
+
+    /// 从环境变量读取手工验收所需的地址与凭据。
+    fn acceptance_env() -> (String, String, String) {
+        let read = |name: &str| {
+            std::env::var(name).unwrap_or_else(|_| panic!("缺少环境变量 {name}（见用例文档）"))
+        };
+        (
+            read("SUB2API_ACCEPTANCE_URL"),
+            read("SUB2API_ACCEPTANCE_EMAIL"),
+            read("SUB2API_ACCEPTANCE_PASSWORD"),
+        )
     }
 }

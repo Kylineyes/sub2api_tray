@@ -35,7 +35,9 @@ mod fonts;
 mod login;
 mod mask;
 mod paths;
+mod refresh;
 mod secrets;
+mod state;
 mod tray;
 
 /// 应用显示名称：同时用作窗口标题和托盘提示文字的前缀。
