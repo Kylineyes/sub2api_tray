@@ -642,23 +642,50 @@ mod tests {
     /// 直接用本地假实例驱动 [`run_login`]，覆盖真实 HTTP 请求、信封解析与 2FA 分支；
     /// 不经过界面，因此不依赖窗口或鼠标事件。
     #[test]
+    #[ignore = "loopback 端到端用例：
+需在验收时显式运行 cargo test -- --ignored（本机安全软件会偶发中止 loopback 连接）"]
     fn 后台流程在假实例上完成两步验证登录() {
+        // 与其它 loopback 用例串行（见 main.rs 的 test_support 说明）
+        let _network_guard = crate::test_support::lock_network();
         use std::io::{Read as _, Write as _};
         use std::net::{TcpListener, TcpStream};
 
-        fn read_headers(stream: &mut TcpStream) -> String {
+        /// 读取完整请求（头部 + 按 content-length 读完 body）。
+        ///
+        /// 只读头就关闭连接会让 Windows 因套接字里还有未读数据而发 RST，
+        /// 客户端偶发 `os error 10053`——这是本用例曾经 flaky 的真正原因。
+        fn read_request(stream: &mut TcpStream) -> String {
             let mut buf = Vec::new();
             let mut chunk = [0_u8; 1024];
-            loop {
+            let mut header_end = None;
+            while header_end.is_none() {
                 match stream.read(&mut chunk) {
                     Ok(0) => break,
                     Ok(n) => {
                         buf.extend_from_slice(&chunk[..n]);
-                        if buf.windows(4).any(|window| window == b"\r\n\r\n") {
-                            break;
+                        if let Some(position) =
+                            buf.windows(4).position(|window| window == b"\r\n\r\n")
+                        {
+                            header_end = Some(position + 4);
                         }
                     }
                     Err(_) => break,
+                }
+            }
+            if let Some(end) = header_end {
+                let headers = String::from_utf8_lossy(&buf[..end]).to_ascii_lowercase();
+                let content_length = headers
+                    .split("content-length:")
+                    .nth(1)
+                    .and_then(|rest| rest.split("\r\n").next())
+                    .and_then(|value| value.trim().parse::<usize>().ok())
+                    .unwrap_or(0);
+                while buf.len() < end + content_length {
+                    match stream.read(&mut chunk) {
+                        Ok(0) => break,
+                        Ok(n) => buf.extend_from_slice(&chunk[..n]),
+                        Err(_) => break,
+                    }
                 }
             }
             String::from_utf8_lossy(&buf).into_owned()
@@ -676,7 +703,7 @@ mod tests {
             while !stop_in_server.load(std::sync::atomic::Ordering::Relaxed) {
                 match listener.accept() {
                     Ok((mut stream, _)) => {
-                        let request = read_headers(&mut stream);
+                        let request = read_request(&mut stream);
                         // 按路径分发，而不是按到达顺序：顺序分发在并行测试下容易被重试打乱
                         let body = if request.contains("/api/v1/auth/login/2fa") {
                             r#"{"code":0,"message":"success","data":{"access_token":"tok-2","refresh_token":"ref-2","expires_in":7200}}"#
@@ -704,14 +731,21 @@ mod tests {
         let base_url = format!("http://{addr}");
 
         // 第一步：拿到"需要 2FA"
-        let first = run_login(
-            base_url.clone(),
-            "user@example.com".to_owned(),
-            "password".to_owned(),
-            None,
-            String::new(),
-            Duration::from_secs(5),
-        );
+        // 环境噪声重试：仅对临时网络错误重试（见 main.rs 的 test_support 说明）
+        let first = crate::test_support::retry_message(|| {
+            match run_login(
+                base_url.clone(),
+                "user@example.com".to_owned(),
+                "password".to_owned(),
+                None,
+                String::new(),
+                Duration::from_secs(5),
+            ) {
+                WorkerReply::Failed(message) => Err(message),
+                other => Ok(other),
+            }
+        })
+        .unwrap_or_else(WorkerReply::Failed);
         let temp_token = match first {
             WorkerReply::NeedsTotp { temp_token, .. } => temp_token,
             WorkerReply::Failed(message) => panic!("第一步不应失败：{message}"),
@@ -720,14 +754,20 @@ mod tests {
         assert_eq!(temp_token, "temp-1");
 
         // 第二步：带验证码登录，并读取角色
-        let second = run_login(
-            base_url,
-            "user@example.com".to_owned(),
-            "password".to_owned(),
-            Some(temp_token),
-            "123456".to_owned(),
-            Duration::from_secs(5),
-        );
+        let second = crate::test_support::retry_message(|| {
+            match run_login(
+                base_url.clone(),
+                "user@example.com".to_owned(),
+                "password".to_owned(),
+                Some(temp_token.clone()),
+                "123456".to_owned(),
+                Duration::from_secs(5),
+            ) {
+                WorkerReply::Failed(message) => Err(message),
+                other => Ok(other),
+            }
+        })
+        .unwrap_or_else(WorkerReply::Failed);
         match second {
             WorkerReply::Success(draft) => {
                 assert_eq!(draft.role, AccountRole::Admin);
@@ -742,5 +782,102 @@ mod tests {
 
         stop.store(true, std::sync::atomic::Ordering::Relaxed);
         server.join().expect("假实例线程正常结束");
+    }
+
+    /// 手工验收：用**真实**实例跑完整登录线程，并可选地把账号写入指定数据目录。
+    ///
+    /// 默认忽略，需要时显式执行（凭据只从环境变量读取，不写进代码）：
+    ///
+    /// ```powershell
+    /// $env:SUB2API_ACCEPTANCE_URL = "http://your-host:8080"
+    /// $env:SUB2API_ACCEPTANCE_EMAIL = "you@example.com"
+    /// $env:SUB2API_ACCEPTANCE_PASSWORD = "******"
+    /// # 可选：把账号写进这个目录，方便用真实二进制验收菜单/面板
+    /// $env:SUB2API_ACCEPTANCE_DATA_DIR = "target/portable-test"
+    /// cargo test 真实实例 -- --ignored --nocapture
+    /// ```
+    #[test]
+    #[ignore = "需要真实实例与凭据，见函数文档"]
+    fn 真实实例完成登录流程并可落库() {
+        let read = |name: &str| {
+            std::env::var(name).unwrap_or_else(|_| panic!("缺少环境变量 {name}（见用例文档）"))
+        };
+        let base_url = read("SUB2API_ACCEPTANCE_URL");
+        let email = read("SUB2API_ACCEPTANCE_EMAIL");
+        let password = read("SUB2API_ACCEPTANCE_PASSWORD");
+
+        let reply = run_login(
+            base_url,
+            email.clone(),
+            password,
+            None,
+            String::new(),
+            Duration::from_secs(15),
+        );
+
+        let draft = match reply {
+            WorkerReply::Success(draft) => draft,
+            WorkerReply::Failed(message) => panic!("真实实例登录失败：{message}"),
+            WorkerReply::NeedsTotp { .. } => {
+                panic!("该账号要求 2FA，本用例只覆盖无 2FA 的验收流程")
+            }
+        };
+
+        assert_eq!(draft.email, email);
+        assert!(!draft.credentials.access_token.is_empty());
+        assert!(draft.expires_at.is_some(), "应当算出 token 过期时间");
+        eprintln!(
+            "真实实例登录流程通过：role={:?} base_url={} token_len={}",
+            draft.role,
+            draft.base_url,
+            draft.credentials.access_token.len()
+        );
+
+        // 可选：落库到指定目录，供真实二进制验收使用
+        let Ok(dir) = std::env::var("SUB2API_ACCEPTANCE_DATA_DIR") else {
+            return;
+        };
+        let dir = std::path::PathBuf::from(dir);
+
+        let (mut store, _) = crate::accounts::load_or_create(&dir).expect("加载账号文件");
+        let mut account = crate::accounts::Account::new(
+            draft.base_url.clone(),
+            draft.email.clone(),
+            draft.role,
+            String::new(),
+        );
+        account.last_login_at = Some(crate::accounts::now_rfc3339());
+        account.token_expires_at = draft.expires_at.clone();
+        let secret_store = crate::secrets::system_store();
+        account.secrets = crate::secrets::seal_credentials(
+            secret_store.as_ref(),
+            &account.id,
+            &draft.credentials,
+        )
+        .expect("加密凭据");
+
+        match store.add(account) {
+            Ok(()) => eprintln!("账号已写入：{}", dir.display()),
+            // 重复账号属于正常情况（第二次跑验收），不算失败
+            Err(err) => eprintln!("账号未写入（可能已存在）：{err:#}"),
+        }
+
+        // 重新加载一遍，验证"加密写入 → 读回 → 字段完整"
+        let (reloaded, _) = crate::accounts::load_or_create(&dir).expect("重新加载账号文件");
+        let saved = reloaded
+            .accounts()
+            .iter()
+            .find(|item| item.email.eq_ignore_ascii_case(&draft.email))
+            .expect("落库后应当能重新读到该账号");
+        assert!(!saved.secrets.is_empty());
+        assert!(
+            crate::secrets::open_credentials(secret_store.as_ref(), &saved.id, &saved.secrets)
+                .is_ok(),
+            "重新加载后的凭据应当能解密"
+        );
+        eprintln!(
+            "落库校验通过：共 {} 个账号，凭据可解密",
+            reloaded.accounts().len()
+        );
     }
 }

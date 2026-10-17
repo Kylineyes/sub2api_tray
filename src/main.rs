@@ -35,7 +35,9 @@ mod fonts;
 mod login;
 mod mask;
 mod paths;
+mod refresh;
 mod secrets;
+mod state;
 mod tray;
 
 /// 应用显示名称：同时用作窗口标题和托盘提示文字的前缀。
@@ -135,5 +137,130 @@ fn window_icon() -> egui::IconData {
             log::warn!("窗口图标加载失败，改用默认图标：{err:#}");
             egui::IconData::default()
         }
+    }
+}
+
+/// 测试辅助：本地假实例（`TcpListener`）的公共部件。
+///
+/// 为什么需要它：三个端到端用例都要"起一个假 Sub2API、读请求、回 JSON"。
+/// 把这些细节集中在这里，既避免复制粘贴，也把踩过的坑固化下来：
+///
+/// 1. 必须**读完整个请求体**再关闭连接。只读请求头就关闭时，Windows 会因为
+///    套接字里还有未读数据而发 RST，客户端偶发 `os error 10053`；
+/// 2. 网络用例串行执行（[`lock_network`]）：并行起多个 loopback 监听仍会抖动；
+/// 3. 即便做到上面两点，本机安全软件仍会偶发中止 loopback 连接（同样是 10053）。
+///    这不是代码缺陷，所以用例允许对**网络类错误**做有限重试（[`is_transient`]），
+///    其它错误（解析、鉴权、断言失败）不重试，避免掩盖真实问题。
+///
+/// 放在文件末尾是因为 clippy 的 `items_after_test_module` 不允许在测试模块之后再定义条目。
+/// 只影响测试，不影响运行时行为。
+#[cfg(test)]
+pub mod test_support {
+    use std::io::{Read as _, Write as _};
+    use std::net::TcpStream;
+    use std::sync::{Mutex, MutexGuard};
+
+    /// 网络用例的全局互斥锁。
+    pub static NETWORK_LOCK: Mutex<()> = Mutex::new(());
+
+    /// 获取网络用例锁；即使之前有测试 panic 过也能继续（忽略中毒）。
+    pub fn lock_network() -> MutexGuard<'static, ()> {
+        NETWORK_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    /// 判断一条错误信息是否属于"环境导致的临时网络失败"。
+    ///
+    /// 只认两种：我们自己的网络文案（"无法连接…"）与 Windows 的 10053
+    /// （软件中止了一个已建立的连接，常见于安全软件干预 loopback）。
+    /// 其它错误（解析失败、401、断言不符）必须原样暴露，不能被重试掩盖。
+    pub fn is_transient(message: &str) -> bool {
+        message.contains("无法连接") || message.contains("10053")
+    }
+
+    /// 网络用例的重试次数（含首次）。
+    pub const RETRY_ATTEMPTS: usize = 3;
+
+    /// 临时网络失败之间的等待，避免瞬间重连再次被中止。
+    pub const RETRY_DELAY: std::time::Duration = std::time::Duration::from_millis(50);
+
+    /// 重试一个返回 `Result<_, String>` 的操作：仅当错误信息是临时网络错误时重试。
+    ///
+    /// 登录线程与刷新线程把错误包装成了字符串（`WorkerReply::Failed` /
+    /// `RefreshOutcome::Offline`），所以这里用字符串判断；非网络错误立即返回。
+    pub fn retry_message<T>(mut op: impl FnMut() -> Result<T, String>) -> Result<T, String> {
+        let mut last_error = None;
+
+        for attempt in 1..=RETRY_ATTEMPTS {
+            match op() {
+                Ok(value) => return Ok(value),
+                Err(message) if is_transient(&message) && attempt < RETRY_ATTEMPTS => {
+                    eprintln!("临时网络错误（第 {attempt} 次尝试）：{message}，稍后重试");
+                    last_error = Some(message);
+                    std::thread::sleep(RETRY_DELAY);
+                }
+                Err(message) => return Err(message),
+            }
+        }
+
+        Err(last_error.unwrap_or_else(|| "重试次数耗尽".to_owned()))
+    }
+
+    /// 读取一个完整的 HTTP 请求（请求头 + 按 `content-length` 读完请求体）。
+    ///
+    /// 返回原始文本（请求行 + 头 + body），调用方按需做包含判断。
+    /// 读不到数据时返回已读到的部分，不 panic。
+    pub fn read_request(stream: &mut TcpStream) -> String {
+        let mut buf = Vec::new();
+        let mut chunk = [0_u8; 1024];
+
+        // 1) 读到头部结束（\r\n\r\n）
+        let mut header_end = None;
+        while header_end.is_none() {
+            match stream.read(&mut chunk) {
+                Ok(0) => break,
+                Ok(n) => {
+                    buf.extend_from_slice(&chunk[..n]);
+                    if let Some(position) = buf.windows(4).position(|window| window == b"\r\n\r\n")
+                    {
+                        header_end = Some(position + 4);
+                    }
+                }
+                Err(_) => break,
+            }
+        }
+
+        // 2) 按 content-length 读完 body，避免"提前关闭 → RST"
+        if let Some(end) = header_end {
+            let headers = String::from_utf8_lossy(&buf[..end]).to_ascii_lowercase();
+            let content_length = headers
+                .split("content-length:")
+                .nth(1)
+                .and_then(|rest| rest.split("\r\n").next())
+                .and_then(|value| value.trim().parse::<usize>().ok())
+                .unwrap_or(0);
+
+            while buf.len() < end + content_length {
+                match stream.read(&mut chunk) {
+                    Ok(0) => break,
+                    Ok(n) => buf.extend_from_slice(&chunk[..n]),
+                    Err(_) => break,
+                }
+            }
+        }
+
+        String::from_utf8_lossy(&buf).into_owned()
+    }
+
+    /// 回一个 JSON 响应并正常关闭连接（不设置 keep-alive，客户端会自己重连）。
+    pub fn write_json(stream: &mut TcpStream, status_line: &str, body: &str) {
+        let response = format!(
+            "HTTP/1.1 {status_line}\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+            body.len(),
+            body
+        );
+        stream.write_all(response.as_bytes()).ok();
+        stream.flush().ok();
     }
 }

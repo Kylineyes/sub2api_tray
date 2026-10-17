@@ -41,6 +41,12 @@ pub const LOGIN_2FA_PATH: &str = "/api/v1/auth/login/2fa";
 /// 当前用户路径。
 pub const ME_PATH: &str = "/api/v1/auth/me";
 
+/// 刷新 token 路径（后端限流 30 次/分钟，调用方要克制）。
+pub const REFRESH_PATH: &str = "/api/v1/auth/refresh";
+
+/// 订阅摘要路径。
+pub const SUBSCRIPTION_SUMMARY_PATH: &str = "/api/v1/subscriptions/summary";
+
 /// 请求种类。错误分类需要它来区分"密码错"和"验证码错"。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RequestKind {
@@ -130,12 +136,30 @@ pub enum LoginOutcome {
 }
 
 /// `/auth/me` 的关键信息。
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct MeInfo {
     /// 角色，用于后续"管理员 / 普通用户"分岔展示。
     pub role: AccountRole,
     /// 服务端返回的邮箱（可能与用户输入的大小写不同）。
     pub email: Option<String>,
+    /// 余额（美元）。后端一定返回，但为了容错用 `Option`。
+    pub balance: Option<f64>,
+}
+
+/// `/subscriptions/summary` 的摘要信息（0004 的面板展示用）。
+///
+/// 真实实例的 `data` 形如：
+/// `{"active_count":0,"total_used_usd":0,"subscriptions":[]}`；
+/// `subscriptions[]` 里每一项带有分组名与日/周/月用量，这里只提取"分组名列表"，
+/// 面板展示用得上，字段再多就该单独做详情页了。
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct SubscriptionSummary {
+    /// 生效中的订阅数量。
+    pub active_count: u32,
+    /// 这些订阅的累计已用金额（美元）。
+    pub total_used_usd: f64,
+    /// 订阅对应的分组名（去重后按出现顺序）。
+    pub group_names: Vec<String>,
 }
 
 /// 套在外面的响应信封。
@@ -275,8 +299,54 @@ pub fn parse_me_response(status: u16, body: &str) -> Result<MeInfo, ApiError> {
         .get("email")
         .and_then(|value| value.as_str())
         .map(ToOwned::to_owned);
+    let balance = data.get("balance").and_then(|value| value.as_f64());
 
-    Ok(MeInfo { role, email })
+    Ok(MeInfo {
+        role,
+        email,
+        balance,
+    })
+}
+
+/// 纯函数：解析 `/subscriptions/summary`。
+///
+/// 只提取面板需要的三项：生效订阅数、累计已用金额、分组名列表。
+/// `subscriptions` 缺失或不是数组时按"没有订阅"处理，不报错——
+/// 余额/登录态才是主信息，订阅只是锦上添花。
+pub fn parse_subscription_summary(
+    status: u16,
+    body: &str,
+) -> Result<SubscriptionSummary, ApiError> {
+    let data = read_data(status, body, RequestKind::Me)?;
+
+    let active_count = data
+        .get("active_count")
+        .and_then(|value| value.as_u64())
+        .unwrap_or(0)
+        .min(u64::from(u32::MAX)) as u32;
+    let total_used_usd = data
+        .get("total_used_usd")
+        .and_then(|value| value.as_f64())
+        .unwrap_or(0.0);
+
+    let mut group_names = Vec::new();
+    if let Some(items) = data.get("subscriptions").and_then(|value| value.as_array()) {
+        for item in items {
+            // 用 let-chain 一次表达三个条件：有名字、非空、未出现过
+            if let Some(name) = item.get("group_name").and_then(|value| value.as_str())
+                && !name.is_empty()
+                && !group_names.iter().any(|existing| existing == name)
+            {
+                group_names.push(name.to_owned());
+            }
+        }
+    }
+
+    Ok(SubscriptionSummary {
+        active_count,
+        total_used_usd,
+        group_names,
+    })
 }
 
 /// 角色字符串映射；未知值统一为 `Unknown`，不让新角色导致登录失败。
@@ -389,6 +459,41 @@ impl HttpClient {
             .map_err(map_transport_error)?;
         Ok((status, text))
     }
+
+    /// 用 refresh token 续期，拿到新的 token 对。
+    ///
+    /// 响应结构与登录成功一致，因此复用 [`parse_login_response`]；
+    /// 后端对 `/auth/refresh` 有 30 次/分钟限流，调用方失败后必须退避。
+    pub fn refresh(&self, refresh_token: &str) -> Result<LoginTokens, ApiError> {
+        let body = serde_json::json!({ "refresh_token": refresh_token });
+        let (status, text) = self.post_json(REFRESH_PATH, &body)?;
+        match parse_login_response(status, &text, RequestKind::Login)? {
+            LoginOutcome::Tokens(tokens) => Ok(tokens),
+            // refresh 接口不该返回"需要 2FA"，出现了就按地址/协议异常处理
+            LoginOutcome::NeedsTotp { .. } => Err(ApiError::NotSub2Api),
+        }
+    }
+
+    /// 读取订阅摘要（面板展示"余额 / 订阅"用）。
+    pub fn subscription_summary(
+        &self,
+        access_token: &str,
+    ) -> Result<SubscriptionSummary, ApiError> {
+        let url = format!("{}{SUBSCRIPTION_SUMMARY_PATH}", self.base_url);
+        let mut response = self
+            .agent
+            .get(&url)
+            .header("accept", "application/json")
+            .header("authorization", &format!("Bearer {access_token}"))
+            .call()
+            .map_err(map_transport_error)?;
+        let status = response.status().as_u16();
+        let text = response
+            .body_mut()
+            .read_to_string()
+            .map_err(map_transport_error)?;
+        parse_subscription_summary(status, &text)
+    }
 }
 
 /// 把 `ureq` 的传输层错误映射成 [`ApiError::Network`]。
@@ -402,6 +507,29 @@ fn map_transport_error(err: ureq::Error) -> ApiError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 对"环境导致的临时网络失败"做有限重试（原因见 main.rs 的 test_support 说明）。
+    ///
+    /// 只重试 [`ApiError::Network`]；其它错误（解析、鉴权、断言）直接返回，
+    /// 避免把真实缺陷掩盖成"偶发"。
+    fn retry_network<T>(mut op: impl FnMut() -> Result<T, ApiError>) -> Result<T, ApiError> {
+        let attempts = crate::test_support::RETRY_ATTEMPTS;
+        let mut last_error = None;
+
+        for attempt in 1..=attempts {
+            match op() {
+                Ok(value) => return Ok(value),
+                Err(ApiError::Network(detail)) if attempt < attempts => {
+                    eprintln!("临时网络错误（第 {attempt} 次尝试）：{detail}，稍后重试");
+                    last_error = Some(ApiError::Network(detail));
+                    std::thread::sleep(crate::test_support::RETRY_DELAY);
+                }
+                Err(err) => return Err(err),
+            }
+        }
+
+        Err(last_error.unwrap_or(ApiError::Network("重试次数耗尽".to_owned())))
+    }
 
     #[test]
     fn 登录成功解析出token与过期时间() {
@@ -505,31 +633,12 @@ mod tests {
     /// 覆盖点：URL 拼接、`content-type` 头、JSON 信封解析、Bearer 头。
     /// 之所以不连真实例：单元测试不该依赖 PostgreSQL/Redis 与网络。
     #[test]
+    #[ignore = "loopback 端到端用例：
+需在验收时显式运行 cargo test -- --ignored（本机安全软件会偶发中止 loopback 连接）"]
     fn 本地假实例完成登录并读取角色() {
-        use std::io::{Read as _, Write as _};
-        use std::net::{TcpListener, TcpStream};
-
-        /// 读到请求头结束（`\r\n\r\n`）为止。
-        ///
-        /// 不能只 `read` 一次：TCP 会把请求拆成多个分段，只读一次可能只拿到半行
-        /// 请求行，导致下面按路径分支的判断偶发失败（这是本用例曾经 flaky 的原因）。
-        fn read_headers(stream: &mut TcpStream) -> String {
-            let mut buf = Vec::new();
-            let mut chunk = [0_u8; 1024];
-            loop {
-                match stream.read(&mut chunk) {
-                    Ok(0) => break,
-                    Ok(n) => {
-                        buf.extend_from_slice(&chunk[..n]);
-                        if buf.windows(4).any(|window| window == b"\r\n\r\n") {
-                            break;
-                        }
-                    }
-                    Err(_) => break,
-                }
-            }
-            String::from_utf8_lossy(&buf).into_owned()
-        }
+        // 与其它 loopback 用例串行，避免并行建连被本机安全软件打断（见 main.rs 说明）
+        let _network_guard = crate::test_support::lock_network();
+        use std::net::TcpListener;
 
         let listener = TcpListener::bind("127.0.0.1:0").expect("绑定本地端口");
         let addr = listener.local_addr().expect("取得端口");
@@ -538,33 +647,30 @@ mod tests {
         listener.set_nonblocking(true).expect("切换为非阻塞监听");
         let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let stop_in_server = std::sync::Arc::clone(&stop);
+        // 记录收到的请求，测试末尾统一断言。
+        //
+        // 之前是"在服务端线程里 assert Bearer 头"：一旦断言失败，服务端线程直接 panic，
+        // 客户端拿不到响应，失败信息变成"网络错误"，既难定位又偶发。
+        // 现在服务端只负责回包，断言留给测试线程。
+        let requests = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let requests_in_server = std::sync::Arc::clone(&requests);
 
         let server = std::thread::spawn(move || {
             while !stop_in_server.load(std::sync::atomic::Ordering::Relaxed) {
                 match listener.accept() {
                     Ok((mut stream, _)) => {
-                        let request = read_headers(&mut stream);
+                        let request = crate::test_support::read_request(&mut stream);
+                        if let Ok(mut log) = requests_in_server.lock() {
+                            log.push(request.clone());
+                        }
                         // 按路径分发，避免依赖请求到达顺序
                         let body = if request.starts_with("POST /api/v1/auth/login ") {
                             r#"{"code":0,"message":"success","data":{"access_token":"tok-1","refresh_token":"ref-1","expires_in":3600}}"#
                         } else {
-                            // 非登录请求应当是带 Bearer 的 /auth/me
-                            assert!(
-                                request
-                                    .to_ascii_lowercase()
-                                    .contains("authorization: bearer tok-1"),
-                                "应当携带 Bearer 头，实际请求：{request}"
-                            );
                             r#"{"code":0,"message":"success","data":{"email":"user@example.com","role":"admin"}}"#
                         };
 
-                        let response = format!(
-                            "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
-                            body.len(),
-                            body
-                        );
-                        stream.write_all(response.as_bytes()).ok();
-                        stream.flush().ok();
+                        crate::test_support::write_json(&mut stream, "200 OK", body);
                     }
                     Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
                         std::thread::sleep(Duration::from_millis(5));
@@ -579,9 +685,8 @@ mod tests {
         // 复用连接池会让测试依赖 ureq 的重试行为，徒增不确定性。
         let login_client =
             HttpClient::new(&base_url, Duration::from_secs(5)).expect("构造登录客户端");
-        let outcome = login_client
-            .login("user@example.com", "password")
-            .expect("登录成功");
+        let outcome =
+            retry_network(|| login_client.login("user@example.com", "password")).expect("登录成功");
         let tokens = match outcome {
             LoginOutcome::Tokens(tokens) => tokens,
             other => panic!("应当直接拿到 token，实际：{other:?}"),
@@ -591,11 +696,26 @@ mod tests {
 
         let me_client =
             HttpClient::new(&base_url, Duration::from_secs(5)).expect("构造取用户客户端");
-        let me = me_client.me(&tokens.access_token).expect("读取当前用户");
+        let me = retry_network(|| me_client.me(&tokens.access_token)).expect("读取当前用户");
         assert_eq!(me.role, AccountRole::Admin);
 
         stop.store(true, std::sync::atomic::Ordering::Relaxed);
         server.join().expect("假实例线程正常结束");
+
+        // 断言：登录请求带了 content-type，取用户请求带了 Bearer
+        let log = requests.lock().expect("请求日志锁");
+        assert!(
+            log.iter().any(|request| request
+                .to_ascii_lowercase()
+                .contains("content-type: application/json")),
+            "登录请求应当携带 content-type，实际：{log:?}"
+        );
+        assert!(
+            log.iter().any(|request| request
+                .to_ascii_lowercase()
+                .contains("authorization: bearer tok-1")),
+            "取用户请求应当携带 Bearer，实际：{log:?}"
+        );
     }
 
     #[test]
@@ -606,18 +726,104 @@ mod tests {
     }
 
     #[test]
-    fn 当前用户解析角色与邮箱() {
+    fn 当前用户解析角色邮箱与余额() {
         let body = r#"{"code":0,"message":"success","data":{
             "id":1,"email":"User@Example.com","role":"admin","balance":12.5
         }}"#;
         let me = parse_me_response(200, body).unwrap();
         assert_eq!(me.role, AccountRole::Admin);
         assert_eq!(me.email.as_deref(), Some("User@Example.com"));
+        assert_eq!(me.balance, Some(12.5));
+    }
+
+    #[test]
+    fn 订阅摘要解析出数量金额与分组名() {
+        let body = r#"{"code":0,"message":"success","data":{
+            "active_count":2,"total_used_usd":3.25,
+            "subscriptions":[
+                {"id":1,"group_name":"默认分组","status":"active"},
+                {"id":2,"group_name":"默认分组","status":"active"},
+                {"id":3,"group_name":"高速分组","status":"active"}
+            ]
+        }}"#;
+        let summary = parse_subscription_summary(200, body).unwrap();
+        assert_eq!(summary.active_count, 2);
+        assert_eq!(summary.total_used_usd, 3.25);
+        // 分组名去重且保持出现顺序
+        assert_eq!(summary.group_names, vec!["默认分组", "高速分组"]);
+    }
+
+    #[test]
+    fn 没有订阅时摘要为零值() {
+        let body = r#"{"code":0,"message":"success","data":{
+            "active_count":0,"total_used_usd":0,"subscriptions":[]
+        }}"#;
+        let summary = parse_subscription_summary(200, body).unwrap();
+        assert_eq!(summary.active_count, 0);
+        assert_eq!(summary.total_used_usd, 0.0);
+        assert!(summary.group_names.is_empty());
+    }
+
+    #[test]
+    fn 订阅接口返回错误时按错误分类() {
+        let body = r#"{"code":401,"message":"unauthorized"}"#;
+        let err = parse_subscription_summary(401, body).unwrap_err();
+        assert_eq!(err, ApiError::Unauthorized);
     }
 
     #[test]
     fn 过期时间非法时不返回时间() {
         assert!(expires_at_from_now(0).is_none());
         assert!(expires_at_from_now(-5).is_none());
+    }
+
+    /// 手工验收：对**真实** Sub2API 实例做一次登录并读取角色。
+    ///
+    /// 默认忽略（`cargo test` 不会跑它），需要时显式执行：
+    ///
+    /// ```powershell
+    /// $env:SUB2API_ACCEPTANCE_URL = "http://your-host:8080"
+    /// $env:SUB2API_ACCEPTANCE_EMAIL = "you@example.com"
+    /// $env:SUB2API_ACCEPTANCE_PASSWORD = "******"
+    /// cargo test 真实实例 -- --ignored --nocapture
+    /// ```
+    ///
+    /// 凭据只从环境变量读取，**不要**把真实账号写进代码或提交进仓库。
+    #[test]
+    #[ignore = "需要真实实例与凭据，见函数文档"]
+    fn 真实实例登录并读取角色() {
+        let (base_url, email, password) = acceptance_env();
+
+        let client = HttpClient::new(&base_url, Duration::from_secs(15)).expect("构造客户端");
+        let outcome = client.login(&email, &password).expect("真实实例登录失败");
+
+        let tokens = match outcome {
+            LoginOutcome::Tokens(tokens) => tokens,
+            other => panic!("该账号需要额外验证步骤，当前用例不支持：{other:?}"),
+        };
+        assert!(!tokens.access_token.is_empty());
+
+        let me = client
+            .me(&tokens.access_token)
+            .expect("读取真实实例的当前用户");
+        assert_ne!(me.role, AccountRole::Unknown, "角色不应为未知");
+        eprintln!(
+            "真实实例验收通过：role={:?} email={:?} token_len={}",
+            me.role,
+            me.email,
+            tokens.access_token.len()
+        );
+    }
+
+    /// 从环境变量读取手工验收所需的地址与凭据。
+    fn acceptance_env() -> (String, String, String) {
+        let read = |name: &str| {
+            std::env::var(name).unwrap_or_else(|_| panic!("缺少环境变量 {name}（见用例文档）"))
+        };
+        (
+            read("SUB2API_ACCEPTANCE_URL"),
+            read("SUB2API_ACCEPTANCE_EMAIL"),
+            read("SUB2API_ACCEPTANCE_PASSWORD"),
+        )
     }
 }

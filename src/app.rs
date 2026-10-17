@@ -11,13 +11,16 @@
 //! 等账户列表、设置页加进来之后，绘制部分可以整体挪到 `ui` 模块，届时只需搬代码。
 
 use std::sync::Arc;
+use std::sync::mpsc::{Receiver, TryRecvError};
 use std::time::{Duration, Instant};
 
 use crate::accounts::{self, Account};
 use crate::data::DataLayer;
 use crate::fonts;
 use crate::login::{LoginDialog, LoginDraft};
-use crate::tray::{TrayBridge, TrayCommand, TrayHandle};
+use crate::refresh::{self, RefreshOutcome, RoundResult};
+use crate::state::{AccountStatus, RuntimeTable};
+use crate::tray::{TrayAccountEntry, TrayBridge, TrayCommand, TrayHandle};
 
 /// 面板逻辑宽度（单位：egui 点；100% 缩放下等于像素）。
 pub const PANEL_WIDTH: f32 = 360.0;
@@ -71,6 +74,42 @@ pub const ACCENT: egui::Color32 = egui::Color32::from_rgb(121, 244, 189);
 /// 操作成功提示在面板底部的停留时长。
 const TOAST_DURATION: Duration = Duration::from_secs(4);
 
+/// 启动后延迟多久做第一轮状态刷新。
+///
+/// 不立刻刷新有两个原因：托盘图标与窗口还没完全就绪；用户刚启动就看到一堆请求也没必要。
+const FIRST_REFRESH_DELAY: Duration = Duration::from_secs(5);
+
+/// 面板打开时，数据超过这个时长就补刷一次。
+const STALE_AFTER: Duration = Duration::from_secs(60);
+
+/// 托盘菜单里账号标题的最大字符数。
+///
+/// 邮箱太长会把菜单撑得很难看；超过就截断并加省略号（打码后的邮箱一般不会超）。
+const MENU_TITLE_MAX_CHARS: usize = 24;
+
+/// 面板里一张账号卡片需要的展示数据。
+///
+/// 在绘制前一次性算好（见 `collect_cards`），这样绘制闭包只依赖局部变量，
+/// 不会和 `&mut self` 打架；也避免在闭包里反复查运行态。
+struct AccountCard {
+    /// 展示用邮箱（已按开关打码）。
+    display: String,
+    /// 实例地址。
+    base_url: String,
+    /// 角色中文标签。
+    role_label: &'static str,
+    /// 登录态。
+    status: AccountStatus,
+    /// 余额（美元）。
+    balance: Option<f64>,
+    /// 订阅摘要的一行文字。
+    summary: Option<String>,
+    /// "x 秒前刷新"。
+    refreshed: String,
+    /// 最近一次失败原因。
+    error: Option<String>,
+}
+
 /// 应用主体。
 pub struct TrayApp {
     /// 托盘图标句柄。**必须持有**：drop 之后托盘图标会消失。
@@ -121,8 +160,35 @@ pub struct TrayApp {
     /// 操作成功提示：内容 + 出现时刻。
     ///
     /// 用一个临时的 `(String, Instant)` 而不是完整的通知系统，是因为目前只有
-    /// "账号已保存 / 已删除" 两种提示，等 0004 做完再考虑抽象。
+    /// "账号已保存 / 已删除 / 删除失败" 这几种提示，等通知需求变多再抽象。
     toast: Option<(String, Instant)>,
+
+    /// 账号运行态（在线/离线/余额/订阅摘要）。
+    ///
+    /// 只存内存，不落盘：重启后由第一轮刷新重新判定。
+    runtime: RuntimeTable,
+
+    /// 进行中的刷新轮次；`None` 表示当前没有刷新在跑。
+    refresh_rx: Option<Receiver<Vec<RoundResult>>>,
+
+    /// 上一轮刷新的开始时刻，用于判断"到点该刷新了"。
+    last_round: Option<Instant>,
+
+    /// 进程启动时刻，用于延迟首刷。
+    started_at: Instant,
+
+    /// 等待用户确认删除的账号 id。
+    ///
+    /// 点托盘子菜单里的"退出账号并删除记录"只设置它，真正的删除在面板的确认框里完成。
+    pending_delete: Option<String>,
+
+    /// 当前已经应用到托盘图标上的徽标颜色。
+    ///
+    /// 用来做"只在变化时更新"：`set_icon` 会触发任务栏重绘，每轮刷新都换会闪。
+    badge_applied: Option<[u8; 3]>,
+
+    /// 是否已经应用过一次徽标（区分"还没设过"和"设成无徽标"）。
+    badge_initialized: bool,
 }
 
 impl TrayApp {
@@ -161,7 +227,7 @@ impl TrayApp {
         // 弹窗持有 egui 上下文：后台登录线程靠它唤醒界面
         let login = LoginDialog::new(cc.egui_ctx.clone());
 
-        Ok(Self {
+        let mut app = Self {
             tray,
             bridge,
             panel_visible: false,
@@ -173,7 +239,176 @@ impl TrayApp {
             data,
             login,
             toast: None,
-        })
+            runtime: RuntimeTable::default(),
+            refresh_rx: None,
+            last_round: None,
+            started_at: Instant::now(),
+            pending_delete: None,
+            badge_applied: None,
+            badge_initialized: false,
+        };
+
+        // 启动时先按已加载的账号建一次菜单（此时状态都是"未知"）
+        app.rebuild_menu();
+        app.update_badge();
+
+        Ok(app)
+    }
+
+    /// 按当前账号与运行态重建托盘菜单与提示文字。
+    ///
+    /// `muda` 菜单不能增删项，所以这里是"整份重建"。调用时机：
+    /// 启动、登录成功、删除账号、每轮刷新结束、状态标记为"刷新中"。
+    fn rebuild_menu(&self) {
+        let entries = match &self.data {
+            DataLayer::Ready(store) => store
+                .accounts()
+                .iter()
+                .map(|account| {
+                    let display = store.display_email(&account.email);
+                    let status = self
+                        .runtime
+                        .get(&account.id)
+                        .map(|runtime| runtime.status)
+                        .unwrap_or_default();
+                    TrayAccountEntry {
+                        id: account.id.clone(),
+                        title: menu_title(&display, status),
+                    }
+                })
+                .collect::<Vec<_>>(),
+            // 数据层不可用时没有账号可展示，菜单只保留固定项
+            DataLayer::Unavailable(_) => Vec::new(),
+        };
+
+        match crate::tray::build_menu(&entries) {
+            Ok(menu) => self.tray.set_menu(menu),
+            Err(err) => log::warn!("重建托盘菜单失败：{err:#}"),
+        }
+
+        if let Err(err) = self.tray.set_tooltip(&self.tooltip_text()) {
+            log::debug!("更新托盘提示失败：{err:#}");
+        }
+    }
+
+    /// 托盘悬停提示：账号总数与在线数。
+    fn tooltip_text(&self) -> String {
+        match &self.data {
+            DataLayer::Ready(store) => {
+                let total = store.accounts().len();
+                let online = self.runtime.online_count();
+                format!("Sub2API 托盘 · {total} 个账号（{online} 在线）")
+            }
+            DataLayer::Unavailable(_) => "Sub2API 托盘 · 数据目录不可用".to_owned(),
+        }
+    }
+
+    /// 已加载的账号数量（日志与提示用）。
+    fn data_account_count(&self) -> usize {
+        match &self.data {
+            DataLayer::Ready(store) => store.accounts().len(),
+            DataLayer::Unavailable(_) => 0,
+        }
+    }
+
+    /// 当前应该显示的徽标颜色（由运行态聚合而来）。
+    fn badge_color(&self) -> Option<[u8; 3]> {
+        let DataLayer::Ready(store) = &self.data else {
+            return None;
+        };
+
+        let mut online = 0_usize;
+        let mut offline = 0_usize;
+        let mut invalid = 0_usize;
+        for account in store.accounts() {
+            match self
+                .runtime
+                .get(&account.id)
+                .map(|runtime| runtime.status)
+                .unwrap_or_default()
+            {
+                AccountStatus::Online => online += 1,
+                AccountStatus::Offline => offline += 1,
+                AccountStatus::CredentialsInvalid => invalid += 1,
+                _ => {}
+            }
+        }
+
+        aggregate_badge(store.accounts().len(), online, offline, invalid)
+    }
+
+    /// 把聚合出的徽标应用到托盘图标（仅在变化时真正更新）。
+    fn update_badge(&mut self) {
+        let next = self.badge_color();
+        if self.badge_initialized && self.badge_applied == next {
+            return;
+        }
+
+        self.badge_applied = next;
+        self.badge_initialized = true;
+
+        match self.tray.set_badge(next) {
+            Ok(()) => log::info!(
+                "托盘图标状态徽标：{}",
+                next.map(badge_label).unwrap_or("无（状态未知或没有账号）")
+            ),
+            Err(err) => log::warn!("更新托盘徽标失败：{err:#}"),
+        }
+    }
+
+    /// 把"账号 + 运行态"整理成面板要画的卡片数据。
+    fn collect_cards(&self) -> Vec<AccountCard> {
+        let DataLayer::Ready(store) = &self.data else {
+            return Vec::new();
+        };
+
+        store
+            .accounts()
+            .iter()
+            .map(|account| {
+                let runtime = self.runtime.get(&account.id);
+                let status = runtime.map(|item| item.status).unwrap_or_default();
+                // 运行态里的角色更新（例如管理员被降级），没有就用持久化时的
+                let role = runtime
+                    .map(|item| item.role)
+                    .filter(|role| *role != crate::accounts::AccountRole::Unknown)
+                    .unwrap_or(account.role);
+
+                let summary = runtime.and_then(|item| item.summary.as_ref()).map(|item| {
+                    if item.active_count == 0 {
+                        "无生效订阅".to_owned()
+                    } else if item.group_names.is_empty() {
+                        format!(
+                            "{} 个订阅 · 已用 ${:.2}",
+                            item.active_count, item.total_used_usd
+                        )
+                    } else {
+                        format!(
+                            "{} 个订阅 · 已用 ${:.2} · {}",
+                            item.active_count,
+                            item.total_used_usd,
+                            item.group_names.join("、")
+                        )
+                    }
+                });
+
+                let refreshed = runtime
+                    .and_then(|item| item.last_refreshed)
+                    .map(|at| format!("{} 秒前刷新", at.elapsed().as_secs()))
+                    .unwrap_or_else(|| "尚未刷新".to_owned());
+
+                AccountCard {
+                    display: store.display_email(&account.email),
+                    base_url: account.base_url.clone(),
+                    role_label: role.label(),
+                    status,
+                    balance: runtime.and_then(|item| item.balance),
+                    summary,
+                    refreshed,
+                    error: runtime.and_then(|item| item.last_error.clone()),
+                }
+            })
+            .collect()
     }
 
     /// 处理本帧从托盘收到的指令。
@@ -191,12 +426,248 @@ impl TrayApp {
                     }
                 }
                 TrayCommand::ShowPanel => self.show_panel(ctx),
+                TrayCommand::RefreshNow => {
+                    log::info!("收到手动刷新请求");
+                    self.try_start_refresh(ctx, true);
+                }
+                TrayCommand::OpenLogin => {
+                    // 菜单入口：先把面板叫出来，再打开弹窗（弹窗画在面板窗口里）
+                    self.show_panel(ctx);
+                    self.login.open();
+                }
+                TrayCommand::DeleteAccount(id) => {
+                    // 删除要二次确认：先把面板叫出来，再让面板画确认框
+                    log::debug!("收到删除账号请求：{id}");
+                    self.show_panel(ctx);
+                    self.pending_delete = Some(id);
+                }
                 TrayCommand::Quit => {
                     log::info!("收到退出指令，关闭应用");
                     ctx.send_viewport_cmd(egui::ViewportCommand::Close);
                 }
             }
         }
+    }
+
+    /// 删除账号（确认后调用）：删记录、清凭据、清运行态、重建菜单。
+    fn delete_account(&mut self, id: &str) {
+        let DataLayer::Ready(store) = &mut self.data else {
+            return;
+        };
+
+        let display = store
+            .accounts()
+            .iter()
+            .find(|account| account.id == id)
+            .map(|account| store.display_email(&account.email))
+            .unwrap_or_else(|| "该账号".to_owned());
+
+        match store.accounts_mut().remove(id) {
+            Ok(Some(removed)) => {
+                // macOS 需要额外清钥匙串条目；DPAPI 下是空操作
+                if let Err(err) = store.secrets().remove(&removed.id) {
+                    log::warn!("清理凭据失败：{err:#}");
+                }
+                self.runtime.remove(id);
+                self.toast = Some((format!("已删除 {display}"), Instant::now()));
+                log::info!("账号已删除：{display}");
+            }
+            Ok(None) => log::debug!("账号 {id} 不存在，忽略删除"),
+            Err(err) => {
+                log::warn!("删除账号失败：{err:#}");
+                self.toast = Some((format!("删除失败：{err:#}"), Instant::now()));
+            }
+        }
+
+        self.rebuild_menu();
+        self.update_badge();
+    }
+
+    /// 取一轮刷新结果并写入运行态。
+    ///
+    /// 刷新线程按"一轮全部跑完再回传"设计，因此这里拿到的是整轮结果；
+    /// 若 token 被续期/重登，`rotated` 会带上新凭据，这里负责落库。
+    fn poll_refresh(&mut self, ctx: &egui::Context) {
+        let Some(receiver) = self.refresh_rx.as_ref() else {
+            return;
+        };
+
+        match receiver.try_recv() {
+            Ok(results) => {
+                self.refresh_rx = None;
+                self.last_round = Some(Instant::now());
+                let now = Instant::now();
+                let mut rotated_count = 0_usize;
+
+                for result in results {
+                    match result.outcome {
+                        RefreshOutcome::Online {
+                            status,
+                            summary,
+                            rotated,
+                        } => {
+                            self.runtime.apply_online(
+                                &result.id,
+                                status.role,
+                                status.balance,
+                                summary,
+                                now,
+                            );
+                            if let Some(credentials) = rotated {
+                                self.persist_rotated(&result.id, &credentials);
+                                rotated_count += 1;
+                            }
+                        }
+                        RefreshOutcome::Offline(message) => {
+                            log::debug!("账号 {} 刷新失败（离线）：{message}", result.id);
+                            self.runtime
+                                .apply_error(&result.id, AccountStatus::Offline, message);
+                        }
+                        RefreshOutcome::CredentialsInvalid(message) => {
+                            log::warn!("账号 {} 凭据损坏：{message}", result.id);
+                            self.runtime.apply_error(
+                                &result.id,
+                                AccountStatus::CredentialsInvalid,
+                                message,
+                            );
+                        }
+                    }
+                }
+
+                if rotated_count > 0 {
+                    log::info!("本轮有 {rotated_count} 个账号的凭据已更新并落库");
+                }
+
+                // 每轮记一行汇总，便于排障时确认"刷新确实跑过、结果是什么"
+                log::info!(
+                    "本轮状态刷新完成：{} 个账号，其中 {} 在线",
+                    self.data_account_count(),
+                    self.runtime.online_count()
+                );
+
+                self.rebuild_menu();
+                self.update_badge();
+                ctx.request_repaint();
+            }
+            Err(TryRecvError::Empty) => {
+                // 还在跑：下一帧继续看
+            }
+            Err(TryRecvError::Disconnected) => {
+                // 线程异常退出：不要永远停在"刷新中"
+                self.refresh_rx = None;
+                self.last_round = Some(Instant::now());
+                log::warn!("刷新线程意外退出，本轮跳过");
+            }
+        }
+    }
+
+    /// 把续期/重登得到的新凭据加密写回 `accounts.json`。
+    ///
+    /// 失败只记录日志：账号本身还能用，只是下次启动会重新走恢复链。
+    fn persist_rotated(&mut self, id: &str, credentials: &crate::secrets::Credentials) {
+        let DataLayer::Ready(store) = &mut self.data else {
+            return;
+        };
+
+        let sealed = match crate::secrets::seal_credentials(store.secrets(), id, credentials) {
+            Ok(sealed) => sealed,
+            Err(err) => {
+                log::warn!("账号 {id} 新凭据加密失败：{err:#}");
+                return;
+            }
+        };
+
+        match store.accounts_mut().update_credentials(
+            id,
+            sealed,
+            None,
+            Some(accounts::now_rfc3339()),
+        ) {
+            Ok(true) => log::info!("账号 {id} 的凭据已更新"),
+            Ok(false) => log::debug!("账号 {id} 已被删除，跳过凭据落库"),
+            Err(err) => log::warn!("账号 {id} 凭据落库失败：{err:#}"),
+        }
+    }
+
+    /// 是否有账号"从未刷新过或数据已过期"。
+    fn accounts_need_refresh(&self, now: Instant) -> bool {
+        let DataLayer::Ready(store) = &self.data else {
+            return false;
+        };
+        store.accounts().iter().any(|account| {
+            self.runtime
+                .get(&account.id)
+                .map(|runtime| runtime.is_stale(now, STALE_AFTER))
+                .unwrap_or(true)
+        })
+    }
+
+    /// 定时路径：到点就起一轮刷新（同一时间只允许一轮）。
+    fn maybe_start_refresh(&mut self, ctx: &egui::Context) {
+        self.try_start_refresh(ctx, false);
+    }
+
+    /// 起一轮刷新；`force = true` 表示手动触发（跳过启动延迟与间隔判断）。
+    ///
+    /// 无论是否 `force`，都受"同一时间只跑一轮"约束：连点"立即刷新"不会并发发请求，
+    /// 否则小实例很容易被自己的手动刷新打成 429。
+    ///
+    /// 自动触发的条件（满足任一）：
+    ///
+    /// * 距上一轮已超过 `refreshIntervalSeconds`；
+    /// * 面板正打开，且有账号数据过期（超过 [`STALE_AFTER`]）。
+    fn try_start_refresh(&mut self, ctx: &egui::Context, force: bool) {
+        if self.refresh_rx.is_some() {
+            if force {
+                log::debug!("已有刷新在进行中，忽略本次手动刷新");
+            }
+            return;
+        }
+
+        let DataLayer::Ready(store) = &self.data else {
+            return;
+        };
+        if store.accounts().is_empty() {
+            return;
+        }
+
+        let now = Instant::now();
+        if !force {
+            // 首轮延迟：等托盘图标与窗口就绪，避免启动瞬间就发请求
+            if now.saturating_duration_since(self.started_at) < FIRST_REFRESH_DELAY {
+                return;
+            }
+
+            let interval = Duration::from_secs(store.config().refresh_interval_seconds.max(1));
+            let due = refresh::should_start_round(now, self.last_round, interval);
+            let stale_while_open = self.panel_visible && self.accounts_need_refresh(now);
+            if !due && !stale_while_open {
+                return;
+            }
+        }
+
+        let targets = store
+            .accounts()
+            .iter()
+            .map(refresh::RefreshTarget::from_account)
+            .collect::<Vec<_>>();
+        let secret_store = store.secret_store();
+        let timeout = Duration::from_secs(store.config().request_timeout_seconds.max(1));
+
+        // 先把状态切成"刷新中"，菜单立刻能反映出来
+        for account in store.accounts() {
+            self.runtime.mark(&account.id, AccountStatus::Refreshing);
+        }
+        self.refresh_rx = Some(refresh::spawn_round(targets, secret_store, timeout));
+        log::info!(
+            "开始新一轮状态刷新：{} 个账号（{}）",
+            store.accounts().len(),
+            if force { "手动" } else { "定时" }
+        );
+
+        self.rebuild_menu();
+        self.update_badge();
+        ctx.request_repaint();
     }
 
     /// 处理“点击面板外部自动收起”。
@@ -233,7 +704,7 @@ impl TrayApp {
         }
     }
 
-    /// 处理 `Esc`：弹窗开着就关弹窗，否则收起面板。
+    /// 处理 `Esc`：删除确认 > 登录弹窗 > 面板，按"最上层先关"的顺序。
     ///
     /// 放在 `logic()` 里而不是绘制里，是因为"关窗"是状态变更，
     /// 与这一帧是否需要绘制无关（面板隐藏时也要能响应）。
@@ -241,7 +712,10 @@ impl TrayApp {
         if !ctx.input(|input| input.key_pressed(egui::Key::Escape)) {
             return;
         }
-        if self.login.is_open() {
+        if self.pending_delete.is_some() {
+            log::debug!("Esc：取消删除确认");
+            self.pending_delete = None;
+        } else if self.login.is_open() {
             log::debug!("Esc：关闭登录弹窗");
             self.login.close();
         } else if self.panel_visible {
@@ -275,6 +749,10 @@ impl TrayApp {
                 log::info!("账号已保存：{display}");
                 self.toast = Some((format!("已登录 {display}"), Instant::now()));
                 self.login.close();
+                // 新账号要立刻出现在托盘菜单里，并尽快刷新一次状态
+                self.rebuild_menu();
+                self.update_badge();
+                self.last_round = None;
                 ctx.request_repaint();
             }
         }
@@ -379,9 +857,12 @@ impl TrayApp {
             DataLayer::Unavailable(_) => "数据目录不可用".to_owned(),
         };
         let toast = self.toast.as_ref().map(|(text, _)| text.clone());
+        let cards = self.collect_cards();
 
         // 顶部按钮的点击结果：闭包里不能直接改 `self`，先记在局部变量里
         let mut open_login = false;
+        // 总览卡片里「立即刷新」的点击结果
+        let mut refresh_clicked = false;
 
         egui::CentralPanel::default()
             .frame(
@@ -428,9 +909,21 @@ impl TrayApp {
                     .auto_shrink([false, false])
                     .show(ui, |ui| {
                         ui.add_space(14.0);
-                        draw_status_card(ui);
-                        ui.add_space(16.0);
-                        draw_empty_state(ui);
+
+                        if cards.is_empty() {
+                            // 没有账号时保留原来的"尚未登录"引导
+                            draw_status_card(ui);
+                            ui.add_space(16.0);
+                            draw_empty_state(ui);
+                        } else {
+                            draw_account_summary(ui, &cards, &mut refresh_clicked);
+                            ui.add_space(12.0);
+                            for card in &cards {
+                                draw_account_card(ui, card);
+                                ui.add_space(10.0);
+                            }
+                        }
+
                         // 给滚动区底部留一点空隙，避免最后一张卡片贴着页脚
                         ui.add_space(6.0);
                     });
@@ -439,10 +932,94 @@ impl TrayApp {
         if open_login {
             self.login.open();
         }
+        if refresh_clicked {
+            // 手动刷新：绕过定时与启动延迟，但仍受"只跑一轮"约束
+            self.try_start_refresh(ctx, true);
+        }
 
         // 弹窗画在面板之后，保证它在最上层（Modal 自带遮罩与输入拦截）
         let timeout = self.request_timeout();
         self.login.show(ctx, timeout);
+
+        // ---- 删除确认（从托盘子菜单进入） ----
+        self.draw_delete_confirm(ctx);
+    }
+
+    /// 绘制"退出账号并删除记录"的确认框。
+    ///
+    /// 删除是破坏性操作，必须二次确认（已与需求方确认）。确认框画在面板里而不是
+    /// 系统对话框：一是风格统一，二是面板已经显示时不需要额外抢焦点。
+    fn draw_delete_confirm(&mut self, ctx: &egui::Context) {
+        let Some(id) = self.pending_delete.clone() else {
+            return;
+        };
+
+        let display = match &self.data {
+            DataLayer::Ready(store) => store
+                .accounts()
+                .iter()
+                .find(|account| account.id == id)
+                .map(|account| store.display_email(&account.email))
+                .unwrap_or_else(|| "该账号".to_owned()),
+            DataLayer::Unavailable(_) => "该账号".to_owned(),
+        };
+
+        let mut confirm = false;
+        let mut cancel = false;
+
+        let modal = egui::Modal::new(egui::Id::unique("delete-confirm"))
+            .backdrop_color(egui::Color32::from_black_alpha(150))
+            .frame(
+                egui::Frame::new()
+                    .fill(PANEL_BG)
+                    .corner_radius(egui::CornerRadius::same(12))
+                    .stroke(egui::Stroke::new(1.0, PANEL_BORDER))
+                    .inner_margin(egui::Margin::same(16)),
+            )
+            .show(ctx, |ui| {
+                ui.set_width(280.0);
+                ui.label(
+                    egui::RichText::new("退出账号并删除记录")
+                        .size(14.0)
+                        .strong()
+                        .color(TEXT_PRIMARY),
+                );
+                ui.add_space(8.0);
+                ui.label(
+                    egui::RichText::new(format!(
+                        "确定退出 {display} 并删除记录？删除后需要重新登录才能恢复。"
+                    ))
+                    .size(11.0)
+                    .color(TEXT_SECONDARY),
+                );
+                ui.add_space(14.0);
+                ui.horizontal(|ui| {
+                    if ui
+                        .add_sized([88.0, 28.0], egui::Button::new("取消"))
+                        .clicked()
+                    {
+                        cancel = true;
+                    }
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        let delete_button =
+                            egui::Button::new("删除").fill(egui::Color32::from_rgb(185, 28, 28));
+                        if ui.add_sized([96.0, 28.0], delete_button).clicked() {
+                            confirm = true;
+                        }
+                    });
+                });
+            });
+
+        if modal.backdrop_response.clicked() {
+            cancel = true;
+        }
+
+        if confirm {
+            self.delete_account(&id);
+            self.pending_delete = None;
+        } else if cancel {
+            self.pending_delete = None;
+        }
     }
 }
 
@@ -480,8 +1057,24 @@ impl eframe::App for TrayApp {
         self.handle_tray_commands(ctx);
         self.handle_escape(ctx);
         self.poll_login(ctx);
+        self.poll_refresh(ctx);
+        self.maybe_start_refresh(ctx);
         self.handle_focus(ctx);
         self.update_toast(ctx);
+
+        // 心跳：eframe 是"按需重绘"的，空闲时不会再调用 logic()，
+        // 定时刷新与"刷新中"的轮询就永远不会发生。这里主动排下一次唤醒：
+        //
+        // * 有刷新在跑：500ms 后醒来收结果（界面保持"刷新中"的时间尽量短）；
+        // * 空闲：5s 一次，足够让定时刷新到点触发，又不至于空转太频繁。
+        //
+        // 面板隐藏时 eframe 只跑逻辑、不绘制，所以心跳不会导致无谓的渲染。
+        let tick = if self.refresh_rx.is_some() {
+            Duration::from_millis(500)
+        } else {
+            Duration::from_secs(5)
+        };
+        ctx.request_repaint_after(tick);
     }
 
     /// 每帧的“绘制阶段”：只有面板应当可见时才画。
@@ -625,6 +1218,193 @@ fn draw_header(ui: &mut egui::Ui) -> bool {
         .on_hover_text("填写实例地址与账号密码，登录后账号会出现在托盘里")
         .clicked()
 }
+/// 生成账号子菜单标题：`打码邮箱 · 状态`，过长时截断。
+///
+/// 截断按字符而不是字节，避免把中文/emoji 邮箱切成半个字。
+fn menu_title(display: &str, status: AccountStatus) -> String {
+    let chars: Vec<char> = display.chars().collect();
+    let short = if chars.len() > MENU_TITLE_MAX_CHARS {
+        let head: String = chars[..MENU_TITLE_MAX_CHARS].iter().collect();
+        format!("{head}…")
+    } else {
+        display.to_owned()
+    };
+    format!("{short} · {}", status.label())
+}
+
+/// 徽标颜色：全部在线（品牌薄荷绿）。
+const BADGE_ONLINE: [u8; 3] = [121, 244, 189];
+
+/// 徽标颜色：有账号离线（琥珀）。
+const BADGE_OFFLINE: [u8; 3] = [251, 191, 36];
+
+/// 徽标颜色：有账号凭据损坏（红）。
+const BADGE_INVALID: [u8; 3] = [248, 113, 113];
+
+/// 根据账号状态数量决定托盘徽标颜色。
+///
+/// 优先级：凭据损坏（红）> 离线（黄）> 全部在线（绿）> 其它（无徽标）。
+/// "凭据损坏"排最前是因为它需要人工处理，比"临时离线"更值得提醒。
+///
+/// 抽成纯函数便于测试：徽标一旦算错，用户会看到误导性的颜色。
+fn aggregate_badge(total: usize, online: usize, offline: usize, invalid: usize) -> Option<[u8; 3]> {
+    if total == 0 {
+        return None;
+    }
+    if invalid > 0 {
+        return Some(BADGE_INVALID);
+    }
+    if offline > 0 {
+        return Some(BADGE_OFFLINE);
+    }
+    if online == total {
+        return Some(BADGE_ONLINE);
+    }
+    // 还有账号处于"未知/刷新中"，此时不给颜色，避免误导
+    None
+}
+
+/// 徽标颜色的中文说明（日志用）。
+fn badge_label(rgb: [u8; 3]) -> &'static str {
+    match rgb {
+        BADGE_ONLINE => "绿色（全部在线）",
+        BADGE_OFFLINE => "黄色（有账号离线）",
+        BADGE_INVALID => "红色（有账号凭据损坏）",
+        _ => "其它",
+    }
+}
+
+/// 状态点颜色。
+fn status_color(status: AccountStatus) -> egui::Color32 {
+    match status {
+        AccountStatus::Online => ACCENT,
+        AccountStatus::Refreshing => egui::Color32::from_rgb(96, 165, 250),
+        AccountStatus::CredentialsInvalid => egui::Color32::from_rgb(248, 113, 113),
+        AccountStatus::Offline => egui::Color32::from_rgb(148, 163, 184),
+        AccountStatus::Unknown => TEXT_DIM,
+    }
+}
+
+/// 绘制账号总览卡片：总数 + 在线/离线/凭据损坏的数量 + 手动刷新按钮。
+///
+/// `refresh_clicked` 用来把"点了立即刷新"回传给调用方：
+/// 绘制函数拿不到 `&mut TrayApp`，只能通过局部标志传递。
+fn draw_account_summary(ui: &mut egui::Ui, cards: &[AccountCard], refresh_clicked: &mut bool) {
+    let online = cards
+        .iter()
+        .filter(|card| card.status == AccountStatus::Online)
+        .count();
+    let invalid = cards
+        .iter()
+        .filter(|card| card.status == AccountStatus::CredentialsInvalid)
+        .count();
+    let offline = cards.len().saturating_sub(online + invalid);
+
+    egui::Frame::new()
+        .fill(CARD_BG)
+        .corner_radius(egui::CornerRadius::same(10))
+        .inner_margin(egui::Margin::same(12))
+        .show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.horizontal(|ui| {
+                ui.label(
+                    egui::RichText::new(format!("已登录 {} 个账号", cards.len()))
+                        .size(13.0)
+                        .strong()
+                        .color(TEXT_PRIMARY),
+                );
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui
+                        .add_sized(
+                            [76.0, 22.0],
+                            egui::Button::new(egui::RichText::new("立即刷新").size(10.0)),
+                        )
+                        .on_hover_text("立刻拉取一次状态，不必等定时刷新")
+                        .clicked()
+                    {
+                        *refresh_clicked = true;
+                    }
+                });
+            });
+            ui.add_space(4.0);
+            ui.label(
+                egui::RichText::new(format!(
+                    "在线 {online} · 离线 {offline} · 凭据损坏 {invalid}"
+                ))
+                .size(11.0)
+                .color(TEXT_SECONDARY),
+            );
+        });
+}
+
+/// 绘制单个账号卡片。
+fn draw_account_card(ui: &mut egui::Ui, card: &AccountCard) {
+    egui::Frame::new()
+        .fill(CARD_BG)
+        .corner_radius(egui::CornerRadius::same(10))
+        .inner_margin(egui::Margin::same(12))
+        .show(ui, |ui| {
+            ui.set_width(ui.available_width());
+
+            ui.horizontal(|ui| {
+                ui.label(
+                    egui::RichText::new("●")
+                        .size(10.0)
+                        .color(status_color(card.status)),
+                );
+                ui.label(
+                    egui::RichText::new(&card.display)
+                        .size(13.0)
+                        .strong()
+                        .color(TEXT_PRIMARY),
+                );
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    ui.label(
+                        egui::RichText::new(card.role_label)
+                            .size(10.0)
+                            .color(TEXT_SECONDARY),
+                    );
+                });
+            });
+
+            ui.label(
+                egui::RichText::new(&card.base_url)
+                    .size(10.0)
+                    .color(TEXT_DIM),
+            );
+
+            let mut status_line = card.status.label().to_owned();
+            if let Some(balance) = card.balance {
+                status_line.push_str(&format!(" · 余额 ${balance:.2}"));
+            }
+            ui.label(
+                egui::RichText::new(status_line)
+                    .size(11.0)
+                    .color(TEXT_SECONDARY),
+            );
+
+            if let Some(summary) = &card.summary {
+                ui.label(egui::RichText::new(summary).size(10.0).color(TEXT_DIM));
+            }
+
+            ui.label(
+                egui::RichText::new(&card.refreshed)
+                    .size(9.0)
+                    .color(TEXT_DIM),
+            );
+
+            // 失败原因只展示一行，完整信息在日志里
+            if let Some(error) = &card.error {
+                let first_line = error.lines().next().unwrap_or_default();
+                ui.label(
+                    egui::RichText::new(first_line)
+                        .size(9.0)
+                        .color(egui::Color32::from_rgb(248, 113, 113)),
+                );
+            }
+        });
+}
+
 /// 绘制实例登录状态卡片。
 ///
 /// 目前是占位内容；实例配置与登录接入后，这里会显示实例地址与连接状态。
@@ -810,6 +1590,60 @@ mod tests {
 
     fn panel() -> egui::Vec2 {
         egui::vec2(PANEL_WIDTH, PANEL_HEIGHT)
+    }
+
+    #[test]
+    fn 菜单标题带状态且短邮箱不截断() {
+        let title = menu_title("zh***@ex***.com", AccountStatus::Online);
+        assert_eq!(title, "zh***@ex***.com · 在线");
+    }
+
+    #[test]
+    fn 徽标聚合规则() {
+        // 没有账号：不显示徽标
+        assert_eq!(aggregate_badge(0, 0, 0, 0), None);
+        // 全部在线：绿
+        assert_eq!(aggregate_badge(2, 2, 0, 0), Some(BADGE_ONLINE));
+        // 有离线：黄（即使也有在线的）
+        assert_eq!(aggregate_badge(2, 1, 1, 0), Some(BADGE_OFFLINE));
+        // 有凭据损坏：红（优先级最高，即使也有离线）
+        assert_eq!(aggregate_badge(3, 1, 1, 1), Some(BADGE_INVALID));
+        // 还有未知/刷新中：不给颜色，避免误导
+        assert_eq!(aggregate_badge(2, 1, 0, 0), None);
+    }
+
+    #[test]
+    fn 徽标颜色有中文说明() {
+        assert!(badge_label(BADGE_ONLINE).contains("在线"));
+        assert!(badge_label(BADGE_OFFLINE).contains("离线"));
+        assert!(badge_label(BADGE_INVALID).contains("凭据损坏"));
+    }
+
+    #[test]
+    fn 菜单标题过长时按字符截断() {
+        let long = "a".repeat(MENU_TITLE_MAX_CHARS + 10);
+        let title = menu_title(&long, AccountStatus::Offline);
+        let head = &title[..title.find(" · ").expect("应包含分隔符")];
+        assert_eq!(
+            head.chars().count(),
+            MENU_TITLE_MAX_CHARS + 1,
+            "截断后应保留 N 个字符加省略号"
+        );
+        assert!(head.ends_with('…'));
+        assert!(title.ends_with(" · 离线"));
+    }
+
+    #[test]
+    fn 在线状态用品牌色离线用灰色() {
+        assert_eq!(status_color(AccountStatus::Online), ACCENT);
+        assert_ne!(
+            status_color(AccountStatus::Online),
+            status_color(AccountStatus::Offline)
+        );
+        assert_ne!(
+            status_color(AccountStatus::CredentialsInvalid),
+            status_color(AccountStatus::Online)
+        );
     }
 
     /// Windows 任务栏场景：图标在屏幕右下角 → 面板应放在图标**上方**，右边缘对齐。
