@@ -78,6 +78,9 @@ sub2api_tray/
 ├── Cargo.toml                # 依赖、元信息、release profile
 ├── assets/
 │   └── tray-icon.png         # 托盘图标（内嵌进二进制，临时占位图）
+├── .github/
+│   └── workflows/
+│       └── release-windows.yml  # 发布流水线：v* tag → Windows x64 产物挂 Release
 ├── docs/
 │   ├── panel-preview.png     # 面板截图（README 引用）
 │   └── plans/
@@ -400,6 +403,7 @@ cargo build --release                  # 产物：target/release/sub2api_tray
 | 2026-10-18 | 补充测试分层约定 | 默认套件必须可重复；loopback 端到端用例标 `#[ignore]`，验收时显式运行；假服务器公共代码集中在 `main.rs::test_support`；阶段 2 标记完成 |
 | 2026-10-18 | 补充 API Key 约定 | 阶段表新增 1d；`accounts.json` 的 `apiKeys` 只存摘要（id/名称/打码值/状态/分组/最近使用/抓取时间），**不存完整 Key** |
 | 2026-10-18 | 补充浏览约定 | 阶段表新增 1e；明确"托盘"= 弹出面板（原生菜单不能滚动/展开）；账号上限 10；面板默认不显示数据目录 |
+| 2026-10-18 | 新增发布流水线 | `.github/workflows/release-windows.yml`：`v*` tag 触发，校验 tag 在 main 历史、跑质量门禁、编 Windows x64 并挂 Release；只支持 Windows 10+ |
 | 2026-10-18 | 补充自启与更新 | 开机自启用 HKCU Run / LaunchAgent，命令行带 --hidden；版本检查走 GitHub Releases，只提示不自动安装 |
 | 2026-10-18 | 补充单实例与设置 | 单实例锁用固定本机端口（**不能用端口段**，否则第二个实例会顺延端口绑上）；设置页可改打码/刷新间隔/超时并即时落盘 |
 | 2026-10-18 | 补充账号菜单约定 | 目录结构补 `state.rs`/`refresh.rs`；代码规范新增“eframe 按需重绘，定时任务必须 request_repaint_after”这一坑点；阶段 1c 标记完成 |
