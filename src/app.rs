@@ -2436,11 +2436,7 @@ fn draw_account_card(
                 })
                 .response
                 .interact(egui::Sense::click())
-                .on_hover_text(if card.expanded {
-                    "点击收起 API Key"
-                } else {
-                    "点击展开 API Key"
-                });
+                .on_hover_cursor(egui::CursorIcon::PointingHand);
 
             if header.clicked() {
                 *toggle = Some(card.id.clone());
@@ -2598,18 +2594,30 @@ fn draw_account_keys(
                     _ => format!("已用 ${used:.2} / 总额度 不限"),
                 };
                 let usage_5h = key.usage_5h.unwrap_or(0.0);
-                ui.label(
-                    egui::RichText::new(format!("{quota_text} · 近 5 小时 ${usage_5h:.2}"))
-                        .size(fs(10.0))
-                        .color(lerp_color(TEXT_SECONDARY, egui::Color32::WHITE, kt * 0.3)),
-                );
+                ui.horizontal(|ui| {
+                    ui.label(
+                        egui::RichText::new(format!("{quota_text} · 近 5 小时 ${usage_5h:.2}"))
+                            .size(fs(10.0))
+                            .color(lerp_color(TEXT_SECONDARY, egui::Color32::WHITE, kt * 0.3)),
+                    );
+                    // 悬浮时行内提示"点击复制"：比系统 tooltip 轻，不会盖住内容
+                    if kt > 0.05 {
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            ui.label(
+                                egui::RichText::new("点击复制")
+                                    .size(fs(9.0))
+                                    .color(lerp_color(egui::Color32::TRANSPARENT, ACCENT, kt)),
+                            );
+                        });
+                    }
+                });
             });
 
         // 整块可点：点击复制完整 Key（结果由后台线程回传，成功后盖浮窗）
         let row_response = row_frame
             .response
             .interact(egui::Sense::click())
-            .on_hover_text("点击复制完整 Key");
+            .on_hover_cursor(egui::CursorIcon::PointingHand);
         if row_response.clicked() {
             *copy_request = Some((card.id.clone(), key.id.clone()));
         }
@@ -2636,7 +2644,7 @@ fn draw_account_keys(
         let row_response = row_frame
             .response
             .interact(egui::Sense::click())
-            .on_hover_text("点击复制完整 Key");
+            .on_hover_cursor(egui::CursorIcon::PointingHand);
         if row_response.clicked() {
             *copy_request = Some((card.id.clone(), key.id.clone()));
         }
