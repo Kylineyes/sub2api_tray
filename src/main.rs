@@ -37,6 +37,7 @@ mod mask;
 mod paths;
 mod refresh;
 mod secrets;
+mod single_instance;
 mod state;
 mod tray;
 
@@ -62,6 +63,16 @@ fn main() -> anyhow::Result<()> {
     // 一来失败时能立刻写进日志，二来面板第一帧就要决定是否显示"数据目录不可写"提示。
     // 这里刻意不返回 Err：托盘程序即使读不到配置，也应该能启动并把问题告诉用户，
     // 而不是在用户双击图标后什么都不发生。
+    // 单实例：必须在写任何数据文件之前拿到锁，否则"第二个副本"已经有机会改盘
+    let _instance_guard = match single_instance::acquire() {
+        Ok(guard) => guard,
+        Err(err) => {
+            log::warn!("{err:#}，本次启动退出");
+            eprintln!("{err:#}");
+            return Ok(());
+        }
+    };
+
     let data_layer = data::init();
 
     // 根视口的初始形态。
