@@ -254,14 +254,14 @@ impl LoginDialog {
 
                 ui.label(
                     egui::RichText::new("登陆新用户")
-                        .size(15.0)
+                        .size(crate::app::fs(15.0))
                         .strong()
                         .color(crate::app::TEXT_PRIMARY),
                 );
                 ui.add_space(2.0);
                 ui.label(
                     egui::RichText::new("填写 Sub2API 实例地址与登录信息")
-                        .size(10.0)
+                        .size(crate::app::fs(10.0))
                         .color(crate::app::TEXT_SECONDARY),
                 );
                 ui.add_space(12.0);
@@ -311,7 +311,7 @@ impl LoginDialog {
                     };
                     ui.label(
                         egui::RichText::new(hint)
-                            .size(10.0)
+                            .size(crate::app::fs(10.0))
                             .color(crate::app::TEXT_SECONDARY),
                     );
                 }
@@ -321,7 +321,7 @@ impl LoginDialog {
                     ui.add_space(8.0);
                     ui.label(
                         egui::RichText::new(error)
-                            .size(11.0)
+                            .size(crate::app::fs(11.0))
                             .color(egui::Color32::from_rgb(248, 113, 113)),
                     );
                 }
@@ -347,7 +347,7 @@ impl LoginDialog {
                             ui.spinner();
                             ui.label(
                                 egui::RichText::new("登录中…")
-                                    .size(11.0)
+                                    .size(crate::app::fs(11.0))
                                     .color(crate::app::TEXT_SECONDARY),
                             );
                         } else {
@@ -452,7 +452,7 @@ impl LoginDialog {
 fn field_label(ui: &mut egui::Ui, text: &str) {
     ui.label(
         egui::RichText::new(text)
-            .size(10.0)
+            .size(crate::app::fs(10.0))
             .color(crate::app::TEXT_SECONDARY),
     );
 }
