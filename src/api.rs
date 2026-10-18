@@ -65,6 +65,17 @@ pub struct ApiKeyInfo {
     pub group: Option<String>,
     /// 最近使用时间（服务端原样字符串）。
     pub last_used_at: Option<String>,
+    /// 总额度（美元）；服务端未设置时为 `None`。
+    pub quota: Option<f64>,
+    /// 已用额度（美元）。
+    pub quota_used: Option<f64>,
+    /// 近 5 小时用量（美元）。
+    ///
+    /// 后端目前只提供 5 小时 / 1 天 / 7 天三个窗口，**没有 1 小时口径**，
+    /// 因此界面上展示"近 5 小时"并如实标注。
+    pub usage_5h: Option<f64>,
+    /// 近 1 天用量（美元）。
+    pub usage_1d: Option<f64>,
 }
 
 impl ApiKeyInfo {
@@ -77,6 +88,10 @@ impl ApiKeyInfo {
             "status": self.status,
             "groupName": self.group,
             "lastUsedAt": self.last_used_at,
+            "quota": self.quota,
+            "quotaUsed": self.quota_used,
+            "usage5h": self.usage_5h,
+            "usage1d": self.usage_1d,
             "fetchedAt": crate::accounts::now_rfc3339(),
         })
     }
@@ -99,6 +114,16 @@ pub fn mask_api_key(key: &str) -> String {
     let head: String = chars[..4].iter().collect();
     let tail: String = chars[length - 4..].iter().collect();
     format!("{head}…{tail}")
+}
+
+/// 从列表项里挑出第一个数值字段。
+fn first_f64(item: &serde_json::Value, keys: &[&str]) -> Option<f64> {
+    for key in keys {
+        if let Some(number) = item.get(*key).and_then(|value| value.as_f64()) {
+            return Some(number);
+        }
+    }
+    None
 }
 
 /// 从列表项里挑出第一个非空字符串字段（也接受数字 id）。
@@ -478,6 +503,10 @@ pub fn parse_api_keys(status: u16, body: &str) -> Result<Vec<ApiKeyInfo>, ApiErr
                         .map(ToOwned::to_owned)
                 }),
                 last_used_at: first_string(item, &["last_used_at", "lastUsedAt"]),
+                quota: first_f64(item, &["quota"]),
+                quota_used: first_f64(item, &["quota_used", "quotaUsed"]),
+                usage_5h: first_f64(item, &["usage_5h", "usage5h"]),
+                usage_1d: first_f64(item, &["usage_1d", "usage1d"]),
             }
         })
         .collect())
@@ -963,11 +992,17 @@ mod tests {
             status: "active".to_owned(),
             group: Some("默认分组".to_owned()),
             last_used_at: None,
+            quota: Some(10.0),
+            quota_used: Some(2.5),
+            usage_5h: Some(0.4),
+            usage_1d: Some(1.2),
         };
         let value = info.to_cache_value();
         assert_eq!(value["maskedKey"], "sk-a…9f2c");
         assert!(value.get("key").is_none(), "缓存里不能有完整 Key 字段");
         assert!(value["fetchedAt"].as_str().is_some());
+        assert_eq!(value["quotaUsed"], 2.5);
+        assert_eq!(value["usage5h"], 0.4);
     }
 
     #[test]
