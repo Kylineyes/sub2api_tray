@@ -219,6 +219,32 @@ sub2api_tray/
 * 自签名 HTTPS 证书的实例无法登录/刷新（会显示"无法连接"）；
 * 刷新按账号串行执行，账号很多时一轮会变慢（每个账号 2 个请求 + 200ms 间隔）；
 
+## 发布版本
+
+发布由 GitHub Actions 完成，仓库里只有一条流水线：
+`.github/workflows/release-windows.yml`。
+
+1. 功能在 `dev` 上完成并通过验收；
+2. 由维护者把 `dev` 合入 `main`；
+3. 在 `main` 的最新提交上打 tag 并推送：
+
+   ```bash
+   git tag v0.2.0
+   git push origin v0.2.0
+   ```
+
+4. 流水线会依次执行：
+   * **校验 tag 是否在 `main` 历史里**（不在就拒绝发布，避免从功能分支发版）；
+   * 质量门禁：`cargo fmt --check`、`cargo clippy --all-targets -- -D warnings`、`cargo test`；
+   * 编译 `x86_64-pc-windows-msvc` 的 release 版本；
+   * 把 `sub2api_tray-v<版本>-windows-x64.exe` 和同名 `.zip`（便携包）挂到该 tag 的 Release，
+     并生成中文发布说明。
+
+**平台范围**：只构建 Windows x64，要求 **Windows 10 及以上**；macOS 暂不构建；
+Linux 不在支持范围内。
+
+> 流水线文件必须已经在 `main` 上，tag 触发的构建才会用到它。
+
 ## 许可证
 
 [MIT](LICENSE)
