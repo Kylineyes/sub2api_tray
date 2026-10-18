@@ -40,12 +40,6 @@ use tray_icon::{
 /// 不依赖安装目录结构。图标本身是 128×128，交给系统缩放到 16/20/24 像素。
 const TRAY_ICON_PNG: &[u8] = include_bytes!("../assets/tray-icon.png");
 
-/// 菜单项 id：显示面板。
-const MENU_ID_SHOW: &str = "show";
-
-/// 菜单项 id：打开登录弹窗。
-const MENU_ID_LOGIN: &str = "login";
-
 /// 菜单项 id：立即刷新状态。
 const MENU_ID_REFRESH: &str = "refresh";
 
@@ -59,10 +53,6 @@ const MENU_ID_QUIT: &str = "quit";
 pub enum TrayCommand {
     /// 切换面板显示状态（左键单击托盘图标）。
     TogglePanel,
-    /// 显示面板（菜单项）。
-    ShowPanel,
-    /// 打开登录弹窗（菜单项，面板未显示时会先显示面板）。
-    OpenLogin,
     /// 立即刷新一轮状态（菜单项或面板按钮，绕过定时与启动延迟）。
     RefreshNow,
     /// 退出整个应用（菜单项）。
@@ -231,26 +221,24 @@ pub fn load_icon_rgba() -> Result<(Vec<u8>, u32, u32)> {
 
 /// 构建整份托盘菜单。
 ///
-/// 结构（与 `docs/plans/0004-account-menu.md` 第 4.1 节一致）：
+/// 菜单只保留"原子动作"：
 ///
 /// ```text
-/// 显示面板
 /// 立即刷新
-/// 登陆新用户…
-/// ─────────────
-/// <账号 1> ▸ 退出账号并删除记录
-/// <账号 2> ▸ 退出账号并删除记录
 /// ─────────────
 /// 版本 v0.1.0（禁用）
 /// ─────────────
 /// 退出
 /// ```
+///
+/// 面板用左键单击托盘图标切换，登录入口在面板顶部，账号信息也都在面板里，
+/// 因此菜单不再提供"显示面板 / 登陆新用户 / 账号子菜单"。
 pub fn build_menu() -> Result<Menu> {
     let menu = Menu::new();
 
-    let show_item = MenuItem::with_id(MENU_ID_SHOW, "显示面板", true, None);
+    // 菜单只留"原子动作"：面板用左键单击切换、登录在面板顶部，
+    // 所以这里不再放"显示面板/登陆新用户"两项。
     let refresh_item = MenuItem::with_id(MENU_ID_REFRESH, "立即刷新", true, None);
-    let login_item = MenuItem::with_id(MENU_ID_LOGIN, "登陆新用户…", true, None);
     let version_item = MenuItem::with_id(
         "version",
         format!("版本 v{}", crate::APP_VERSION),
@@ -259,13 +247,7 @@ pub fn build_menu() -> Result<Menu> {
     );
     let quit_item = MenuItem::with_id(MENU_ID_QUIT, "退出", true, None);
 
-    menu.append_items(&[
-        &show_item,
-        &refresh_item,
-        &login_item,
-        &PredefinedMenuItem::separator(),
-    ])
-    .context("构建托盘菜单失败")?;
+    menu.append(&refresh_item).context("构建托盘菜单失败")?;
 
     menu.append_items(&[
         &PredefinedMenuItem::separator(),
@@ -300,9 +282,7 @@ pub fn install(bridge: Arc<TrayBridge>) -> Result<TrayHandle> {
     MenuEvent::set_event_handler(Some(move |event: MenuEvent| {
         let id = event.id.as_ref();
         match id {
-            MENU_ID_SHOW => menu_bridge.push(TrayCommand::ShowPanel),
             MENU_ID_REFRESH => menu_bridge.push(TrayCommand::RefreshNow),
-            MENU_ID_LOGIN => menu_bridge.push(TrayCommand::OpenLogin),
             MENU_ID_QUIT => menu_bridge.push(TrayCommand::Quit),
             // 版本项是禁用的，不会产生事件；其它未知 id 直接忽略
             _ => {}
@@ -350,11 +330,6 @@ mod tests {
     #[test]
     fn 菜单常量互不相同() {
         // 防止将来改常量时把两个入口写成同一个 id（会导致点击行为串台）
-        assert_ne!(MENU_ID_SHOW, MENU_ID_LOGIN);
-        assert_ne!(MENU_ID_SHOW, MENU_ID_QUIT);
-        assert_ne!(MENU_ID_LOGIN, MENU_ID_QUIT);
-        assert_ne!(MENU_ID_REFRESH, MENU_ID_SHOW);
-        assert_ne!(MENU_ID_REFRESH, MENU_ID_LOGIN);
         assert_ne!(MENU_ID_REFRESH, MENU_ID_QUIT);
     }
 

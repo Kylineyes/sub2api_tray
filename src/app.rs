@@ -606,15 +606,9 @@ impl TrayApp {
                         log::debug!("忽略去抖窗口内的托盘点击");
                     }
                 }
-                TrayCommand::ShowPanel => self.show_panel(ctx),
                 TrayCommand::RefreshNow => {
                     log::info!("收到手动刷新请求");
                     self.try_start_refresh(ctx, true);
-                }
-                TrayCommand::OpenLogin => {
-                    // 菜单入口：先把面板叫出来，再打开弹窗（弹窗画在面板窗口里）
-                    self.show_panel(ctx);
-                    self.login.open();
                 }
                 TrayCommand::Quit => {
                     log::info!("收到退出指令，关闭应用");
