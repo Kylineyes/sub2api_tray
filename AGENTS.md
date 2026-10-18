@@ -314,6 +314,8 @@ cargo build --release                  # 产物：target/release/sub2api_tray
   原因是托盘程序平时“隐身”，而自动化截图时窗口通常拿不到焦点，否则面板会在截图前消失。
 * `SUB2API_TRAY_DEBUG_LOGIN`：存在即生效，启动后自动弹出面板并打开登录弹窗；
   用于截图验收弹窗布局（自动化没法真的去点“登陆新用户”按钮）。
+* `SUB2API_TRAY_DEBUG_EXPAND`：存在即生效，启动后自动展开第一个账号的 Key 明细，
+  用于自动化截图验收展开态与悬浮高亮。
 * `RUST_LOG`：`debug` 可看到托盘点击、失焦收起等细节。
 
 ---
