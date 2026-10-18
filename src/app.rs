@@ -313,6 +313,9 @@ pub struct TrayApp {
     /// 面板展开时进行中的拉取（同一时间只允许一个）。
     keys_rx: Option<(String, Receiver<ApiKeysReply>)>,
 
+    /// 面板是否被钉住（置顶显示，点外部不自动收起）。
+    pinned: bool,
+
     /// 悬浮高亮动画状态（账号卡片、Key 行共用）。
     hover: HoverState,
 
@@ -376,6 +379,12 @@ impl TrayApp {
         cc.egui_ctx
             .all_styles_mut(|style| style.visuals = visuals.clone());
 
+        // 钉住状态是持久化的 UI 偏好，启动时从 app.json 读回
+        let pinned = match &data {
+            DataLayer::Ready(store) => store.config().panel_pinned,
+            DataLayer::Unavailable(_) => false,
+        };
+
         let bridge = TrayBridge::new(cc.egui_ctx.clone());
         let tray = crate::tray::install(Arc::clone(&bridge))?;
 
@@ -413,6 +422,7 @@ impl TrayApp {
             expanded_accounts: HashSet::new(),
             account_keys: HashMap::new(),
             keys_rx: None,
+            pinned,
             hover: HoverState::default(),
             debug_expand: std::env::var_os("SUB2API_TRAY_DEBUG_EXPAND").is_some(),
             restored_expansion: false,
@@ -908,6 +918,23 @@ impl TrayApp {
         ctx.request_repaint();
     }
 
+    /// 切换"钉住"状态并写回 `app.json`（失败只记日志，不影响本次会话）。
+    fn set_pinned(&mut self, ctx: &egui::Context, pinned: bool) {
+        self.pinned = pinned;
+        log::info!("面板置顶：{}", if pinned { "已钉住" } else { "已取消" });
+
+        if let DataLayer::Ready(store) = &mut self.data {
+            let mut config = store.config().clone();
+            config.panel_pinned = pinned;
+            if let Err(err) = crate::config::save(store.dir(), &config) {
+                log::warn!("保存置顶状态失败：{err:#}");
+            } else {
+                *store.config_mut() = config;
+            }
+        }
+        ctx.request_repaint();
+    }
+
     /// 打开设置页：把当前配置拷进草稿，改动在点"保存"前不生效。
     fn open_settings(&mut self) {
         let DataLayer::Ready(store) = &self.data else {
@@ -1360,6 +1387,11 @@ impl TrayApp {
             return;
         }
 
+        // 钉住（置顶）时不因失焦收起：这是用户明确要求的"别关"
+        if self.pinned && !self.debug_show_on_start {
+            return;
+        }
+
         // 登录弹窗打开时不收起面板：用户正在输密码，
         // 因为"去看了一眼别的窗口"就把面板连带表单一起关掉，等于让输入白费。
         if self.login.is_open() {
@@ -1559,6 +1591,8 @@ impl TrayApp {
         let mut delete_request: Option<String> = None;
         // 设置页入口的点击结果
         let mut open_settings = false;
+        // 图钉（置顶）点击结果
+        let mut toggle_pin = false;
         // 悬浮动画状态：先取出来，绘制闭包里才能可变借用
         let mut hover = std::mem::take(&mut self.hover);
 
@@ -1578,7 +1612,7 @@ impl TrayApp {
                 egui::Panel::top("panel_header")
                     .frame(egui::Frame::NONE.fill(PANEL_BG))
                     .show(ui, |ui| {
-                        draw_header(ui, &mut open_settings);
+                        draw_header(ui, &mut open_settings, self.pinned, &mut toggle_pin);
 
                         if let Some(reason) = storage_error.as_deref() {
                             ui.add_space(12.0);
@@ -1743,6 +1777,10 @@ impl TrayApp {
 
         if open_settings {
             self.open_settings();
+        }
+
+        if toggle_pin {
+            self.set_pinned(ctx, !self.pinned);
         }
 
         // ---- 设置页 ----
@@ -2019,6 +2057,50 @@ fn fallback_position(monitor: egui::Vec2, size: egui::Vec2) -> (f32, f32) {
 /// 返回 `true` 表示用户点击了「登陆新用户」按钮。
 /// 之所以把按钮放在标题区（面板最顶部），是需求方明确的位置要求：
 /// 登录是这块面板最主要的新增操作，必须第一眼可见。
+/// 画一个图钉（置顶开关）。
+///
+/// 同样是矢量绘制：`📌` 这类 emoji 在中文字体里可能缺字形（变豆腐块），
+/// 自己画"圆头 + 斜针 + 底座"在任何字体环境下都可靠。
+fn draw_pin(ui: &mut egui::Ui, pinned: bool) -> egui::Response {
+    let size = fs(16.0);
+    let (rect, response) = ui.allocate_exact_size(egui::vec2(size, size), egui::Sense::click());
+    let hovered = response.hovered();
+    let color = if pinned {
+        ACCENT
+    } else if hovered {
+        TEXT_PRIMARY
+    } else {
+        TEXT_SECONDARY
+    };
+    let painter = ui.painter();
+    let center = rect.center();
+
+    // 钉头（实心圆）
+    painter.circle_filled(
+        egui::pos2(center.x - 1.6, center.y - 2.4),
+        size * 0.17,
+        color,
+    );
+    // 针身（斜线）
+    painter.line_segment(
+        [
+            egui::pos2(center.x - 0.2, center.y - 0.8),
+            egui::pos2(center.x + 4.6, center.y + 5.0),
+        ],
+        egui::Stroke::new(1.6, color),
+    );
+    // 底座横线，让"钉住"的语义更直白
+    painter.line_segment(
+        [
+            egui::pos2(center.x - 4.6, center.y + 5.2),
+            egui::pos2(center.x + 1.4, center.y + 5.2),
+        ],
+        egui::Stroke::new(1.6, color),
+    );
+
+    response.on_hover_cursor(egui::CursorIcon::PointingHand)
+}
+
 /// 画一个矢量齿轮（设置入口）。
 ///
 /// 与 chevron 同理：egui 不能渲染 SVG，而齿轮用两三个圆 + 8 根短线就能画得很干净，
@@ -2053,7 +2135,7 @@ fn draw_gear(ui: &mut egui::Ui) -> egui::Response {
 }
 
 /// 顶部条：只保留标题、版本号与齿轮。
-fn draw_header(ui: &mut egui::Ui, open_settings: &mut bool) {
+fn draw_header(ui: &mut egui::Ui, open_settings: &mut bool, pinned: bool, toggle_pin: &mut bool) {
     ui.horizontal(|ui| {
         ui.label(
             egui::RichText::new("Sub2API 托盘")
@@ -2066,6 +2148,10 @@ fn draw_header(ui: &mut egui::Ui, open_settings: &mut bool) {
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             if draw_gear(ui).clicked() {
                 *open_settings = true;
+            }
+            // 图钉：切换"置顶显示"（钉住后点面板外部不会收起）
+            if draw_pin(ui, pinned).clicked() {
+                *toggle_pin = true;
             }
             ui.label(
                 egui::RichText::new(format!("v{}", crate::APP_VERSION))
