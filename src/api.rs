@@ -506,6 +506,57 @@ fn expires_at_from_now(seconds: i64) -> Option<String> {
     expires.format(&Rfc3339).ok()
 }
 
+/// 用量曲线接口路径（用户态，范围就是当前登录账号自己）。
+pub const USAGE_TREND_PATH: &str = "/api/v1/usage/dashboard/trend";
+
+/// 用量曲线上的一个时间桶。
+///
+/// 服务端**只返回有数据的桶**（稀疏），客户端要自己接受"点数少于区间长度"。
+#[derive(Debug, Clone, PartialEq)]
+pub struct UsagePoint {
+    /// 时间标签：小时粒度是 `2026-10-18 02:00`，天粒度是 `2026-10-18`。
+    pub label: String,
+    /// 该时间桶的请求数。
+    pub requests: i64,
+    /// 该时间桶消耗的总 token 数。
+    pub total_tokens: i64,
+    /// 实际扣费（美元）。
+    pub actual_cost: f64,
+}
+
+/// 纯函数：解析 `GET /api/v1/usage/dashboard/trend`。
+pub fn parse_usage_trend(status: u16, body: &str) -> Result<Vec<UsagePoint>, ApiError> {
+    let data = read_data(status, body, RequestKind::Me)?;
+    let items = data
+        .get("trend")
+        .and_then(|value| value.as_array())
+        .cloned()
+        .unwrap_or_default();
+
+    Ok(items
+        .iter()
+        .map(|item| UsagePoint {
+            label: item
+                .get("date")
+                .and_then(|value| value.as_str())
+                .unwrap_or_default()
+                .to_owned(),
+            requests: item
+                .get("requests")
+                .and_then(|value| value.as_i64())
+                .unwrap_or(0),
+            total_tokens: item
+                .get("total_tokens")
+                .and_then(|value| value.as_i64())
+                .unwrap_or(0),
+            actual_cost: item
+                .get("actual_cost")
+                .and_then(|value| value.as_f64())
+                .unwrap_or(0.0),
+        })
+        .collect())
+}
+
 /// 纯函数：解析 `GET /api/v1/keys` 的列表。
 ///
 /// 兼容几种字段写法（`masked_key` / `maskedKey` / `key`），因为不同版本后端
@@ -681,6 +732,24 @@ impl HttpClient {
         let url = format!("{}{API_KEYS_PATH}", self.base_url);
         let (status, text) = self.get_json(&url, access_token)?;
         parse_api_keys(status, &text)
+    }
+
+    /// 拉取用量曲线（用户态接口，范围为当前账号自己）。
+    ///
+    /// `granularity` 取 `hour` 或 `day`；日期都是 `YYYY-MM-DD`。
+    pub fn usage_trend(
+        &self,
+        access_token: &str,
+        start: &str,
+        end: &str,
+        granularity: &str,
+    ) -> Result<Vec<UsagePoint>, ApiError> {
+        let url = format!(
+            "{}{USAGE_TREND_PATH}?start_date={start}&end_date={end}&granularity={granularity}",
+            self.base_url
+        );
+        let (status, text) = self.get_json(&url, access_token)?;
+        parse_usage_trend(status, &text)
     }
 
     /// 取某个 Key 的完整值（只用于复制到剪贴板，绝不落盘）。
@@ -1097,5 +1166,25 @@ mod tests {
             read("SUB2API_ACCEPTANCE_EMAIL"),
             read("SUB2API_ACCEPTANCE_PASSWORD"),
         )
+    }
+
+    #[test]
+    fn 解析用量曲线并接受稀疏点() {
+        let body = r#"{"code":0,"message":"success","data":{"trend":[
+            {"date":"2026-10-18 02:00","requests":1,"total_tokens":1660,"actual_cost":0.0268},
+            {"date":"2026-10-18 05:00","requests":3,"total_tokens":900,"actual_cost":0.01}
+        ],"granularity":"hour"}}"#;
+        let points = parse_usage_trend(200, body).expect("解析成功");
+        assert_eq!(points.len(), 2, "稀疏点应原样保留");
+        assert_eq!(points[0].label, "2026-10-18 02:00");
+        assert_eq!(points[0].total_tokens, 1660);
+        assert_eq!(points[1].requests, 3);
+    }
+
+    #[test]
+    fn 用量曲线为空时返回空数组() {
+        let body = r#"{"code":0,"message":"success","data":{"trend":[],"granularity":"day"}}"#;
+        let points = parse_usage_trend(200, body).expect("解析成功");
+        assert!(points.is_empty());
     }
 }

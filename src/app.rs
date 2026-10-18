@@ -76,6 +76,82 @@ fn lerp_color(from: egui::Color32, to: egui::Color32, t: f32) -> egui::Color32 {
 /// 复制结果：(账号 id, Key id, 完整值或错误文案)。
 type CopyReply = (String, String, Result<String, String>);
 
+/// 用量曲线的区间。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum UsageRange {
+    /// 最近 24 小时（按小时聚合）。
+    Day,
+    /// 最近 7 天（按天聚合）。
+    Week,
+    /// 最近 30 天（按天聚合）。
+    Month,
+}
+
+impl UsageRange {
+    /// 依次排列的区间，用于按钮组。
+    const ALL: [UsageRange; 3] = [UsageRange::Day, UsageRange::Week, UsageRange::Month];
+
+    /// 按钮上的中文标签。
+    fn label(self) -> &'static str {
+        match self {
+            UsageRange::Day => "24 小时",
+            UsageRange::Week => "7 天",
+            UsageRange::Month => "30 天",
+        }
+    }
+
+    /// 服务端的聚合粒度。
+    fn granularity(self) -> &'static str {
+        match self {
+            UsageRange::Day => "hour",
+            UsageRange::Week | UsageRange::Month => "day",
+        }
+    }
+
+    /// 回溯天数（24 小时算 1 天）。
+    fn back_days(self) -> i64 {
+        match self {
+            UsageRange::Day => 1,
+            UsageRange::Week => 7,
+            UsageRange::Month => 30,
+        }
+    }
+
+    /// 给接口用的 `(start_date, end_date)`，格式 `YYYY-MM-DD`。
+    ///
+    /// 用 UTC 日期：服务端按自己的时区切桶，跨时区时边界可能差一天，
+    /// 但曲线形状不受影响，不值得为此引入时区库。
+    fn dates(self) -> (String, String) {
+        let format = time::macros::format_description!("[year]-[month]-[day]");
+        let today = time::OffsetDateTime::now_utc().date();
+        let start = today - time::Duration::days(self.back_days());
+        (
+            start.format(&format).unwrap_or_default(),
+            today.format(&format).unwrap_or_default(),
+        )
+    }
+}
+
+/// 用量拉取结果：`(账号 id, 区间, 点集或错误文案)`。
+type UsageReply = (
+    String,
+    UsageRange,
+    Receiver<Result<Vec<crate::api::UsagePoint>, String>>,
+);
+
+/// 某个账号在某个区间下的用量曲线缓存。
+#[derive(Debug, Clone, Default)]
+struct UsageSeries {
+    /// 服务端返回的时间桶（稀疏）。
+    points: Vec<crate::api::UsagePoint>,
+    /// 是否正在拉取。
+    loading: bool,
+    /// 错误文案（可直接展示）。
+    error: Option<String>,
+    /// 上次成功拉取的时刻，用于 TTL 判断。
+    fetched_at: Option<Instant>,
+}
+
 /// 设置页的编辑草稿：先在本地改，点"保存"才写盘并生效。
 #[derive(Debug, Clone)]
 struct SettingsDraft {
@@ -172,6 +248,9 @@ pub(crate) fn fs(base: f32) -> f32 {
 /// 同时允许登录的账号上限（需求方要求：同时最多 10 个）。
 const MAX_ACCOUNTS: usize = 10;
 
+/// 用量曲线的缓存有效期：到点后重新拉，避免频繁打 Heavy 限流接口。
+const USAGE_TTL: Duration = Duration::from_secs(60);
+
 /// 面板里一张账号卡片需要的展示数据。
 ///
 /// 在绘制前一次性算好（见 `collect_cards`），这样绘制闭包只依赖局部变量，
@@ -203,6 +282,14 @@ struct AccountCard {
     subscription: Option<String>,
     /// 刚刚复制成功的 Key id（用于浮窗提示，过期后为 `None`）。
     copied_key: Option<String>,
+    /// 当前选中的用量区间。
+    usage_range: UsageRange,
+    /// 该区间的用量点（稀疏）。
+    usage_points: Vec<crate::api::UsagePoint>,
+    /// 用量是否正在拉取。
+    usage_loading: bool,
+    /// 用量拉取失败的原因。
+    usage_error: Option<String>,
 }
 
 /// 单个账号的 API Key 明细状态（面板内展开时用）。
@@ -316,6 +403,15 @@ pub struct TrayApp {
     /// 面板是否被钉住（置顶显示，点外部不自动收起）。
     pinned: bool,
 
+    /// 每个账号选中的用量区间（默认 24 小时）。
+    usage_range: HashMap<String, UsageRange>,
+
+    /// 用量曲线缓存：`(账号 id, 区间)` → 曲线。
+    usage: HashMap<(String, UsageRange), UsageSeries>,
+
+    /// 进行中的用量拉取（同一时间只允许一个）。
+    usage_rx: Option<UsageReply>,
+
     /// 悬浮高亮动画状态（账号卡片、Key 行共用）。
     hover: HoverState,
 
@@ -423,6 +519,9 @@ impl TrayApp {
             account_keys: HashMap::new(),
             keys_rx: None,
             pinned,
+            usage_range: HashMap::new(),
+            usage: HashMap::new(),
+            usage_rx: None,
             hover: HoverState::default(),
             debug_expand: std::env::var_os("SUB2API_TRAY_DEBUG_EXPAND").is_some(),
             restored_expansion: false,
@@ -582,6 +681,21 @@ impl TrayApp {
                         .and_then(|item| item.summary.as_ref())
                         .map(|item| item.group_names.join("、"))
                         .filter(|names| !names.is_empty()),
+                    usage_range: self.usage_range_of(&account.id),
+                    usage_points: self
+                        .usage
+                        .get(&(account.id.clone(), self.usage_range_of(&account.id)))
+                        .map(|series| series.points.clone())
+                        .unwrap_or_default(),
+                    usage_loading: self
+                        .usage
+                        .get(&(account.id.clone(), self.usage_range_of(&account.id)))
+                        .map(|series| series.loading)
+                        .unwrap_or(false),
+                    usage_error: self
+                        .usage
+                        .get(&(account.id.clone(), self.usage_range_of(&account.id)))
+                        .and_then(|series| series.error.clone()),
                     copied_key: self
                         .copy_notice
                         .as_ref()
@@ -701,6 +815,121 @@ impl TrayApp {
             let _ = sender.send(ApiKeysReply::List(reply));
             repaint.request_repaint();
         });
+    }
+
+    /// 账号当前选中的用量区间（默认 24 小时）。
+    fn usage_range_of(&self, account_id: &str) -> UsageRange {
+        self.usage_range
+            .get(account_id)
+            .copied()
+            .unwrap_or(UsageRange::Day)
+    }
+
+    /// 切换某个账号的用量区间，并立刻确保有数据。
+    fn set_usage_range(&mut self, ctx: &egui::Context, account_id: &str, range: UsageRange) {
+        self.usage_range.insert(account_id.to_owned(), range);
+        self.maybe_request_usage(ctx);
+        ctx.request_repaint();
+    }
+
+    /// 后台拉取某账号某区间的用量曲线。
+    fn request_usage(&mut self, ctx: &egui::Context, account_id: &str, range: UsageRange) {
+        if self.usage_rx.is_some() {
+            return;
+        }
+        let DataLayer::Ready(store) = &self.data else {
+            return;
+        };
+        let Some(account) = store.accounts().iter().find(|item| item.id == account_id) else {
+            return;
+        };
+        let base_url = account.base_url.clone();
+        let secrets_blob = account.secrets.clone();
+        let secret_store = store.secret_store();
+        let timeout = self.request_timeout();
+        let id = account_id.to_owned();
+        let (start, end) = range.dates();
+        let granularity = range.granularity();
+
+        self.usage.entry((id.clone(), range)).or_default().loading = true;
+        let (sender, receiver) = std::sync::mpsc::channel();
+        self.usage_rx = Some((id.clone(), range, receiver));
+        let repaint = ctx.clone();
+
+        std::thread::spawn(move || {
+            let result =
+                match crate::secrets::open_credentials(secret_store.as_ref(), &id, &secrets_blob) {
+                    Ok(credentials) => match crate::api::HttpClient::new(&base_url, timeout) {
+                        Ok(client) => client
+                            .usage_trend(&credentials.access_token, &start, &end, granularity)
+                            .map_err(|err| err.user_message()),
+                        Err(err) => Err(err.user_message()),
+                    },
+                    Err(err) => Err(format!("凭据无法解密：{err:#}")),
+                };
+            let _ = sender.send(result);
+            repaint.request_repaint();
+        });
+    }
+
+    /// 取一次用量拉取结果。
+    fn poll_usage(&mut self, ctx: &egui::Context) {
+        let Some((account_id, range, receiver)) = self.usage_rx.as_ref() else {
+            return;
+        };
+        let Ok(result) = receiver.try_recv() else {
+            return;
+        };
+        let key = (account_id.clone(), *range);
+        self.usage_rx = None;
+
+        let entry = self.usage.entry(key).or_default();
+        entry.loading = false;
+        match result {
+            Ok(points) => {
+                entry.points = points;
+                entry.error = None;
+                entry.fetched_at = Some(Instant::now());
+            }
+            Err(message) => {
+                entry.error = Some(message);
+                // 失败也算"刚试过"：否则每帧都会重试，把 Heavy 限流接口打爆
+                entry.fetched_at = Some(Instant::now());
+            }
+        }
+        ctx.request_repaint();
+    }
+
+    /// 为展开中的账号补齐用量曲线（过期或缺失才拉；同一时间只拉一个）。
+    fn maybe_request_usage(&mut self, ctx: &egui::Context) {
+        if self.usage_rx.is_some() {
+            return;
+        }
+        let ids: Vec<String> = match &self.data {
+            DataLayer::Ready(store) => store
+                .accounts()
+                .iter()
+                .filter(|item| self.expanded_accounts.contains(&item.id))
+                .map(|item| item.id.clone())
+                .collect(),
+            DataLayer::Unavailable(_) => Vec::new(),
+        };
+
+        for id in ids {
+            let range = self.usage_range_of(&id);
+            let needs_fetch = match self.usage.get(&(id.clone(), range)) {
+                Some(series) if series.loading => false,
+                Some(series) => series
+                    .fetched_at
+                    .map(|at| at.elapsed() > USAGE_TTL)
+                    .unwrap_or(true),
+                None => true,
+            };
+            if needs_fetch {
+                self.request_usage(ctx, &id, range);
+                return;
+            }
+        }
     }
 
     /// 依次为"已展开但还没拉到 Key"的账号发起拉取（同一时间只跑一个）。
@@ -1587,6 +1816,8 @@ impl TrayApp {
         let mut toggle_account: Option<String> = None;
         // 被点击要复制的 (账号 id, Key id)
         let mut copy_request: Option<(String, String)> = None;
+        // 用量区间切换请求
+        let mut usage_switch: Option<(String, UsageRange)> = None;
         // 面板内的账号操作：请求删除（标题行右侧按钮触发）
         let mut delete_request: Option<String> = None;
         // 设置页入口的点击结果
@@ -1662,6 +1893,7 @@ impl TrayApp {
                                     &mut toggle_account,
                                     &mut hover,
                                     &mut copy_request,
+                                    &mut usage_switch,
                                     &mut delete_request,
                                 );
                                 ui.add_space(10.0);
@@ -1679,6 +1911,10 @@ impl TrayApp {
         if refresh_clicked {
             // 手动刷新：绕过定时与启动延迟，但仍受"只跑一轮"约束
             self.try_start_refresh(ctx, true);
+        }
+
+        if let Some((account_id, range)) = usage_switch {
+            self.set_usage_range(ctx, &account_id, range);
         }
 
         if let Some((account_id, key_id)) = copy_request {
@@ -1904,6 +2140,9 @@ impl eframe::App for TrayApp {
         self.poll_refresh(ctx);
         self.poll_account_keys(ctx);
 
+        // 展开中的账号要保证有新鲜的用量曲线（缺失或超过 TTL 才拉）
+        self.maybe_request_usage(ctx);
+
         // 启动后恢复上次的展开状态（记录在 accounts.json 的 expanded 字段里）
         if !self.restored_expansion {
             self.restored_expansion = true;
@@ -1943,6 +2182,7 @@ impl eframe::App for TrayApp {
                 }
             }
         }
+        self.poll_usage(ctx);
         self.poll_copy(ctx);
         self.poll_update(ctx);
         self.maybe_start_refresh(ctx);
@@ -2365,6 +2605,7 @@ fn draw_account_card(
     toggle: &mut Option<String>,
     hover: &mut HoverState,
     copy_request: &mut Option<(String, String)>,
+    usage_switch: &mut Option<(String, UsageRange)>,
     delete_request: &mut Option<String>,
 ) {
     // 悬浮进度：上一帧矩形的命中 + 指数淡入，避免"闪一下"
@@ -2469,11 +2710,216 @@ fn draw_account_card(
                 ui.add_space(6.0);
                 ui.separator();
 
+                // 用量曲线：走用户态接口，看到的是本账号自己的数据
+                draw_usage_section(ui, card, usage_switch);
+                ui.add_space(6.0);
+                ui.separator();
+
                 draw_account_keys(ui, card, hover, copy_request);
             }
         });
 
     hover.store(&hover_key, frame.response.rect);
+}
+
+/// 把 token 数格式化成紧凑文本（`1.2k` / `3.4M`）。
+fn fmt_tokens(value: i64) -> String {
+    if value >= 1_000_000 {
+        format!("{:.1}M", value as f64 / 1_000_000.0)
+    } else if value >= 1_000 {
+        format!("{:.1}k", value as f64 / 1_000.0)
+    } else {
+        value.to_string()
+    }
+}
+
+/// 绘制"用量"区：区间切换按钮 + token 曲线 + 合计。
+fn draw_usage_section(
+    ui: &mut egui::Ui,
+    card: &AccountCard,
+    usage_switch: &mut Option<(String, UsageRange)>,
+) {
+    ui.horizontal(|ui| {
+        ui.label(
+            egui::RichText::new("用量")
+                .size(fs(11.0))
+                .strong()
+                .color(TEXT_PRIMARY),
+        );
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            // 从右往左排，视觉顺序仍是 24 小时 → 7 天 → 30 天
+            for range in UsageRange::ALL.iter().rev() {
+                let selected = *range == card.usage_range;
+                let text = egui::RichText::new(range.label())
+                    .size(fs(9.0))
+                    .color(if selected {
+                        egui::Color32::from_rgb(15, 23, 42)
+                    } else {
+                        TEXT_SECONDARY
+                    });
+                let button = egui::Button::new(text).fill(if selected {
+                    ACCENT
+                } else {
+                    egui::Color32::TRANSPARENT
+                });
+                if ui.add(button).clicked() && !selected {
+                    *usage_switch = Some((card.id.clone(), *range));
+                }
+            }
+        });
+    });
+
+    if card.usage_loading {
+        ui.horizontal(|ui| {
+            ui.spinner();
+            ui.label(
+                egui::RichText::new("加载用量…")
+                    .size(fs(9.0))
+                    .color(TEXT_DIM),
+            );
+        });
+        return;
+    }
+
+    if let Some(error) = &card.usage_error {
+        ui.label(
+            egui::RichText::new(error)
+                .size(fs(9.0))
+                .color(egui::Color32::from_rgb(248, 113, 113)),
+        );
+        return;
+    }
+
+    if card.usage_points.is_empty() {
+        ui.label(
+            egui::RichText::new("该区间暂无用量")
+                .size(fs(9.0))
+                .color(TEXT_DIM),
+        );
+        return;
+    }
+
+    draw_usage_chart(ui, &card.usage_points);
+
+    let total: i64 = card
+        .usage_points
+        .iter()
+        .map(|point| point.total_tokens)
+        .sum();
+    let requests: i64 = card.usage_points.iter().map(|point| point.requests).sum();
+    let cost: f64 = card
+        .usage_points
+        .iter()
+        .map(|point| point.actual_cost)
+        .sum();
+    ui.label(
+        egui::RichText::new(format!(
+            "合计 {} tokens · {} 次请求 · ${cost:.3}",
+            fmt_tokens(total),
+            requests
+        ))
+        .size(fs(9.0))
+        .color(TEXT_SECONDARY),
+    );
+}
+
+/// 用原生绘制画 token 用量折线：网格 + 面积 + 折线 + 悬浮提示。
+///
+/// 点数最多 31 个，全部在 CPU 上算完直接交给 painter，
+/// 不引入图表库，也不做逐帧分配（`line` 是每帧临时 Vec，但只有几十个点）。
+fn draw_usage_chart(ui: &mut egui::Ui, points: &[crate::api::UsagePoint]) {
+    let width = ui.available_width().max(40.0);
+    let height = fs(76.0);
+    let (rect, response) = ui.allocate_exact_size(egui::vec2(width, height), egui::Sense::hover());
+    let painter = ui.painter();
+
+    for step in 0..=3 {
+        let y = rect.top() + rect.height() * step as f32 / 3.0;
+        painter.line_segment(
+            [egui::pos2(rect.left(), y), egui::pos2(rect.right(), y)],
+            egui::Stroke::new(1.0, egui::Color32::from_white_alpha(12)),
+        );
+    }
+
+    let max_value = points
+        .iter()
+        .map(|point| point.total_tokens)
+        .max()
+        .unwrap_or(0)
+        .max(1) as f32;
+    let count = points.len();
+    let x_at = |index: usize| -> f32 {
+        if count <= 1 {
+            rect.center().x
+        } else {
+            rect.left() + rect.width() * index as f32 / (count - 1) as f32
+        }
+    };
+    let y_at =
+        |value: f32| -> f32 { rect.bottom() - rect.height() * (value / max_value).clamp(0.0, 1.0) };
+
+    let line: Vec<egui::Pos2> = points
+        .iter()
+        .enumerate()
+        .map(|(index, point)| egui::pos2(x_at(index), y_at(point.total_tokens as f32)))
+        .collect();
+
+    let mut area = line.clone();
+    let left = line.first().copied().unwrap_or(rect.center());
+    let right = line.last().copied().unwrap_or(rect.center());
+    area.push(egui::pos2(right.x, rect.bottom()));
+    area.push(egui::pos2(left.x, rect.bottom()));
+    painter.add(egui::Shape::convex_polygon(
+        area,
+        egui::Color32::from_rgba_unmultiplied(121, 244, 189, 36),
+        egui::Stroke::NONE,
+    ));
+    painter.add(egui::Shape::line(
+        line.clone(),
+        egui::Stroke::new(1.8, ACCENT),
+    ));
+    for point in &line {
+        painter.circle_filled(*point, 2.0, ACCENT);
+    }
+
+    if let Some(pointer) = response.hover_pos() {
+        let ratio = ((pointer.x - rect.left()) / rect.width()).clamp(0.0, 1.0);
+        let index = (ratio * (count.max(2) - 1) as f32).round() as usize;
+        let index = index.min(count.saturating_sub(1));
+        let x = x_at(index);
+        painter.line_segment(
+            [egui::pos2(x, rect.top()), egui::pos2(x, rect.bottom())],
+            egui::Stroke::new(1.0, egui::Color32::from_white_alpha(70)),
+        );
+        painter.circle_filled(
+            egui::pos2(x, y_at(points[index].total_tokens as f32)),
+            3.2,
+            egui::Color32::WHITE,
+        );
+
+        let text = format!(
+            "{}\n{} tokens · {} 次请求",
+            points[index].label,
+            fmt_tokens(points[index].total_tokens),
+            points[index].requests
+        );
+        let galley =
+            painter.layout_no_wrap(text, egui::FontId::proportional(fs(9.0)), TEXT_PRIMARY);
+        let mut pos = egui::pos2(x + 10.0, rect.top() + 4.0);
+        if pos.x + galley.size().x > rect.right() {
+            pos.x = (x - galley.size().x - 10.0).max(rect.left());
+        }
+        let background = egui::Rect::from_min_size(
+            pos - egui::vec2(5.0, 3.0),
+            galley.size() + egui::vec2(10.0, 6.0),
+        );
+        painter.rect_filled(
+            background,
+            egui::CornerRadius::same(4),
+            egui::Color32::from_rgba_unmultiplied(15, 23, 42, 240),
+        );
+        painter.galley(pos, galley, TEXT_PRIMARY);
+    }
 }
 
 /// 绘制展开后的 API Key 明细。
@@ -2926,5 +3372,33 @@ mod tests {
 
         assert!(pos.x.is_finite());
         assert!(pos.y.is_finite());
+    }
+
+    #[test]
+    fn 用量区间映射到服务端参数() {
+        assert_eq!(UsageRange::Day.granularity(), "hour");
+        assert_eq!(UsageRange::Week.granularity(), "day");
+        assert_eq!(UsageRange::Month.granularity(), "day");
+        assert_eq!(UsageRange::Day.back_days(), 1);
+        assert_eq!(UsageRange::Week.back_days(), 7);
+        assert_eq!(UsageRange::Month.back_days(), 30);
+    }
+
+    #[test]
+    fn 用量区间日期是合法的年月日() {
+        for range in UsageRange::ALL {
+            let (start, end) = range.dates();
+            // 形如 2026-10-18：10 个字符，且 start <= end
+            assert_eq!(start.len(), 10, "start={start}");
+            assert_eq!(end.len(), 10, "end={end}");
+            assert!(start <= end, "start={start} end={end}");
+        }
+    }
+
+    #[test]
+    fn token数量格式化() {
+        assert_eq!(fmt_tokens(999), "999");
+        assert_eq!(fmt_tokens(1660), "1.7k");
+        assert_eq!(fmt_tokens(2_500_000), "2.5M");
     }
 }
