@@ -62,6 +62,12 @@ pub struct AppConfig {
 
     /// 单次 HTTP 请求超时（秒）。
     pub request_timeout_seconds: u64,
+
+    /// 面板是否被"钉住"（置顶显示）。
+    ///
+    /// 钉住时点面板外部不会自动收起，方便边看数据边操作别的窗口。
+    /// 这是 UI 偏好，但放 `app.json` 才能跨重启保留。
+    pub panel_pinned: bool,
 }
 
 impl Default for AppConfig {
@@ -72,6 +78,8 @@ impl Default for AppConfig {
             mask_accounts: false,
             refresh_interval_seconds: DEFAULT_REFRESH_INTERVAL_SECONDS,
             request_timeout_seconds: DEFAULT_REQUEST_TIMEOUT_SECONDS,
+            // 默认不钉住：托盘面板的常见预期是"点别处就收起"
+            panel_pinned: false,
         }
     }
 }

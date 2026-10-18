@@ -45,7 +45,7 @@
 | 语言 | Rust | `rust-version = 1.95`，edition 2024 | Windows 使用 MSVC 工具链 |
 | 窗口 / 事件循环 | `eframe` + `egui` | 0.37 | 渲染后端**固定 glow**，原因见下 |
 | 系统托盘 | `tray-icon`（内含 `muda` 菜单） | 0.26 | 托盘图标必须在事件循环启动后创建 |
-| 图片解码 | `image`（仅 `png` 特性） | 0.25 | 托盘图标以 PNG 内嵌进二进制 |
+| 图片解码 | `png` | 0.17 | 只解内嵌的那一张图标；比 `image` 省约 5MB 体积 |
 | 配置 / 账号序列化 | `serde` + `serde_json` | 1.x | `app.json`、`accounts.json` |
 | 实例地址解析 | `url` | 2.5 | 归一化与校验（只允许 http/https） |
 | 账号标识 | `uuid`（v4） | 1.x | 每个账号的稳定 id |
@@ -362,6 +362,7 @@ cargo build --release                  # 产物：target/release/sub2api_tray
 | `maskAccounts` | bool | `false` | 账号名是否打码展示（只影响 UI） |
 | `refreshIntervalSeconds` | number | `300` | 状态刷新间隔，合法范围 30～86400 |
 | `requestTimeoutSeconds` | number | `10` | 单次 HTTP 超时，合法范围 1～120 |
+| `panelPinned` | bool | `false` | 面板是否钉住（置顶显示，点外部不收起） |
 
 * 缺失字段用默认值补齐；非法值回落到默认值并写 `warn` 日志，同时**回写**文件；
 * 语法损坏时改名为 `app.json.corrupt-<时间戳>` 后用默认值重建；
@@ -406,6 +407,8 @@ cargo build --release                  # 产物：target/release/sub2api_tray
 | 2026-10-18 | 补充测试分层约定 | 默认套件必须可重复；loopback 端到端用例标 `#[ignore]`，验收时显式运行；假服务器公共代码集中在 `main.rs::test_support`；阶段 2 标记完成 |
 | 2026-10-18 | 补充 API Key 约定 | 阶段表新增 1d；`accounts.json` 的 `apiKeys` 只存摘要（id/名称/打码值/状态/分组/最近使用/抓取时间），**不存完整 Key** |
 | 2026-10-18 | 补充浏览约定 | 阶段表新增 1e；明确"托盘"= 弹出面板（原生菜单不能滚动/展开）；账号上限 10；面板默认不显示数据目录 |
+| 2026-10-18 | 发布体积瘦身 | release 体积 13.3MB → 7.6MB：`image` 换成只解 PNG 的 `png`（-5.7MB 的主要来源）、`opt-level="z"`、`panic="abort"`、保留 `lto + strip + codegen-units=1` |
+| 2026-10-18 | 面板置顶（钉住） | 右上角新增图钉按钮（矢量绘制）：钉住后点面板外部不再自动收起，状态持久化到 `app.json` 的 `panelPinned` |
 | 2026-10-18 | 面板可缩放 + 登录入口内嵌 | 面板改为可缩放（最小 320×240），定位改用窗口真实尺寸；右下角自绘缩放手柄（内缩 8px 避开系统命中区，否则系统会抢走拖拽）；「登陆新用户」并入顶部总览卡片做高亮按钮 |
 | 2026-10-18 | 删除冗余的 Key 弹窗 | 展开区已经展示名称/打码值/额度/用量/分组，点击即复制，弹窗只剩重复内容，整块删除（约 300 行）；退出按钮移到账号标题行右侧 |
 | 2026-10-18 | 菜单只留原子动作 | 右键菜单最终只剩「立即刷新 / 版本 / 退出」：面板靠左键切换、登录在面板顶部，所以去掉「显示面板」「登陆新用户」 |
