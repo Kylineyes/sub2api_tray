@@ -29,6 +29,12 @@ pub const PANEL_WIDTH: f32 = 360.0;
 /// 面板逻辑高度（单位：egui 点）。
 pub const PANEL_HEIGHT: f32 = 460.0;
 
+/// 面板可缩放时的最小尺寸（逻辑点）：再小就放不下标题条与一张卡片。
+pub const MIN_PANEL_WIDTH: f32 = 320.0;
+
+/// 见 [`MIN_PANEL_WIDTH`]。
+pub const MIN_PANEL_HEIGHT: f32 = 240.0;
+
 /// 面板与托盘图标之间留出的空隙，避免气泡紧贴图标。
 const TRAY_GAP: f32 = 8.0;
 
@@ -352,6 +358,14 @@ impl TrayApp {
     pub fn new(cc: &eframe::CreationContext<'_>, data: DataLayer) -> anyhow::Result<Self> {
         // 中文字体必须在任何界面绘制之前装好，否则第一帧会是方块
         fonts::install(&cc.egui_ctx);
+
+        // 高 DPI 说明：egui 里所有尺寸都是"逻辑点"，真实像素 = 点 × pixels_per_point，
+        // 由 winit 按系统缩放（100%/125%/150%…）设置。面板尺寸、字号、间距都按点写，
+        // 因此换成高分辨率屏幕时会整体等比放大，不会出现"字小得像蚂蚁"。
+        log::info!(
+            "界面缩放 {}x（高 DPI 下尺寸与字号按此比例放大）",
+            cc.egui_ctx.pixels_per_point()
+        );
 
         // 深色配色：托盘气泡贴在深色任务栏旁边时观感更统一。
         // 这里直接改“两套主题”的样式，而不是只改当前主题：否则用户把系统切到浅色后，
@@ -1506,7 +1520,15 @@ impl TrayApp {
             bottom: (rect.position.y + f64::from(rect.size.height)) as f32 / pixels_per_point,
         });
 
-        compute_panel_position(icon, monitor, egui::vec2(PANEL_WIDTH, PANEL_HEIGHT))
+        // 用窗口**当前**尺寸而不是初始常量：面板可以被用户缩放，
+        // 定位必须跟着实际大小走，否则放大会顶出屏幕。
+        let size = ctx
+            .input(|i| i.viewport().inner_rect)
+            .map(|rect| rect.size())
+            .filter(|size| size.x > 1.0 && size.y > 1.0)
+            .unwrap_or_else(|| egui::vec2(PANEL_WIDTH, PANEL_HEIGHT));
+
+        compute_panel_position(icon, monitor, size)
     }
 
     /// 绘制整个面板。
@@ -1584,21 +1606,21 @@ impl TrayApp {
                     .show(ui, |ui| {
                         ui.add_space(12.0);
 
-                        // 登录入口放在滚动区顶部：账号多时它会随内容一起滚走，
-                        // 把首屏空间留给"看状态"这件事。
-                        if draw_login_button(ui, at_limit) {
-                            open_login = true;
-                        }
+                        // 总览卡片始终显示（没有账号时也能从这里登录）
+                        draw_account_summary(
+                            ui,
+                            &cards,
+                            &mut open_login,
+                            &mut refresh_clicked,
+                            at_limit,
+                        );
                         ui.add_space(12.0);
 
                         if cards.is_empty() {
-                            // 没有账号时保留原来的"尚未登录"引导
                             draw_status_card(ui);
                             ui.add_space(16.0);
                             draw_empty_state(ui);
                         } else {
-                            draw_account_summary(ui, &cards, &mut refresh_clicked);
-                            ui.add_space(12.0);
                             for card in &cards {
                                 draw_account_card(
                                     ui,
@@ -1656,6 +1678,60 @@ impl TrayApp {
                 log::warn!("保存展开状态失败：{err:#}");
             }
             ctx.request_repaint();
+        }
+
+        // ---- 右下角缩放手柄 ----
+        //
+        // 无边框窗口的系统缩放边缘只有几个像素宽，而且会把拖拽"抢"走
+        // （egui 收不到 pointer delta）。所以手柄**往内缩 8px**，由我们自己算尺寸：
+        // 既避开系统命中区，又能画一个看得见的抓手。
+        let grip = egui::Rect::from_min_size(
+            egui::pos2(ui.max_rect().right() - 24.0, ui.max_rect().bottom() - 24.0),
+            egui::vec2(16.0, 16.0),
+        );
+        let grip_response = ui.interact(
+            grip,
+            egui::Id::unique("panel-resize-grip"),
+            egui::Sense::drag(),
+        );
+        if grip_response.hovered() || grip_response.dragged() {
+            ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeNwSe);
+        }
+        if grip_response.dragged() {
+            let delta = ui.ctx().input(|input| input.pointer.delta());
+            if delta != egui::Vec2::ZERO {
+                let current = ui
+                    .ctx()
+                    .input(|input| input.viewport().inner_rect)
+                    .map(|rect| rect.size())
+                    .unwrap_or_else(|| egui::vec2(PANEL_WIDTH, PANEL_HEIGHT));
+                let next = egui::vec2(
+                    (current.x + delta.x).max(MIN_PANEL_WIDTH),
+                    (current.y + delta.y).max(MIN_PANEL_HEIGHT),
+                );
+                ui.ctx()
+                    .send_viewport_cmd(egui::ViewportCommand::InnerSize(next));
+            }
+        }
+
+        // 三条斜线，暗示"可以拖"
+        let painter = ui.painter();
+        let stroke = egui::Stroke::new(
+            1.4,
+            if grip_response.hovered() {
+                ACCENT
+            } else {
+                TEXT_DIM
+            },
+        );
+        for offset in [3.0, 7.0, 11.0] {
+            painter.line_segment(
+                [
+                    egui::pos2(grip.right() - offset, grip.bottom() - 2.0),
+                    egui::pos2(grip.right() - 2.0, grip.bottom() - offset),
+                ],
+                stroke,
+            );
         }
 
         // 弹窗画在面板之后，保证它在最上层（Modal 自带遮罩与输入拦截）
@@ -2007,35 +2083,6 @@ fn draw_header(ui: &mut egui::Ui, open_settings: &mut bool) {
         .rect_filled(line_rect, egui::CornerRadius::same(1), ACCENT);
 }
 
-/// 登录入口按钮：放进了滚动区，会跟着内容一起滚走。
-fn draw_login_button(ui: &mut egui::Ui, at_limit: bool) -> bool {
-    let button = egui::Button::new(
-        egui::RichText::new("＋ 登陆新用户")
-            .size(fs(13.0))
-            .strong()
-            // 亮色底上要用深色字，否则对比度不足
-            .color(egui::Color32::from_rgb(15, 23, 42)),
-    )
-    .fill(ACCENT);
-    // 达到账号上限时禁用入口：比"登录完才提示"更早地把限制告诉用户
-    let response = if at_limit {
-        ui.add_enabled_ui(false, |ui| {
-            ui.add_sized([ui.available_width(), 32.0], button)
-        })
-        .inner
-    } else {
-        ui.add_sized([ui.available_width(), 32.0], button)
-    };
-
-    response
-        .on_hover_text(if at_limit {
-            format!("已达 {MAX_ACCOUNTS} 个账号上限，请先在托盘里删除一个")
-        } else {
-            "填写实例地址与账号密码，登录后账号会出现在托盘里".to_owned()
-        })
-        .clicked()
-}
-
 /// 徽标颜色：全部在线（品牌薄荷绿）。
 const BADGE_ONLINE: [u8; 3] = [121, 244, 189];
 
@@ -2093,7 +2140,13 @@ fn status_color(status: AccountStatus) -> egui::Color32 {
 ///
 /// `refresh_clicked` 用来把"点了立即刷新"回传给调用方：
 /// 绘制函数拿不到 `&mut TrayApp`，只能通过局部标志传递。
-fn draw_account_summary(ui: &mut egui::Ui, cards: &[AccountCard], refresh_clicked: &mut bool) {
+fn draw_account_summary(
+    ui: &mut egui::Ui,
+    cards: &[AccountCard],
+    login_clicked: &mut bool,
+    refresh_clicked: &mut bool,
+    at_limit: bool,
+) {
     let online = cards
         .iter()
         .filter(|card| card.status == AccountStatus::Online)
@@ -2127,6 +2180,31 @@ fn draw_account_summary(ui: &mut egui::Ui, cards: &[AccountCard], refresh_clicke
                         .clicked()
                     {
                         *refresh_clicked = true;
+                    }
+
+                    // 登录入口：品牌色高亮，放进总览卡片，省掉独立一整行
+                    let login = egui::Button::new(
+                        egui::RichText::new("＋ 登录")
+                            .size(fs(10.0))
+                            .strong()
+                            .color(egui::Color32::from_rgb(15, 23, 42)),
+                    )
+                    .fill(ACCENT);
+                    let response = if at_limit {
+                        ui.add_enabled_ui(false, |ui| ui.add_sized([64.0, 22.0], login))
+                            .inner
+                    } else {
+                        ui.add_sized([64.0, 22.0], login)
+                    };
+                    if response
+                        .on_hover_text(if at_limit {
+                            format!("已达 {MAX_ACCOUNTS} 个账号上限，请先退出一个账号")
+                        } else {
+                            "填写实例地址与账号密码，登录后账号会出现在这里".to_owned()
+                        })
+                        .clicked()
+                    {
+                        *login_clicked = true;
                     }
                 });
             });
@@ -2230,7 +2308,8 @@ fn draw_account_card(
                             .strong()
                             .color(lerp_color(TEXT_PRIMARY, egui::Color32::WHITE, t * 0.45)),
                     );
-                    // 展开时右侧给"退出"按钮，角色名弱化在它左边
+                    // 展开时右侧给"退出"按钮，角色名弱化在它左边。
+                    // 面板被缩窄时只隐藏角色名（退出按钮始终在），否则会挤在一起。
                     if card.expanded {
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                             if ui
@@ -2244,11 +2323,13 @@ fn draw_account_card(
                                 exit_clicked = true;
                                 *delete_request = Some(card.id.clone());
                             }
-                            ui.label(
-                                egui::RichText::new(card.role_label)
-                                    .size(fs(10.0))
-                                    .color(TEXT_SECONDARY),
-                            );
+                            if ui.available_width() > 90.0 {
+                                ui.label(
+                                    egui::RichText::new(card.role_label)
+                                        .size(fs(10.0))
+                                        .color(TEXT_SECONDARY),
+                                );
+                            }
                         });
                     }
                 })

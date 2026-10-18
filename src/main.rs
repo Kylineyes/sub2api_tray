@@ -83,8 +83,9 @@ fn main() -> anyhow::Result<()> {
     let viewport = egui::ViewportBuilder::default()
         .with_title(APP_NAME)
         .with_inner_size([app::PANEL_WIDTH, app::PANEL_HEIGHT])
-        // 托盘气泡面板的尺寸固定，避免用户拖动后内部布局错位
-        .with_resizable(false)
+        // 面板可以拖动边缘缩放（有最小尺寸兜底，避免缩到看不清内容）
+        .with_resizable(true)
+        .with_min_inner_size([app::MIN_PANEL_WIDTH, app::MIN_PANEL_HEIGHT])
         // 去掉系统标题栏，做成一整块贴附托盘的气泡
         .with_decorations(false)
         // 允许圆角以外的区域完全透明，视觉上才像“悬浮气泡”而不是一个方块窗口
