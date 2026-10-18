@@ -2385,6 +2385,55 @@ fn draw_account_summary(ui: &mut egui::Ui, cards: &[AccountCard], refresh_clicke
         });
 }
 
+/// 画一个 Lucide 风格的折叠箭头（chevron）。
+///
+/// 为什么不加载 SVG：egui 没有 SVG 渲染能力，引入 `resvg`/`usvg` 会带来十几个依赖，
+/// 而这个图标只是三个点的折线——直接用 `Shape::line` 画，任何 DPI 下都是矢量清晰的。
+/// 几何参考 [lucide](https://lucide.dev) 的 `chevron-down`（MIT）：
+/// 24×24 网格上的折线 `(6,9) → (12,15) → (18,9)`，线宽 2，圆头圆角。
+/// 展开/收起只换折线朝向：收起时朝右，展开时朝下。
+fn draw_chevron(ui: &mut egui::Ui, expanded: bool, hover_t: f32) -> egui::Response {
+    let size = fs(16.0);
+    let (rect, response) = ui.allocate_exact_size(egui::vec2(size, size), egui::Sense::hover());
+    let center = rect.center();
+
+    let painter = ui.painter();
+    // 圆角底片：平时几乎透明，悬浮时随动画淡入，让箭头本身也像一颗"按钮"
+    painter.rect_filled(
+        rect.shrink(1.0),
+        egui::CornerRadius::same(5),
+        lerp_color(egui::Color32::from_white_alpha(8), HOVER_CARD_BG, hover_t),
+    );
+
+    // 折线的半宽：16px 的图标取 4.2，视觉上接近 Lucide 在 16px 下的比例
+    let half = size * 0.26;
+    let points = if expanded {
+        // 朝下：∨
+        vec![
+            egui::pos2(center.x - half, center.y - half * 0.5),
+            egui::pos2(center.x, center.y + half * 0.55),
+            egui::pos2(center.x + half, center.y - half * 0.5),
+        ]
+    } else {
+        // 朝右：›
+        vec![
+            egui::pos2(center.x - half * 0.5, center.y - half),
+            egui::pos2(center.x + half * 0.55, center.y),
+            egui::pos2(center.x - half * 0.5, center.y + half),
+        ]
+    };
+
+    painter.add(egui::Shape::line(
+        points,
+        egui::Stroke::new(
+            1.7,
+            lerp_color(TEXT_SECONDARY, egui::Color32::WHITE, hover_t * 0.8),
+        ),
+    ));
+
+    response
+}
+
 /// 绘制单个账号卡片。
 /// 绘制单个账号卡片。
 ///
@@ -2409,12 +2458,8 @@ fn draw_account_card(
 
             let header = ui
                 .horizontal(|ui| {
-                    ui.label(
-                        egui::RichText::new(if card.expanded { "▼" } else { "▶" })
-                            .size(fs(12.0))
-                            .strong()
-                            .color(ACCENT),
-                    );
+                    // 矢量箭头（替代原来的 ▶/▼ 字符：字符在不同字体下粗细不一，很丑）
+                    draw_chevron(ui, card.expanded, t);
                     ui.label(
                         egui::RichText::new("●")
                             .size(fs(10.0))
@@ -2426,13 +2471,16 @@ fn draw_account_card(
                             .strong()
                             .color(lerp_color(TEXT_PRIMARY, egui::Color32::WHITE, t * 0.45)),
                     );
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        ui.label(
-                            egui::RichText::new(card.role_label)
-                                .size(fs(10.0))
-                                .color(TEXT_SECONDARY),
-                        );
-                    });
+                    // 角色只在展开时显示：收起态要尽量干净
+                    if card.expanded {
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            ui.label(
+                                egui::RichText::new(card.role_label)
+                                    .size(fs(10.0))
+                                    .color(TEXT_SECONDARY),
+                            );
+                        });
+                    }
                 })
                 .response
                 .interact(egui::Sense::click())
@@ -2448,37 +2496,39 @@ fn draw_account_card(
                     .color(TEXT_DIM),
             );
 
-            let mut status_line = card.status.label().to_owned();
-            if let Some(balance) = card.balance {
-                status_line.push_str(&format!(" · 余额 ${balance:.2}"));
-            }
-            ui.label(
-                egui::RichText::new(status_line)
-                    .size(fs(11.0))
-                    .color(TEXT_SECONDARY),
-            );
-
-            if let Some(summary) = &card.summary {
-                ui.label(egui::RichText::new(summary).size(fs(10.0)).color(TEXT_DIM));
-            }
-
-            ui.label(
-                egui::RichText::new(&card.refreshed)
-                    .size(fs(9.0))
-                    .color(TEXT_DIM),
-            );
-
-            // 失败原因只展示一行，完整信息在日志里
-            if let Some(error) = &card.error {
-                let first_line = error.lines().next().unwrap_or_default();
-                ui.label(
-                    egui::RichText::new(first_line)
-                        .size(fs(9.0))
-                        .color(egui::Color32::from_rgb(248, 113, 113)),
-                );
-            }
-
+            // 收起态只保留"账户 + 网址"；余额、订阅、刷新时间等全部收进展开态，
+            // 这样一屏能看更多账号（需求方要求）。
             if card.expanded {
+                let mut status_line = card.status.label().to_owned();
+                if let Some(balance) = card.balance {
+                    status_line.push_str(&format!(" · 余额 ${balance:.2}"));
+                }
+                ui.label(
+                    egui::RichText::new(status_line)
+                        .size(fs(11.0))
+                        .color(TEXT_SECONDARY),
+                );
+
+                if let Some(summary) = &card.summary {
+                    ui.label(egui::RichText::new(summary).size(fs(10.0)).color(TEXT_DIM));
+                }
+
+                ui.label(
+                    egui::RichText::new(&card.refreshed)
+                        .size(fs(9.0))
+                        .color(TEXT_DIM),
+                );
+
+                // 失败原因只展示一行，完整信息在日志里
+                if let Some(error) = &card.error {
+                    let first_line = error.lines().next().unwrap_or_default();
+                    ui.label(
+                        egui::RichText::new(first_line)
+                            .size(fs(9.0))
+                            .color(egui::Color32::from_rgb(248, 113, 113)),
+                    );
+                }
+
                 ui.add_space(6.0);
                 ui.separator();
                 draw_account_keys(ui, card, hover, copy_request);
