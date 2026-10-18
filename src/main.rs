@@ -29,6 +29,7 @@
 mod accounts;
 mod api;
 mod app;
+mod autostart;
 mod config;
 mod data;
 mod fonts;
@@ -40,6 +41,7 @@ mod secrets;
 mod single_instance;
 mod state;
 mod tray;
+mod update;
 
 /// 应用显示名称：同时用作窗口标题和托盘提示文字的前缀。
 pub const APP_NAME: &str = "Sub2API 托盘";

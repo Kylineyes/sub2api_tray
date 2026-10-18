@@ -67,11 +67,16 @@ fn lerp_color(from: egui::Color32, to: egui::Color32, t: f32) -> egui::Color32 {
     )
 }
 
+/// 复制结果：(账号 id, Key id, 完整值或错误文案)。
+type CopyReply = (String, String, Result<String, String>);
+
 /// 设置页的编辑草稿：先在本地改，点"保存"才写盘并生效。
 #[derive(Debug, Clone)]
 struct SettingsDraft {
     /// 账号名是否打码。
     mask_accounts: bool,
+    /// 是否开机自启。
+    autostart: bool,
     /// 状态刷新间隔（秒）。
     refresh_interval_seconds: u64,
     /// 单次请求超时（秒）。
@@ -195,6 +200,8 @@ struct AccountCard {
     keys: Option<AccountKeysState>,
     /// 订阅名（来自 `/subscriptions/summary` 的分组名）。
     subscription: Option<String>,
+    /// 刚刚复制成功的 Key id（用于浮窗提示，过期后为 `None`）。
+    copied_key: Option<String>,
 }
 
 /// 单个账号的 API Key 明细状态（面板内展开时用）。
@@ -331,6 +338,27 @@ pub struct TrayApp {
 
     /// 设置页草稿（`None` 表示未打开）。
     settings: Option<SettingsDraft>,
+
+    /// 正在复制的 Key id（用于按钮态/日志）。
+    copying_key: Option<String>,
+
+    /// 复制结果通道：`(key_id, 完整值或错误文案)`。
+    copy_rx: Option<Receiver<CopyReply>>,
+
+    /// 复制成功的浮窗：`(账号 id, Key id, 出现时刻)`。
+    copy_notice: Option<(String, String, Instant)>,
+
+    /// 是否正在检查更新。
+    update_checking: bool,
+
+    /// 更新检查结果文案。
+    update_result: Option<String>,
+
+    /// 新版本下载页。
+    update_url: Option<String>,
+
+    /// 更新检查通道。
+    update_rx: Option<Receiver<Result<Option<crate::update::UpdateInfo>, String>>>,
 }
 
 impl TrayApp {
@@ -394,6 +422,13 @@ impl TrayApp {
             keys_rx: None,
             hover: HoverState::default(),
             settings: None,
+            copying_key: None,
+            copy_rx: None,
+            copy_notice: None,
+            update_checking: false,
+            update_result: None,
+            update_url: None,
+            update_rx: None,
         };
 
         // 启动时先按已加载的账号建一次菜单（此时状态都是"未知"）
@@ -561,6 +596,13 @@ impl TrayApp {
                         .and_then(|item| item.summary.as_ref())
                         .map(|item| item.group_names.join("、"))
                         .filter(|names| !names.is_empty()),
+                    copied_key: self
+                        .copy_notice
+                        .as_ref()
+                        .filter(|(account_id, _, at)| {
+                            account_id == &account.id && at.elapsed().as_secs_f32() < 1.6
+                        })
+                        .map(|(_, key_id, _)| key_id.clone()),
                 }
             })
             .collect()
@@ -896,6 +938,133 @@ impl TrayApp {
         });
     }
 
+    /// 后台检查 GitHub 上是否有新版本。
+    fn start_update_check(&mut self, ctx: &egui::Context) {
+        if self.update_rx.is_some() {
+            return;
+        }
+        self.update_checking = true;
+        self.update_result = Some("正在检查…".to_owned());
+
+        let (sender, receiver) = std::sync::mpsc::channel();
+        self.update_rx = Some(receiver);
+        let repaint = ctx.clone();
+        std::thread::spawn(move || {
+            let result = crate::update::check_latest(std::time::Duration::from_secs(10));
+            let _ = sender.send(result);
+            repaint.request_repaint();
+        });
+    }
+
+    /// 取一次更新检查结果。
+    fn poll_update(&mut self, ctx: &egui::Context) {
+        let Some(receiver) = self.update_rx.as_ref() else {
+            return;
+        };
+        let Ok(result) = receiver.try_recv() else {
+            return;
+        };
+        self.update_rx = None;
+        self.update_checking = false;
+
+        match result {
+            Ok(Some(info)) => {
+                if crate::update::is_newer(crate::APP_VERSION, &info.version) {
+                    self.update_result = Some(format!(
+                        "发现新版本 v{}（当前 v{}）",
+                        info.version,
+                        crate::APP_VERSION
+                    ));
+                    self.update_url = Some(info.url);
+                } else {
+                    self.update_result = Some(format!("已是最新版本 v{}", crate::APP_VERSION));
+                    self.update_url = None;
+                }
+            }
+            Ok(None) => self.update_result = Some("远端还没有发布记录".to_owned()),
+            Err(message) => self.update_result = Some(format!("检查失败：{message}")),
+        }
+        ctx.request_repaint();
+    }
+
+    /// 点击 Key 方块：后台取完整值，成功后写剪贴板并弹出"已复制"浮窗。
+    fn request_copy(&mut self, ctx: &egui::Context, account_id: &str, key_id: &str) {
+        if self.copy_rx.is_some() {
+            return;
+        }
+
+        let DataLayer::Ready(store) = &self.data else {
+            return;
+        };
+        let Some(account) = store.accounts().iter().find(|item| item.id == account_id) else {
+            return;
+        };
+        let base_url = account.base_url.clone();
+        let secrets_blob = account.secrets.clone();
+        let secret_store = store.secret_store();
+        let timeout = self.request_timeout();
+        let account_for_thread = account_id.to_owned();
+        let key_for_thread = key_id.to_owned();
+
+        self.copying_key = Some(key_id.to_owned());
+        let (sender, receiver) = std::sync::mpsc::channel();
+        self.copy_rx = Some(receiver);
+        let repaint = ctx.clone();
+
+        std::thread::spawn(move || {
+            let result = match crate::secrets::open_credentials(
+                secret_store.as_ref(),
+                &account_for_thread,
+                &secrets_blob,
+            ) {
+                Ok(credentials) => match crate::api::HttpClient::new(&base_url, timeout) {
+                    Ok(client) => client
+                        .api_key_value(&credentials.access_token, &key_for_thread)
+                        .map_err(|err| err.user_message()),
+                    Err(err) => Err(err.user_message()),
+                },
+                Err(err) => Err(format!("凭据无法解密：{err:#}")),
+            };
+            let _ = sender.send((account_for_thread, key_for_thread, result));
+            repaint.request_repaint();
+        });
+    }
+
+    /// 取一次复制结果：成功则写剪贴板 + 记录浮窗。
+    fn poll_copy(&mut self, ctx: &egui::Context) {
+        let Some(receiver) = self.copy_rx.as_ref() else {
+            return;
+        };
+        let received = receiver.try_recv();
+        let (account_id, key_id, result) = match received {
+            Ok(message) => message,
+            Err(TryRecvError::Empty) => return,
+            Err(TryRecvError::Disconnected) => {
+                self.copy_rx = None;
+                self.copying_key = None;
+                self.toast = Some(("复制线程意外退出".to_owned(), Instant::now()));
+                return;
+            }
+        };
+
+        self.copy_rx = None;
+        self.copying_key = None;
+
+        match result {
+            Ok(value) => {
+                // 完整 Key 只进剪贴板，不写日志、不落盘
+                ctx.copy_text(value);
+                self.copy_notice = Some((account_id, key_id, Instant::now()));
+                // 浮窗显示期间要有重绘，否则到期不会消失
+                ctx.request_repaint_after(Duration::from_millis(1700));
+            }
+            Err(message) => {
+                self.toast = Some((format!("复制失败：{message}"), Instant::now()));
+            }
+        }
+        ctx.request_repaint();
+    }
+
     /// 打开设置页：把当前配置拷进草稿，改动在点"保存"前不生效。
     fn open_settings(&mut self) {
         let DataLayer::Ready(store) = &self.data else {
@@ -905,6 +1074,7 @@ impl TrayApp {
         let config = store.config();
         self.settings = Some(SettingsDraft {
             mask_accounts: config.mask_accounts,
+            autostart: crate::autostart::is_enabled(),
             refresh_interval_seconds: config.refresh_interval_seconds,
             request_timeout_seconds: config.request_timeout_seconds,
         });
@@ -928,6 +1098,14 @@ impl TrayApp {
             .map_err(|err| format!("保存 app.json 失败：{err:#}"))?;
         *store.config_mut() = config;
 
+        // 开机自启：与当前系统状态不同才写，避免每次保存都动注册表
+        if draft.autostart != crate::autostart::is_enabled() {
+            let executable =
+                std::env::current_exe().map_err(|err| format!("无法定位当前程序路径：{err}"))?;
+            crate::autostart::set_enabled(draft.autostart, &executable)
+                .map_err(|err| format!("设置开机自启失败：{err:#}"))?;
+        }
+
         // 打码开关会影响菜单标题与卡片，立即重建
         self.rebuild_menu();
         self.toast = Some(("设置已保存".to_owned(), Instant::now()));
@@ -936,12 +1114,19 @@ impl TrayApp {
 
     /// 绘制设置页（打码开关、刷新间隔、请求超时）。
     fn draw_settings(&mut self, ctx: &egui::Context) {
+        // 先拷贝出与更新检查相关的只读状态，避免与 settings 的可变借用冲突
+        let update_checking = self.update_checking;
+        let update_result = self.update_result.clone();
+        let update_url = self.update_url.clone();
+
         let Some(draft) = self.settings.as_mut() else {
             return;
         };
 
         let mut close = false;
         let mut save = false;
+        let mut check_update = false;
+        let mut copy_update_url: Option<String> = None;
 
         let modal = egui::Modal::new(egui::Id::unique("settings-dialog"))
             .backdrop_color(egui::Color32::from_black_alpha(150))
@@ -995,6 +1180,52 @@ impl TrayApp {
                     ui.label(egui::RichText::new("秒").size(fs(11.0)).color(TEXT_DIM));
                 });
 
+                ui.add_space(6.0);
+                ui.checkbox(
+                    &mut draft.autostart,
+                    egui::RichText::new("开机自动启动（登录时运行）").size(fs(12.0)),
+                );
+
+                ui.add_space(10.0);
+                ui.separator();
+                ui.add_space(6.0);
+                ui.horizontal(|ui| {
+                    if ui
+                        .add_sized(
+                            [92.0, 24.0],
+                            egui::Button::new(egui::RichText::new("检查更新").size(fs(11.0))),
+                        )
+                        .clicked()
+                    {
+                        check_update = true;
+                    }
+                    if update_checking {
+                        ui.spinner();
+                        ui.label(
+                            egui::RichText::new("检查中…")
+                                .size(fs(10.0))
+                                .color(TEXT_DIM),
+                        );
+                    }
+                });
+                if let Some(message) = update_result.as_deref() {
+                    ui.label(
+                        egui::RichText::new(message)
+                            .size(fs(10.0))
+                            .color(TEXT_SECONDARY),
+                    );
+                }
+                if let Some(url) = update_url.as_deref()
+                    && ui
+                        .add_sized(
+                            [120.0, 22.0],
+                            egui::Button::new(egui::RichText::new("复制下载链接").size(fs(10.0))),
+                        )
+                        .clicked()
+                {
+                    copy_update_url = Some(url.to_owned());
+                }
+
                 ui.add_space(8.0);
                 ui.label(
                     egui::RichText::new("保存后立即生效并写入 app.json。")
@@ -1028,6 +1259,14 @@ impl TrayApp {
 
         if modal.backdrop_response.clicked() {
             close = true;
+        }
+
+        if let Some(url) = copy_update_url {
+            ctx.copy_text(url);
+            self.toast = Some(("已复制下载链接".to_owned(), Instant::now()));
+        }
+        if check_update {
+            self.start_update_check(ctx);
         }
 
         if save {
@@ -1166,6 +1405,7 @@ impl TrayApp {
                                         egui::RichText::new(meta).size(fs(9.0)).color(TEXT_DIM),
                                     );
                                 });
+
                             hover.store(&hover_key, row_frame.response.rect);
                             ui.add_space(4.0);
                         }
@@ -1603,6 +1843,8 @@ impl TrayApp {
         let mut refresh_clicked = false;
         // 被点击要展开/收起的账号 id
         let mut toggle_account: Option<String> = None;
+        // 被点击要复制的 (账号 id, Key id)
+        let mut copy_request: Option<(String, String)> = None;
         // 设置页入口的点击结果
         let mut open_settings = false;
         // 悬浮动画状态：先取出来，绘制闭包里才能可变借用
@@ -1663,7 +1905,13 @@ impl TrayApp {
                             draw_account_summary(ui, &cards, &mut refresh_clicked);
                             ui.add_space(12.0);
                             for card in &cards {
-                                draw_account_card(ui, card, &mut toggle_account, &mut hover);
+                                draw_account_card(
+                                    ui,
+                                    card,
+                                    &mut toggle_account,
+                                    &mut hover,
+                                    &mut copy_request,
+                                );
                                 ui.add_space(10.0);
                             }
                         }
@@ -1679,6 +1927,10 @@ impl TrayApp {
         if refresh_clicked {
             // 手动刷新：绕过定时与启动延迟，但仍受"只跑一轮"约束
             self.try_start_refresh(ctx, true);
+        }
+
+        if let Some((account_id, key_id)) = copy_request {
+            self.request_copy(ctx, &account_id, &key_id);
         }
 
         if let Some(account_id) = toggle_account {
@@ -1830,6 +2082,8 @@ impl eframe::App for TrayApp {
         self.poll_refresh(ctx);
         self.poll_api_keys(ctx);
         self.poll_account_keys(ctx);
+        self.poll_copy(ctx);
+        self.poll_update(ctx);
         self.maybe_start_refresh(ctx);
         self.handle_focus(ctx);
         self.update_toast(ctx);
@@ -2141,6 +2395,7 @@ fn draw_account_card(
     card: &AccountCard,
     toggle: &mut Option<String>,
     hover: &mut HoverState,
+    copy_request: &mut Option<(String, String)>,
 ) {
     // 悬浮进度：上一帧矩形的命中 + 指数淡入，避免"闪一下"
     let hover_key = format!("acct:{}", card.id);
@@ -2155,9 +2410,10 @@ fn draw_account_card(
             let header = ui
                 .horizontal(|ui| {
                     ui.label(
-                        egui::RichText::new(if card.expanded { "▾" } else { "▸" })
-                            .size(fs(10.0))
-                            .color(TEXT_SECONDARY),
+                        egui::RichText::new(if card.expanded { "▼" } else { "▶" })
+                            .size(fs(12.0))
+                            .strong()
+                            .color(ACCENT),
                     );
                     ui.label(
                         egui::RichText::new("●")
@@ -2229,7 +2485,7 @@ fn draw_account_card(
             if card.expanded {
                 ui.add_space(6.0);
                 ui.separator();
-                draw_account_keys(ui, card, hover);
+                draw_account_keys(ui, card, hover, copy_request);
             }
         });
 
@@ -2240,7 +2496,12 @@ fn draw_account_card(
 ///
 /// 每个 Key 一行块：名称 + 打码值、已用/总额度、近 5 小时用量、订阅名。
 /// 后端只提供 5 小时/1 天/7 天窗口，没有 1 小时口径，这里如实标注"近 5 小时"。
-fn draw_account_keys(ui: &mut egui::Ui, card: &AccountCard, hover: &mut HoverState) {
+fn draw_account_keys(
+    ui: &mut egui::Ui,
+    card: &AccountCard,
+    hover: &mut HoverState,
+    copy_request: &mut Option<(String, String)>,
+) {
     let Some(state) = &card.keys else {
         ui.horizontal(|ui| {
             ui.spinner();
@@ -2343,6 +2604,60 @@ fn draw_account_keys(ui: &mut egui::Ui, card: &AccountCard, hover: &mut HoverSta
                         .color(lerp_color(TEXT_SECONDARY, egui::Color32::WHITE, kt * 0.3)),
                 );
             });
+
+        // 整块可点：点击复制完整 Key（结果由后台线程回传，成功后盖浮窗）
+        let row_response = row_frame
+            .response
+            .interact(egui::Sense::click())
+            .on_hover_text("点击复制完整 Key");
+        if row_response.clicked() {
+            *copy_request = Some((card.id.clone(), key.id.clone()));
+        }
+
+        // 刚复制成功：在方块上方盖一个"已复制"浮窗（约 1.6 秒后消失）
+        if card.copied_key.as_deref() == Some(key.id.as_str()) {
+            let rect = row_frame.response.rect;
+            let chip = egui::Rect::from_min_size(
+                egui::pos2(rect.right() - 66.0, rect.top() - 12.0),
+                egui::vec2(62.0, 20.0),
+            );
+            let painter = ui.painter();
+            painter.rect_filled(chip, egui::CornerRadius::same(10), ACCENT);
+            painter.text(
+                chip.center(),
+                egui::Align2::CENTER_CENTER,
+                "已复制",
+                egui::FontId::proportional(fs(10.0)),
+                egui::Color32::from_rgb(15, 23, 42),
+            );
+        }
+
+        // 整块可点：点击复制完整 Key（后台取完整值，成功后盖"已复制"浮窗）
+        let row_response = row_frame
+            .response
+            .interact(egui::Sense::click())
+            .on_hover_text("点击复制完整 Key");
+        if row_response.clicked() {
+            *copy_request = Some((card.id.clone(), key.id.clone()));
+        }
+
+        // 刚复制成功：在方块上方盖浮窗，约 1.6 秒后自动消失
+        if card.copied_key.as_deref() == Some(key.id.as_str()) {
+            let rect = row_frame.response.rect;
+            let chip = egui::Rect::from_min_size(
+                egui::pos2(rect.right() - 70.0, rect.top() - 12.0),
+                egui::vec2(64.0, 20.0),
+            );
+            let painter = ui.painter();
+            painter.rect_filled(chip, egui::CornerRadius::same(10), ACCENT);
+            painter.text(
+                chip.center(),
+                egui::Align2::CENTER_CENTER,
+                "已复制",
+                egui::FontId::proportional(fs(10.0)),
+                egui::Color32::from_rgb(15, 23, 42),
+            );
+        }
 
         hover.store(&hover_key, row_frame.response.rect);
     }
