@@ -20,7 +20,8 @@ base64 = "0.23.1"
 eframe = { version = "0.37.0", features = ["glow"] }
 egui = "0.37.0"
 env_logger = "0.11.11"
-image = { version = "0.25.10", default-features = false, features = ["png"] }
+# 只解码内嵌的那一张 PNG：直接用 png 而不引进整个 image（省下约 1MB）
+png = "0.17"
 log = "0.4.34"
 # app.json / accounts.json 的序列化与反序列化
 serde = { version = "1.0.229", features = ["derive"] }
@@ -40,10 +41,12 @@ tempfile = "3"
 
 [profile.release]
 # 托盘常驻程序体积越小越好：优先体积，开启 LTO 并去掉符号表
-opt-level = "s"
+opt-level = "z"
 lto = true
 codegen-units = 1
 strip = true
+# 去掉栈展开表：托盘程序不需要 panic 后继续运行，能省几百 KB
+panic = "abort"
 
 [target.'cfg(windows)'.dependencies]
 # DPAPI：把凭据加密成只有当前 Windows 用户能解开的密文

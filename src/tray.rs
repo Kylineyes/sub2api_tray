@@ -212,11 +212,44 @@ pub fn compose_badge(rgba: &mut [u8], width: u32, height: u32, rgb: [u8; 3]) {
 /// 返回值为 `(RGBA 字节, 宽, 高)`。RGBA 的排列顺序是 R、G、B、A 逐像素排列，
 /// 与 `tray_icon::Icon::from_rgba` 和 `egui::IconData` 的要求一致。
 pub fn load_icon_rgba() -> Result<(Vec<u8>, u32, u32)> {
-    let image = image::load_from_memory(TRAY_ICON_PNG)
-        .context("托盘图标不是可识别的图片格式")?
-        .to_rgba8();
-    let (width, height) = image.dimensions();
-    Ok((image.into_raw(), width, height))
+    // 只为一枚 128×128 的图标引入整个 `image` 不划算（约 1MB），
+    // 直接用 png 解码器：它本来就作为传递依赖存在。
+    let decoder = png::Decoder::new(std::io::Cursor::new(TRAY_ICON_PNG));
+    let mut reader = decoder.read_info().context("托盘图标不是可识别的 PNG")?;
+    let mut buffer = vec![0_u8; reader.output_buffer_size()];
+    let frame = reader.next_frame(&mut buffer).context("解码托盘图标失败")?;
+    let raw = &buffer[..frame.buffer_size()];
+
+    // 统一转成 RGBA8：`Icon::from_rgba` 与 `egui::IconData` 都要求 RGBA 排列
+    let rgba = match frame.color_type {
+        png::ColorType::Rgba => raw.to_vec(),
+        png::ColorType::Rgb => {
+            let mut out = Vec::with_capacity(raw.len() / 3 * 4);
+            for pixel in raw.as_chunks::<3>().0 {
+                out.extend_from_slice(&[pixel[0], pixel[1], pixel[2], 255]);
+            }
+            out
+        }
+        png::ColorType::Grayscale => {
+            let mut out = Vec::with_capacity(raw.len() * 4);
+            for gray in raw {
+                out.extend_from_slice(&[*gray, *gray, *gray, 255]);
+            }
+            out
+        }
+        png::ColorType::GrayscaleAlpha => {
+            let mut out = Vec::with_capacity(raw.len() * 2);
+            for pixel in raw.as_chunks::<2>().0 {
+                out.extend_from_slice(&[pixel[0], pixel[0], pixel[0], pixel[1]]);
+            }
+            out
+        }
+        png::ColorType::Indexed => {
+            anyhow::bail!("托盘图标不支持索引色 PNG，请换成 RGBA")
+        }
+    };
+
+    Ok((rgba, frame.width, frame.height))
 }
 
 /// 构建整份托盘菜单。
