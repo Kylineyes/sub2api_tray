@@ -1902,9 +1902,7 @@ impl TrayApp {
                 egui::Panel::top("panel_header")
                     .frame(egui::Frame::NONE.fill(PANEL_BG))
                     .show(ui, |ui| {
-                        if draw_header(ui, at_limit, &mut open_settings) {
-                            open_login = true;
-                        }
+                        draw_header(ui, &mut open_settings);
 
                         if let Some(reason) = storage_error.as_deref() {
                             ui.add_space(12.0);
@@ -1930,7 +1928,14 @@ impl TrayApp {
                 egui::ScrollArea::vertical()
                     .auto_shrink([false, false])
                     .show(ui, |ui| {
-                        ui.add_space(14.0);
+                        ui.add_space(12.0);
+
+                        // 登录入口放在滚动区顶部：账号多时它会随内容一起滚走，
+                        // 把首屏空间留给"看状态"这件事。
+                        if draw_login_button(ui, at_limit) {
+                            open_login = true;
+                        }
+                        ui.add_space(12.0);
 
                         if cards.is_empty() {
                             // 没有账号时保留原来的"尚未登录"引导
@@ -2280,50 +2285,72 @@ fn fallback_position(monitor: egui::Vec2, size: egui::Vec2) -> (f32, f32) {
 /// 返回 `true` 表示用户点击了「登陆新用户」按钮。
 /// 之所以把按钮放在标题区（面板最顶部），是需求方明确的位置要求：
 /// 登录是这块面板最主要的新增操作，必须第一眼可见。
-fn draw_header(ui: &mut egui::Ui, at_limit: bool, open_settings: &mut bool) -> bool {
+/// 画一个矢量齿轮（设置入口）。
+///
+/// 与 chevron 同理：egui 不能渲染 SVG，而齿轮用两三个圆 + 8 根短线就能画得很干净，
+/// 比字体符号 `⚙` 在不同系统下大小/粗细不一要稳。
+fn draw_gear(ui: &mut egui::Ui) -> egui::Response {
+    let size = fs(16.0);
+    let (rect, response) = ui.allocate_exact_size(egui::vec2(size, size), egui::Sense::click());
+    let hovered = response.hovered();
+    let color = if hovered { ACCENT } else { TEXT_SECONDARY };
+    let center = rect.center();
+    let painter = ui.painter();
+
+    // 齿：从外圈往外伸 8 段短线
+    let inner = size * 0.29;
+    let outer = size * 0.44;
+    for index in 0..8 {
+        let angle = index as f32 * std::f32::consts::TAU / 8.0;
+        let (sin, cos) = angle.sin_cos();
+        painter.line_segment(
+            [
+                egui::pos2(center.x + cos * inner, center.y + sin * inner),
+                egui::pos2(center.x + cos * outer, center.y + sin * outer),
+            ],
+            egui::Stroke::new(1.5, color),
+        );
+    }
+    // 齿轮外圈 + 中心孔
+    painter.circle_stroke(center, inner, egui::Stroke::new(1.5, color));
+    painter.circle_stroke(center, size * 0.11, egui::Stroke::new(1.3, color));
+
+    response.on_hover_cursor(egui::CursorIcon::PointingHand)
+}
+
+/// 顶部条：只保留标题、版本号与齿轮。
+fn draw_header(ui: &mut egui::Ui, open_settings: &mut bool) {
     ui.horizontal(|ui| {
         ui.label(
             egui::RichText::new("Sub2API 托盘")
-                .size(fs(16.0))
+                .size(fs(13.0))
                 .strong()
                 .color(TEXT_PRIMARY),
         );
 
-        // 版本号靠右显示，弱化处理，避免抢标题的视觉重心
+        // 版本号与齿轮靠右，弱化处理，避免抢标题的视觉重心
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            // 设置入口：齿轮放在版本号左边
-            if ui
-                .add(egui::Button::new(egui::RichText::new("⚙").size(fs(13.0))).frame(false))
-                .on_hover_text("设置（打码、刷新间隔、超时）")
-                .clicked()
-            {
+            if draw_gear(ui).clicked() {
                 *open_settings = true;
             }
             ui.label(
                 egui::RichText::new(format!("v{}", crate::APP_VERSION))
-                    .size(fs(11.0))
+                    .size(fs(10.0))
                     .color(TEXT_SECONDARY),
             );
         });
     });
 
-    ui.add_space(2.0);
-    ui.label(
-        egui::RichText::new("在托盘里查看已登录账户的状态")
-            .size(fs(11.0))
-            .color(TEXT_SECONDARY),
-    );
-
-    // 标题下的一条品牌色细线：用 sub2api logo 的薄荷绿做点缀，
-    // 让面板在深色任务栏旁边也能一眼认出是哪个产品。
-    ui.add_space(8.0);
+    // 标题下的品牌色细线：让面板在深色任务栏旁也能一眼认出是哪个产品
+    ui.add_space(6.0);
     let (line_rect, _) =
         ui.allocate_exact_size(egui::vec2(ui.available_width(), 2.0), egui::Sense::hover());
     ui.painter()
         .rect_filled(line_rect, egui::CornerRadius::same(1), ACCENT);
+}
 
-    // ---- 顶部登录入口 ----
-    ui.add_space(12.0);
+/// 登录入口按钮：放进了滚动区，会跟着内容一起滚走。
+fn draw_login_button(ui: &mut egui::Ui, at_limit: bool) -> bool {
     let button = egui::Button::new(
         egui::RichText::new("＋ 登陆新用户")
             .size(fs(13.0))
