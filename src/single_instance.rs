@@ -31,18 +31,26 @@ pub struct InstanceGuard {
 /// 成功返回守卫（调用方要把它保存在 `main` 的栈上）；已有实例在运行时返回 `Err`，
 /// 错误信息可直接展示给用户。
 pub fn acquire() -> anyhow::Result<InstanceGuard> {
-    match TcpListener::bind(("127.0.0.1", LOCK_PORT)) {
+    bind_lock(LOCK_PORT)
+}
+
+/// 在指定端口上申请锁。
+///
+/// 抽出来是为了让测试用**临时端口**：如果测试固定用 [`LOCK_PORT`]，
+/// 只要本机正在运行托盘程序（或端口被别的程序占用），测试就会误报失败。
+fn bind_lock(port: u16) -> anyhow::Result<InstanceGuard> {
+    match TcpListener::bind(("127.0.0.1", port)) {
         Ok(listener) => {
-            log::debug!("单实例锁已获取：127.0.0.1:{LOCK_PORT}");
+            log::debug!("单实例锁已获取：127.0.0.1:{port}");
             Ok(InstanceGuard {
                 _listener: listener,
             })
         }
         Err(err) if err.kind() == std::io::ErrorKind::AddrInUse => Err(anyhow::anyhow!(
-            "已有一个 Sub2API 托盘实例在运行（本机端口 {LOCK_PORT} 已被占用）"
+            "已有一个 Sub2API 托盘实例在运行（本机端口 {port} 已被占用）"
         )),
         Err(err) => Err(anyhow::anyhow!(
-            "无法建立单实例锁（127.0.0.1:{LOCK_PORT}）：{err}"
+            "无法建立单实例锁（127.0.0.1:{port}）：{err}"
         )),
     }
 }
@@ -53,11 +61,15 @@ mod tests {
 
     #[test]
     fn 第二个实例申请会失败() {
-        let first = acquire().expect("第一个实例应当成功");
-        let second = acquire();
-        assert!(second.is_err(), "第二个实例应当被拒绝");
+        // 先借一个空闲端口，避免和正在运行的托盘程序抢同一个端口
+        let probe = TcpListener::bind(("127.0.0.1", 0)).expect("取临时端口");
+        let port = probe.local_addr().expect("取得端口号").port();
+        drop(probe);
+
+        let first = bind_lock(port).expect("第一个实例应当成功");
+        assert!(bind_lock(port).is_err(), "第二个实例应当被拒绝");
         drop(first);
         // 释放后应当可以再次获取
-        assert!(acquire().is_ok(), "释放后应当能重新获取");
+        assert!(bind_lock(port).is_ok(), "释放后应当能重新获取");
     }
 }
