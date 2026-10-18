@@ -52,6 +52,9 @@ const TOGGLE_DEBOUNCE: Duration = Duration::from_millis(250);
 pub const PANEL_BG: egui::Color32 = egui::Color32::from_rgb(15, 23, 42);
 
 /// 面板边框色，用来在浅色桌面上勾勒出气泡的轮廓。
+/// 悬浮高亮底色：半透明白，深浅背景下都能看出选区但不遮住文字。
+const HOVER_BG: egui::Color32 = egui::Color32::from_rgba_premultiplied(255, 255, 255, 20);
+
 pub const PANEL_BORDER: egui::Color32 = egui::Color32::from_rgb(51, 65, 85);
 
 /// 卡片（状态区）背景色。
@@ -82,6 +85,14 @@ const FIRST_REFRESH_DELAY: Duration = Duration::from_secs(5);
 
 /// 面板打开时，数据超过这个时长就补刷一次。
 const STALE_AFTER: Duration = Duration::from_secs(60);
+
+/// 全局字号增量：需求方反馈整体字体偏小，所有 .size(x) 统一加 1 码。
+const FONT_BOOST: f32 = 1.0;
+
+/// 把设计稿字号放大 [FONT_BOOST] 后返回，便于统一调大/回调。
+pub(crate) fn fs(base: f32) -> f32 {
+    base + FONT_BOOST
+}
 
 /// 同时允许登录的账号上限（需求方要求：同时最多 10 个）。
 const MAX_ACCOUNTS: usize = 10;
@@ -798,7 +809,7 @@ impl TrayApp {
                 ui.horizontal(|ui| {
                     ui.label(
                         egui::RichText::new(format!("API Key · {}", dialog.title))
-                            .size(13.0)
+                            .size(fs(13.0))
                             .strong()
                             .color(TEXT_PRIMARY),
                     );
@@ -815,7 +826,7 @@ impl TrayApp {
                         ui.spinner();
                         ui.label(
                             egui::RichText::new("正在拉取…")
-                                .size(11.0)
+                                .size(fs(11.0))
                                 .color(TEXT_SECONDARY),
                         );
                     });
@@ -824,7 +835,7 @@ impl TrayApp {
                 if let Some(error) = dialog.error.as_deref() {
                     ui.label(
                         egui::RichText::new(error)
-                            .size(11.0)
+                            .size(fs(11.0))
                             .color(egui::Color32::from_rgb(248, 113, 113)),
                     );
                 }
@@ -832,7 +843,7 @@ impl TrayApp {
                 if !dialog.loading && dialog.keys.is_empty() && dialog.error.is_none() {
                     ui.label(
                         egui::RichText::new("该账号还没有 API Key")
-                            .size(11.0)
+                            .size(fs(11.0))
                             .color(TEXT_SECONDARY),
                     );
                 }
@@ -844,7 +855,7 @@ impl TrayApp {
                             ui.horizontal(|ui| {
                                 ui.label(
                                     egui::RichText::new(&key.name)
-                                        .size(12.0)
+                                        .size(fs(12.0))
                                         .color(TEXT_PRIMARY),
                                 );
                                 ui.with_layout(
@@ -854,7 +865,7 @@ impl TrayApp {
                                             .add_sized(
                                                 [52.0, 20.0],
                                                 egui::Button::new(
-                                                    egui::RichText::new("复制").size(10.0),
+                                                    egui::RichText::new("复制").size(fs(10.0)),
                                                 ),
                                             )
                                             .clicked()
@@ -866,7 +877,7 @@ impl TrayApp {
                             });
                             ui.label(
                                 egui::RichText::new(&key.masked)
-                                    .size(10.0)
+                                    .size(fs(10.0))
                                     .color(TEXT_SECONDARY),
                             );
                             let mut meta = key.status.clone();
@@ -876,7 +887,7 @@ impl TrayApp {
                             if let Some(last_used) = &key.last_used_at {
                                 meta.push_str(&format!(" · 最近使用 {last_used}"));
                             }
-                            ui.label(egui::RichText::new(meta).size(9.0).color(TEXT_DIM));
+                            ui.label(egui::RichText::new(meta).size(fs(9.0)).color(TEXT_DIM));
                             ui.add_space(6.0);
                         }
                     });
@@ -1444,7 +1455,7 @@ impl TrayApp {
                 ui.set_width(280.0);
                 ui.label(
                     egui::RichText::new("退出账号并删除记录")
-                        .size(14.0)
+                        .size(fs(14.0))
                         .strong()
                         .color(TEXT_PRIMARY),
                 );
@@ -1453,7 +1464,7 @@ impl TrayApp {
                     egui::RichText::new(format!(
                         "确定退出 {display} 并删除记录？删除后需要重新登录才能恢复。"
                     ))
-                    .size(11.0)
+                    .size(fs(11.0))
                     .color(TEXT_SECONDARY),
                 );
                 ui.add_space(14.0);
@@ -1640,7 +1651,7 @@ fn draw_header(ui: &mut egui::Ui) -> bool {
     ui.horizontal(|ui| {
         ui.label(
             egui::RichText::new("Sub2API 托盘")
-                .size(16.0)
+                .size(fs(16.0))
                 .strong()
                 .color(TEXT_PRIMARY),
         );
@@ -1649,7 +1660,7 @@ fn draw_header(ui: &mut egui::Ui) -> bool {
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             ui.label(
                 egui::RichText::new(format!("v{}", crate::APP_VERSION))
-                    .size(11.0)
+                    .size(fs(11.0))
                     .color(TEXT_SECONDARY),
             );
         });
@@ -1658,7 +1669,7 @@ fn draw_header(ui: &mut egui::Ui) -> bool {
     ui.add_space(2.0);
     ui.label(
         egui::RichText::new("在托盘里查看已登录账户的状态")
-            .size(11.0)
+            .size(fs(11.0))
             .color(TEXT_SECONDARY),
     );
 
@@ -1674,7 +1685,7 @@ fn draw_header(ui: &mut egui::Ui) -> bool {
     ui.add_space(12.0);
     let button = egui::Button::new(
         egui::RichText::new("＋ 登陆新用户")
-            .size(13.0)
+            .size(fs(13.0))
             .strong()
             // 亮色底上要用深色字，否则对比度不足
             .color(egui::Color32::from_rgb(15, 23, 42)),
@@ -1775,7 +1786,7 @@ fn draw_account_summary(ui: &mut egui::Ui, cards: &[AccountCard], refresh_clicke
             ui.horizontal(|ui| {
                 ui.label(
                     egui::RichText::new(format!("已登录 {} 个账号", cards.len()))
-                        .size(13.0)
+                        .size(fs(13.0))
                         .strong()
                         .color(TEXT_PRIMARY),
                 );
@@ -1783,7 +1794,7 @@ fn draw_account_summary(ui: &mut egui::Ui, cards: &[AccountCard], refresh_clicke
                     if ui
                         .add_sized(
                             [76.0, 22.0],
-                            egui::Button::new(egui::RichText::new("立即刷新").size(10.0)),
+                            egui::Button::new(egui::RichText::new("立即刷新").size(fs(10.0))),
                         )
                         .on_hover_text("立刻拉取一次状态，不必等定时刷新")
                         .clicked()
@@ -1797,7 +1808,7 @@ fn draw_account_summary(ui: &mut egui::Ui, cards: &[AccountCard], refresh_clicke
                 egui::RichText::new(format!(
                     "在线 {online} · 离线 {offline} · 凭据损坏 {invalid}"
                 ))
-                .size(11.0)
+                .size(fs(11.0))
                 .color(TEXT_SECONDARY),
             );
         });
@@ -1820,24 +1831,24 @@ fn draw_account_card(ui: &mut egui::Ui, card: &AccountCard, toggle: &mut Option<
                 .horizontal(|ui| {
                     ui.label(
                         egui::RichText::new(if card.expanded { "▾" } else { "▸" })
-                            .size(10.0)
+                            .size(fs(10.0))
                             .color(TEXT_SECONDARY),
                     );
                     ui.label(
                         egui::RichText::new("●")
-                            .size(10.0)
+                            .size(fs(10.0))
                             .color(status_color(card.status)),
                     );
                     ui.label(
                         egui::RichText::new(&card.display)
-                            .size(13.0)
+                            .size(fs(13.0))
                             .strong()
                             .color(TEXT_PRIMARY),
                     );
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         ui.label(
                             egui::RichText::new(card.role_label)
-                                .size(10.0)
+                                .size(fs(10.0))
                                 .color(TEXT_SECONDARY),
                         );
                     });
@@ -1850,13 +1861,21 @@ fn draw_account_card(ui: &mut egui::Ui, card: &AccountCard, toggle: &mut Option<
                     "点击展开 API Key"
                 });
 
+            if header.hovered() {
+                ui.painter().rect_filled(
+                    header.rect.expand2(egui::vec2(6.0, 3.0)),
+                    egui::CornerRadius::same(6),
+                    HOVER_BG,
+                );
+            }
+
             if header.clicked() {
                 *toggle = Some(card.id.clone());
             }
 
             ui.label(
                 egui::RichText::new(&card.base_url)
-                    .size(10.0)
+                    .size(fs(10.0))
                     .color(TEXT_DIM),
             );
 
@@ -1866,17 +1885,17 @@ fn draw_account_card(ui: &mut egui::Ui, card: &AccountCard, toggle: &mut Option<
             }
             ui.label(
                 egui::RichText::new(status_line)
-                    .size(11.0)
+                    .size(fs(11.0))
                     .color(TEXT_SECONDARY),
             );
 
             if let Some(summary) = &card.summary {
-                ui.label(egui::RichText::new(summary).size(10.0).color(TEXT_DIM));
+                ui.label(egui::RichText::new(summary).size(fs(10.0)).color(TEXT_DIM));
             }
 
             ui.label(
                 egui::RichText::new(&card.refreshed)
-                    .size(9.0)
+                    .size(fs(9.0))
                     .color(TEXT_DIM),
             );
 
@@ -1885,7 +1904,7 @@ fn draw_account_card(ui: &mut egui::Ui, card: &AccountCard, toggle: &mut Option<
                 let first_line = error.lines().next().unwrap_or_default();
                 ui.label(
                     egui::RichText::new(first_line)
-                        .size(9.0)
+                        .size(fs(9.0))
                         .color(egui::Color32::from_rgb(248, 113, 113)),
                 );
             }
@@ -1908,7 +1927,7 @@ fn draw_account_keys(ui: &mut egui::Ui, card: &AccountCard) {
             ui.spinner();
             ui.label(
                 egui::RichText::new("正在拉取 Key…")
-                    .size(10.0)
+                    .size(fs(10.0))
                     .color(TEXT_SECONDARY),
             );
         });
@@ -1920,7 +1939,7 @@ fn draw_account_keys(ui: &mut egui::Ui, card: &AccountCard) {
             ui.spinner();
             ui.label(
                 egui::RichText::new("正在拉取 Key…")
-                    .size(10.0)
+                    .size(fs(10.0))
                     .color(TEXT_SECONDARY),
             );
         });
@@ -1930,7 +1949,7 @@ fn draw_account_keys(ui: &mut egui::Ui, card: &AccountCard) {
     if let Some(error) = &state.error {
         ui.label(
             egui::RichText::new(error)
-                .size(10.0)
+                .size(fs(10.0))
                 .color(egui::Color32::from_rgb(248, 113, 113)),
         );
         return;
@@ -1939,20 +1958,41 @@ fn draw_account_keys(ui: &mut egui::Ui, card: &AccountCard) {
     if state.keys.is_empty() {
         ui.label(
             egui::RichText::new("该账号没有 API Key")
-                .size(10.0)
+                .size(fs(10.0))
                 .color(TEXT_DIM),
         );
         return;
     }
 
     for key in &state.keys {
-        ui.add_space(4.0);
-        ui.label(
-            egui::RichText::new(format!("{}  {}", key.name, key.masked))
-                .size(11.0)
-                .color(TEXT_PRIMARY),
-        );
+        ui.add_space(3.0);
 
+        // 第一行：名称 + 打码值（左），订阅名（右）——把订阅放到右侧可以省掉一整行
+        let row = ui
+            .horizontal(|ui| {
+                ui.label(
+                    egui::RichText::new(format!("{}  {}", key.name, key.masked))
+                        .size(fs(11.0))
+                        .color(TEXT_PRIMARY),
+                );
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if let Some(group) = key.group.as_ref().or(card.subscription.as_ref()) {
+                        ui.label(egui::RichText::new(group).size(fs(9.0)).color(TEXT_DIM));
+                    }
+                });
+            })
+            .response;
+
+        // 悬浮高亮：让用户一眼看出这一行是可选中区域
+        if row.hovered() {
+            ui.painter().rect_filled(
+                row.rect.expand2(egui::vec2(4.0, 2.0)),
+                egui::CornerRadius::same(4),
+                HOVER_BG,
+            );
+        }
+
+        // 第二行：额度与用量
         let used = key.quota_used.unwrap_or(0.0);
         let quota_text = match key.quota {
             Some(quota) if quota > 0.0 => format!("已用 ${used:.2} / 总额度 ${quota:.2}"),
@@ -1961,17 +2001,9 @@ fn draw_account_keys(ui: &mut egui::Ui, card: &AccountCard) {
         let usage_5h = key.usage_5h.unwrap_or(0.0);
         ui.label(
             egui::RichText::new(format!("{quota_text} · 近 5 小时 ${usage_5h:.2}"))
-                .size(10.0)
+                .size(fs(10.0))
                 .color(TEXT_SECONDARY),
         );
-
-        if let Some(group) = key.group.as_ref().or(card.subscription.as_ref()) {
-            ui.label(
-                egui::RichText::new(format!("订阅：{group}"))
-                    .size(9.0)
-                    .color(TEXT_DIM),
-            );
-        }
     }
 }
 
@@ -1988,10 +2020,14 @@ fn draw_status_card(ui: &mut egui::Ui) {
             ui.set_width(ui.available_width());
 
             ui.horizontal(|ui| {
-                ui.label(egui::RichText::new("●").size(12.0).color(TEXT_SECONDARY));
+                ui.label(
+                    egui::RichText::new("●")
+                        .size(fs(12.0))
+                        .color(TEXT_SECONDARY),
+                );
                 ui.label(
                     egui::RichText::new("尚未登录任何实例")
-                        .size(14.0)
+                        .size(fs(14.0))
                         .strong()
                         .color(TEXT_PRIMARY),
                 );
@@ -2000,7 +2036,7 @@ fn draw_status_card(ui: &mut egui::Ui) {
             ui.add_space(6.0);
             ui.label(
                 egui::RichText::new("配置 Sub2API 实例地址并登录后，托盘会定时拉取账户状态。")
-                    .size(12.0)
+                    .size(fs(12.0))
                     .color(TEXT_SECONDARY),
             );
         });
@@ -2021,13 +2057,13 @@ fn draw_empty_state(ui: &mut egui::Ui) {
                 ui.add_space(6.0);
                 ui.label(
                     egui::RichText::new("账户状态列表")
-                        .size(12.0)
+                        .size(fs(12.0))
                         .color(TEXT_SECONDARY),
                 );
                 ui.add_space(4.0);
                 ui.label(
                     egui::RichText::new("登录后按账户展示在线状态、剩余额度与最近使用时间。")
-                        .size(11.0)
+                        .size(fs(11.0))
                         .color(TEXT_DIM),
                 );
                 ui.add_space(6.0);
@@ -2044,7 +2080,7 @@ fn draw_footer(ui: &mut egui::Ui, ctx: &egui::Context, toast: Option<&str>) {
         ui.horizontal(|ui| {
             ui.label(
                 egui::RichText::new(format!("✓ {text}"))
-                    .size(11.0)
+                    .size(fs(11.0))
                     .color(ACCENT),
             );
         });
@@ -2052,7 +2088,7 @@ fn draw_footer(ui: &mut egui::Ui, ctx: &egui::Context, toast: Option<&str>) {
     ui.horizontal(|ui| {
         ui.label(
             egui::RichText::new("左键托盘图标显示 / 隐藏面板 · Esc 收起")
-                .size(11.0)
+                .size(fs(11.0))
                 .color(TEXT_SECONDARY),
         );
 
@@ -2118,7 +2154,7 @@ fn draw_storage_banner(ui: &mut egui::Ui, reason: &str) {
             ui.set_width(ui.available_width());
             ui.label(
                 egui::RichText::new("数据目录不可写，账号无法保存")
-                    .size(12.0)
+                    .size(fs(12.0))
                     .strong()
                     .color(egui::Color32::from_rgb(252, 165, 165)),
             );
@@ -2126,13 +2162,13 @@ fn draw_storage_banner(ui: &mut egui::Ui, reason: &str) {
             // 只显示首行：完整错误链可能很长，界面放不下，完整内容在日志里
             ui.label(
                 egui::RichText::new(reason.lines().next().unwrap_or_default())
-                    .size(10.0)
+                    .size(fs(10.0))
                     .color(egui::Color32::from_rgb(254, 202, 202)),
             );
             ui.add_space(4.0);
             ui.label(
                 egui::RichText::new("请把程序移动到可写目录（例如桌面或 D 盘）后重启。")
-                    .size(10.0)
+                    .size(fs(10.0))
                     .color(egui::Color32::from_rgb(254, 202, 202)),
             );
         });
