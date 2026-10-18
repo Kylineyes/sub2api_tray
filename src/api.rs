@@ -47,6 +47,105 @@ pub const REFRESH_PATH: &str = "/api/v1/auth/refresh";
 /// 订阅摘要路径。
 pub const SUBSCRIPTION_SUMMARY_PATH: &str = "/api/v1/subscriptions/summary";
 
+/// 当前用户的 API Key 列表路径（详情为 `{API_KEYS_PATH}/{id}`）。
+pub const API_KEYS_PATH: &str = "/api/v1/keys";
+
+/// 打码后的 API Key 摘要（只用于展示，绝不落完整值）。
+#[derive(Debug, Clone, PartialEq)]
+pub struct ApiKeyInfo {
+    /// Key id（复制完整值时要用）。
+    pub id: String,
+    /// 名称。
+    pub name: String,
+    /// 打码后的值，例如 `sk-a…9f2c`。
+    pub masked: String,
+    /// 状态（active / disabled 等，原样保留）。
+    pub status: String,
+    /// 所属分组名。
+    pub group: Option<String>,
+    /// 最近使用时间（服务端原样字符串）。
+    pub last_used_at: Option<String>,
+    /// 总额度（美元）；服务端未设置时为 `None`。
+    pub quota: Option<f64>,
+    /// 已用额度（美元）。
+    pub quota_used: Option<f64>,
+    /// 近 5 小时用量（美元）。
+    ///
+    /// 后端目前只提供 5 小时 / 1 天 / 7 天三个窗口，**没有 1 小时口径**，
+    /// 因此界面上展示"近 5 小时"并如实标注。
+    pub usage_5h: Option<f64>,
+    /// 近 1 天用量（美元）。
+    pub usage_1d: Option<f64>,
+}
+
+impl ApiKeyInfo {
+    /// 转成写进 `accounts.json` 的缓存 JSON（**不含完整 Key**）。
+    pub fn to_cache_value(&self) -> serde_json::Value {
+        serde_json::json!({
+            "id": self.id,
+            "name": self.name,
+            "maskedKey": self.masked,
+            "status": self.status,
+            "groupName": self.group,
+            "lastUsedAt": self.last_used_at,
+            "quota": self.quota,
+            "quotaUsed": self.quota_used,
+            "usage5h": self.usage_5h,
+            "usage1d": self.usage_1d,
+            "fetchedAt": crate::accounts::now_rfc3339(),
+        })
+    }
+}
+
+/// 把 Key 打码成"前 4 + … + 后 4"。
+///
+/// 太短的 Key（≤8）只露首尾各 2 个字符，避免打码后反而泄漏大部分内容。
+pub fn mask_api_key(key: &str) -> String {
+    let chars: Vec<char> = key.chars().collect();
+    let length = chars.len();
+    if length == 0 {
+        return "***".to_owned();
+    }
+    if length <= 8 {
+        let head: String = chars.iter().take(2).collect();
+        let tail: String = chars.iter().skip(length.saturating_sub(2)).collect();
+        return format!("{head}…{tail}");
+    }
+    let head: String = chars[..4].iter().collect();
+    let tail: String = chars[length - 4..].iter().collect();
+    format!("{head}…{tail}")
+}
+
+/// 从列表项里挑出第一个数值字段。
+fn first_f64(item: &serde_json::Value, keys: &[&str]) -> Option<f64> {
+    for key in keys {
+        if let Some(number) = item.get(*key).and_then(|value| value.as_f64()) {
+            return Some(number);
+        }
+    }
+    None
+}
+
+/// 从列表项里挑出第一个非空字符串字段（也接受数字 id）。
+fn first_string(item: &serde_json::Value, keys: &[&str]) -> Option<String> {
+    for key in keys {
+        let Some(value) = item.get(*key) else {
+            continue;
+        };
+
+        if let Some(text) = value.as_str()
+            && !text.is_empty()
+        {
+            return Some(text.to_owned());
+        }
+        // id 可能是数字
+        if let Some(number) = value.as_i64() {
+            return Some(number.to_string());
+        }
+    }
+    None
+}
+
 /// 请求种类。错误分类需要它来区分"密码错"和"验证码错"。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RequestKind {
@@ -369,6 +468,50 @@ fn expires_at_from_now(seconds: i64) -> Option<String> {
     expires.format(&Rfc3339).ok()
 }
 
+/// 纯函数：解析 `GET /api/v1/keys` 的列表。
+///
+/// 兼容几种字段写法（`masked_key` / `maskedKey` / `key`），因为不同版本后端
+/// 返回的字段名不完全一致；拿不到打码值时用 [`mask_api_key`] 现算。
+pub fn parse_api_keys(status: u16, body: &str) -> Result<Vec<ApiKeyInfo>, ApiError> {
+    let data = read_data(status, body, RequestKind::Me)?;
+    let items = data
+        .get("items")
+        .and_then(|value| value.as_array())
+        .cloned()
+        .unwrap_or_default();
+
+    Ok(items
+        .iter()
+        .map(|item| {
+            let raw_key =
+                first_string(item, &["masked_key", "maskedKey", "key"]).unwrap_or_default();
+            let masked = if raw_key.contains('…') || raw_key.contains('*') {
+                raw_key
+            } else {
+                mask_api_key(&raw_key)
+            };
+
+            ApiKeyInfo {
+                id: first_string(item, &["id"]).unwrap_or_default(),
+                name: first_string(item, &["name"]).unwrap_or_else(|| "未命名".to_owned()),
+                masked,
+                status: first_string(item, &["status"]).unwrap_or_else(|| "unknown".to_owned()),
+                group: first_string(item, &["group_name", "groupName"]).or_else(|| {
+                    item.get("group")
+                        .and_then(|group| group.get("name"))
+                        .and_then(|value| value.as_str())
+                        .map(ToOwned::to_owned)
+                }),
+                last_used_at: first_string(item, &["last_used_at", "lastUsedAt"]),
+                quota: first_f64(item, &["quota"]),
+                quota_used: first_f64(item, &["quota_used", "quotaUsed"]),
+                usage_5h: first_f64(item, &["usage_5h", "usage5h"]),
+                usage_1d: first_f64(item, &["usage_1d", "usage1d"]),
+            }
+        })
+        .collect())
+}
+
 /// 阻塞式 HTTP 客户端。
 ///
 /// 每个实例绑定一个实例地址与超时；超时来自 `app.json` 的 `requestTimeoutSeconds`。
@@ -493,6 +636,51 @@ impl HttpClient {
             .read_to_string()
             .map_err(map_transport_error)?;
         parse_subscription_summary(status, &text)
+    }
+
+    /// 列出当前账号的 API Key（打码摘要）。
+    pub fn list_api_keys(&self, access_token: &str) -> Result<Vec<ApiKeyInfo>, ApiError> {
+        let url = format!("{}{API_KEYS_PATH}", self.base_url);
+        let (status, text) = self.get_json(&url, access_token)?;
+        parse_api_keys(status, &text)
+    }
+
+    /// 取某个 Key 的完整值（只用于复制到剪贴板，绝不落盘）。
+    ///
+    /// 服务端若只返回打码值，这里按"不支持查看完整值"处理，不猜测。
+    pub fn api_key_value(&self, access_token: &str, id: &str) -> Result<String, ApiError> {
+        let url = format!("{}{API_KEYS_PATH}/{id}", self.base_url);
+        let (status, text) = self.get_json(&url, access_token)?;
+        let data = read_data(status, &text, RequestKind::Me)?;
+        let key = data
+            .get("key")
+            .and_then(|value| value.as_str())
+            .unwrap_or_default();
+
+        // 打码值（含 … 或 *）说明服务端不给完整值
+        if key.is_empty() || key.contains('…') || key.contains('*') {
+            return Err(ApiError::Server(
+                "该 Key 不支持查看完整值，请到 Web 后台复制".to_owned(),
+            ));
+        }
+        Ok(key.to_owned())
+    }
+
+    /// 发一个带 Bearer 的 GET，返回 `(状态码, 响应体文本)`。
+    fn get_json(&self, url: &str, access_token: &str) -> Result<(u16, String), ApiError> {
+        let mut response = self
+            .agent
+            .get(url)
+            .header("accept", "application/json")
+            .header("authorization", &format!("Bearer {access_token}"))
+            .call()
+            .map_err(map_transport_error)?;
+        let status = response.status().as_u16();
+        let text = response
+            .body_mut()
+            .read_to_string()
+            .map_err(map_transport_error)?;
+        Ok((status, text))
     }
 }
 
@@ -769,6 +957,52 @@ mod tests {
         let body = r#"{"code":401,"message":"unauthorized"}"#;
         let err = parse_subscription_summary(401, body).unwrap_err();
         assert_eq!(err, ApiError::Unauthorized);
+    }
+
+    #[test]
+    fn 打码规则() {
+        assert_eq!(mask_api_key("sk-abcdefghijklmnop"), "sk-a…mnop");
+        assert_eq!(mask_api_key("short"), "sh…rt");
+        assert_eq!(mask_api_key(""), "***");
+        // 已是打码值时不再二次打码（由 parse 负责判断）
+        assert!(mask_api_key("sk-1234567890abcdef").contains('…'));
+    }
+
+    #[test]
+    fn 解析key列表并兼容字段差异() {
+        let body = r#"{"code":0,"message":"success","data":{"items":[
+            {"id":12,"name":"默认 Key","key":"sk-1234567890abcdef","status":"active","group_name":"默认分组","last_used_at":"2026-10-18T09:00:00Z"},
+            {"id":"13","name":"备用","masked_key":"sk-a…9f2c","status":"disabled"}
+        ],"total":2}}"#;
+        let keys = parse_api_keys(200, body).expect("解析成功");
+        assert_eq!(keys.len(), 2);
+        assert_eq!(keys[0].id, "12", "数字 id 应转成字符串");
+        assert_eq!(keys[0].masked, "sk-1…cdef");
+        assert_eq!(keys[0].group.as_deref(), Some("默认分组"));
+        assert_eq!(keys[1].masked, "sk-a…9f2c", "已打码的值原样保留");
+        assert_eq!(keys[1].status, "disabled");
+    }
+
+    #[test]
+    fn key摘要缓存不含完整值() {
+        let info = ApiKeyInfo {
+            id: "1".to_owned(),
+            name: "默认".to_owned(),
+            masked: "sk-a…9f2c".to_owned(),
+            status: "active".to_owned(),
+            group: Some("默认分组".to_owned()),
+            last_used_at: None,
+            quota: Some(10.0),
+            quota_used: Some(2.5),
+            usage_5h: Some(0.4),
+            usage_1d: Some(1.2),
+        };
+        let value = info.to_cache_value();
+        assert_eq!(value["maskedKey"], "sk-a…9f2c");
+        assert!(value.get("key").is_none(), "缓存里不能有完整 Key 字段");
+        assert!(value["fetchedAt"].as_str().is_some());
+        assert_eq!(value["quotaUsed"], 2.5);
+        assert_eq!(value["usage5h"], 0.4);
     }
 
     #[test]
