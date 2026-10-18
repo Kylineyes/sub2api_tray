@@ -1,0 +1,130 @@
+# 发布流水线：main 上打 v* tag 时，编译 Windows x64 版本并挂到 Release。
+#
+# 只编 Windows：
+#   * macOS 暂时不编（钥匙串与菜单栏定位都还没实机验收，见 AGENTS.md 第十节）；
+#   * Linux 不在支持范围内。
+#
+# 只支持 Windows 10 及以上（x64）：老系统没有实测环境，不承诺也不做兼容。
+#
+# 质量门禁先跑再编译：格式、clippy（零警告）、单元测试全绿才发布，
+# 宁可不出包，也不要发一个"能编译但已知有问题"的版本。
+
+name: 发布 Windows 版本
+
+on:
+  push:
+    # 只响应 tag 推送；分支推送不触发，避免每次提交都打包
+    tags:
+      - "v*"
+
+# 创建 Release 需要写权限，其余保持最小
+permissions:
+  contents: write
+
+# 同一 tag 重复推送时取消上一轮，避免两个构建同时抢同一个 Release
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  release-windows:
+    name: 编译 Windows x64 并发布
+    runs-on: windows-latest
+
+    steps:
+      - name: 取出源码（含完整历史，用于校验 tag）
+        uses: actions/checkout@v4
+        with:
+          # 下面的 merge-base 判断需要完整历史，不能只拉一个 commit
+          fetch-depth: 0
+
+      - name: 校验 tag 是否打在 main 上
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch --no-tags origin main
+          if ! git merge-base --is-ancestor "$GITHUB_SHA" origin/main; then
+            echo "::error::tag $GITHUB_REF_NAME 不在 main 的历史中，拒绝发布"
+            exit 1
+          fi
+          echo "tag $GITHUB_REF_NAME 位于 main 历史，允许发布"
+
+      - name: 安装 Rust 工具链
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          # 显式写出 MSVC 目标：runner 默认就是它，写清楚避免将来默认值变化踩坑
+          targets: x86_64-pc-windows-msvc
+          components: rustfmt, clippy
+
+      - name: 缓存 cargo 构建产物
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: windows-x64
+
+      - name: 质量门禁（格式 / clippy / 单元测试）
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo fmt --check
+          cargo clippy --all-targets -- -D warnings
+          # 默认套件是纯逻辑用例；需要网络的端到端用例已标 #[ignore]
+          cargo test
+
+      - name: 编译 release 版本
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo build --release --locked --target x86_64-pc-windows-msvc
+
+      - name: 整理产物与发布说明
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $version = $env:GITHUB_REF_NAME -replace '^v', ''
+          $exe = "target/x86_64-pc-windows-msvc/release/sub2api_tray.exe"
+          if (-not (Test-Path $exe)) { throw "找不到编译产物：$exe" }
+
+          New-Item -ItemType Directory -Force -Path dist, dist/portable | Out-Null
+          $target = "dist/sub2api_tray-v$version-windows-x64.exe"
+          Copy-Item $exe $target
+          # 便携包：解压后直接双击 sub2api_tray.exe
+          Copy-Item $target "dist/portable/sub2api_tray.exe"
+          Compress-Archive -Path "dist/portable/*" `
+            -DestinationPath "dist/sub2api_tray-v$version-windows-x64.zip" -Force
+
+          # 发布说明：故意不带前导空格，否则 Markdown 会当成代码块
+          $notes = @(
+            "## Sub2API 托盘 v$version"
+            ""
+            "Windows x64 便携版：下载解压后双击 sub2api_tray.exe 运行；"
+            "首次运行会在同目录生成 app.json 与 accounts.json。"
+            ""
+            "### 系统要求"
+            ""
+            "- **仅支持 Windows 10 及以上（x64）**"
+            "- 不支持 Windows 7/8、不支持 32 位系统"
+            "- 暂不提供 macOS 版本（尚未实机验收）"
+            "- 请放在可写目录（不要放 Program Files），否则无法保存账号"
+            ""
+            "### 构建信息"
+            ""
+            "- 版本号：v$version"
+            "- 构建环境：GitHub Actions / windows-latest / x86_64-pc-windows-msvc"
+            "- 提交：$env:GITHUB_SHA"
+          ) -join "`n"
+          Set-Content -Path release-notes.md -Value $notes -Encoding UTF8
+
+          "产物清单：" | Out-Host
+          Get-ChildItem dist -Recurse -File |
+            ForEach-Object { "  $($_.Name)  $($_.Length) 字节" }
+
+      - name: 创建 / 更新 Release 并上传产物
+        uses: softprops/action-gh-release@v2
+        with:
+          name: v${{ github.ref_name }}
+          body_path: release-notes.md
+          files: |
+            dist/sub2api_tray-*-windows-x64.exe
+            dist/sub2api_tray-*-windows-x64.zip
+          # 附件没匹配上就直接失败，避免发出一个空 Release
+          fail_on_unmatched_files: true

@@ -79,6 +79,44 @@ pub struct ApiKeyInfo {
 }
 
 impl ApiKeyInfo {
+    /// 从 `accounts.json` 的缓存条目还原（断网时展示用）。
+    ///
+    /// 缓存里只有打码值与元信息，所以还原出来的对象不能用于"复制完整 Key"，
+    /// 调用方需要把 [`AccountKeysState::cached`] 标出来提示用户。
+    pub fn from_cache_value(value: &serde_json::Value) -> Option<Self> {
+        let id = value.get("id")?.as_str()?.to_owned();
+        Some(Self {
+            id,
+            name: value
+                .get("name")
+                .and_then(|item| item.as_str())
+                .unwrap_or("未命名")
+                .to_owned(),
+            masked: value
+                .get("maskedKey")
+                .and_then(|item| item.as_str())
+                .unwrap_or("***")
+                .to_owned(),
+            status: value
+                .get("status")
+                .and_then(|item| item.as_str())
+                .unwrap_or("unknown")
+                .to_owned(),
+            group: value
+                .get("groupName")
+                .and_then(|item| item.as_str())
+                .map(ToOwned::to_owned),
+            last_used_at: value
+                .get("lastUsedAt")
+                .and_then(|item| item.as_str())
+                .map(ToOwned::to_owned),
+            quota: value.get("quota").and_then(|item| item.as_f64()),
+            quota_used: value.get("quotaUsed").and_then(|item| item.as_f64()),
+            usage_5h: value.get("usage5h").and_then(|item| item.as_f64()),
+            usage_1d: value.get("usage1d").and_then(|item| item.as_f64()),
+        })
+    }
+
     /// 转成写进 `accounts.json` 的缓存 JSON（**不含完整 Key**）。
     pub fn to_cache_value(&self) -> serde_json::Value {
         serde_json::json!({
