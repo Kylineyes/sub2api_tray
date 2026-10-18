@@ -29,7 +29,7 @@
 use std::sync::{Arc, Mutex};
 
 use anyhow::{Context as _, Result};
-use tray_icon::menu::{Menu, MenuEvent, MenuItem, PredefinedMenuItem, Submenu};
+use tray_icon::menu::{Menu, MenuEvent, MenuItem, PredefinedMenuItem};
 use tray_icon::{
     Icon, MouseButton, MouseButtonState, Rect as TrayRect, TrayIcon, TrayIconBuilder, TrayIconEvent,
 };
@@ -40,26 +40,11 @@ use tray_icon::{
 /// 不依赖安装目录结构。图标本身是 128×128，交给系统缩放到 16/20/24 像素。
 const TRAY_ICON_PNG: &[u8] = include_bytes!("../assets/tray-icon.png");
 
-/// 菜单项 id：显示面板。
-const MENU_ID_SHOW: &str = "show";
-
-/// 菜单项 id：打开登录弹窗。
-const MENU_ID_LOGIN: &str = "login";
-
 /// 菜单项 id：立即刷新状态。
 const MENU_ID_REFRESH: &str = "refresh";
 
 /// 菜单项 id：退出程序。
 const MENU_ID_QUIT: &str = "quit";
-
-/// 账号子菜单里"退出账号并删除记录"的 id 前缀。
-///
-/// 形如 `delete:<uuid>`；菜单重建后 id 会跟着账号变化，所以回调里按前缀解析，
-/// 而不是在安装时把每个 id 都捕获进闭包。
-const MENU_ID_DELETE_PREFIX: &str = "delete:";
-
-/// 账号子菜单里"查看 API Key…"的 id 前缀，形如 `keys:<uuid>`。
-const MENU_ID_KEYS_PREFIX: &str = "keys:";
 
 /// 托盘需要应用做的事。
 ///
@@ -68,16 +53,8 @@ const MENU_ID_KEYS_PREFIX: &str = "keys:";
 pub enum TrayCommand {
     /// 切换面板显示状态（左键单击托盘图标）。
     TogglePanel,
-    /// 显示面板（菜单项）。
-    ShowPanel,
-    /// 打开登录弹窗（菜单项，面板未显示时会先显示面板）。
-    OpenLogin,
     /// 立即刷新一轮状态（菜单项或面板按钮，绕过定时与启动延迟）。
     RefreshNow,
-    /// 删除某个账号（子菜单项，id 为账号 id；需要二次确认）。
-    DeleteAccount(String),
-    /// 查看某个账号的 API Key（子菜单项，id 为账号 id）。
-    ShowApiKeys(String),
     /// 退出整个应用（菜单项）。
     Quit,
 }
@@ -130,15 +107,6 @@ impl TrayBridge {
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         std::mem::take(&mut *pending)
     }
-}
-
-/// 账号子菜单需要的信息（由 `app` 根据运行态生成，托盘不关心状态怎么来的）。
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct TrayAccountEntry {
-    /// 账号 id（删除指令要用）。
-    pub id: String,
-    /// 子菜单标题，例如 `zh***@ex***.com · 在线`。
-    pub title: String,
 }
 
 /// 托盘图标的持有者。
@@ -253,28 +221,24 @@ pub fn load_icon_rgba() -> Result<(Vec<u8>, u32, u32)> {
 
 /// 构建整份托盘菜单。
 ///
-/// 结构（与 `docs/plans/0004-account-menu.md` 第 4.1 节一致）：
+/// 菜单只保留"原子动作"：
 ///
 /// ```text
-/// 显示面板
 /// 立即刷新
-/// 登陆新用户…
-/// ─────────────
-/// <账号 1> ▸ 退出账号并删除记录
-/// <账号 2> ▸ 退出账号并删除记录
 /// ─────────────
 /// 版本 v0.1.0（禁用）
 /// ─────────────
 /// 退出
 /// ```
 ///
-/// `entries` 的顺序由调用方决定（`app` 按 `createdAt` 升序传入，即添加从早到晚）。
-pub fn build_menu(entries: &[TrayAccountEntry]) -> Result<Menu> {
+/// 面板用左键单击托盘图标切换，登录入口在面板顶部，账号信息也都在面板里，
+/// 因此菜单不再提供"显示面板 / 登陆新用户 / 账号子菜单"。
+pub fn build_menu() -> Result<Menu> {
     let menu = Menu::new();
 
-    let show_item = MenuItem::with_id(MENU_ID_SHOW, "显示面板", true, None);
+    // 菜单只留"原子动作"：面板用左键单击切换、登录在面板顶部，
+    // 所以这里不再放"显示面板/登陆新用户"两项。
     let refresh_item = MenuItem::with_id(MENU_ID_REFRESH, "立即刷新", true, None);
-    let login_item = MenuItem::with_id(MENU_ID_LOGIN, "登陆新用户…", true, None);
     let version_item = MenuItem::with_id(
         "version",
         format!("版本 v{}", crate::APP_VERSION),
@@ -283,35 +247,7 @@ pub fn build_menu(entries: &[TrayAccountEntry]) -> Result<Menu> {
     );
     let quit_item = MenuItem::with_id(MENU_ID_QUIT, "退出", true, None);
 
-    menu.append_items(&[
-        &show_item,
-        &refresh_item,
-        &login_item,
-        &PredefinedMenuItem::separator(),
-    ])
-    .context("构建托盘菜单失败")?;
-
-    // 每个账号一个子菜单：标题带状态；子菜单内是"查看 API Key"与"退出账号并删除记录"。
-    for entry in entries {
-        let submenu = Submenu::new(entry.title.as_str(), true);
-        let keys_item = MenuItem::with_id(
-            format!("{MENU_ID_KEYS_PREFIX}{}", entry.id),
-            "查看 API Key…",
-            true,
-            None,
-        );
-        let delete_item = MenuItem::with_id(
-            format!("{MENU_ID_DELETE_PREFIX}{}", entry.id),
-            "退出账号并删除记录",
-            true,
-            None,
-        );
-        submenu
-            .append(&keys_item)
-            .context("构建 API Key 菜单项失败")?;
-        submenu.append(&delete_item).context("构建账号子菜单失败")?;
-        menu.append(&submenu).context("追加账号子菜单失败")?;
-    }
+    menu.append(&refresh_item).context("构建托盘菜单失败")?;
 
     menu.append_items(&[
         &PredefinedMenuItem::separator(),
@@ -338,7 +274,7 @@ pub fn install(bridge: Arc<TrayBridge>) -> Result<TrayHandle> {
     let icon = Icon::from_rgba(rgba, width, height).context("托盘图标 RGBA 数据非法")?;
 
     // 初始菜单没有账号；`app` 拿到数据层后会立刻用真实账号重建一次。
-    let menu = build_menu(&[])?;
+    let menu = build_menu()?;
 
     // ---- 菜单事件 ----
     // 只注册一次：菜单会被整份替换，但 id 规则不变，所以按 id 字符串分发即可。
@@ -346,18 +282,10 @@ pub fn install(bridge: Arc<TrayBridge>) -> Result<TrayHandle> {
     MenuEvent::set_event_handler(Some(move |event: MenuEvent| {
         let id = event.id.as_ref();
         match id {
-            MENU_ID_SHOW => menu_bridge.push(TrayCommand::ShowPanel),
             MENU_ID_REFRESH => menu_bridge.push(TrayCommand::RefreshNow),
-            MENU_ID_LOGIN => menu_bridge.push(TrayCommand::OpenLogin),
             MENU_ID_QUIT => menu_bridge.push(TrayCommand::Quit),
-            other => {
-                if let Some(account_id) = other.strip_prefix(MENU_ID_DELETE_PREFIX) {
-                    menu_bridge.push(TrayCommand::DeleteAccount(account_id.to_owned()));
-                } else if let Some(account_id) = other.strip_prefix(MENU_ID_KEYS_PREFIX) {
-                    menu_bridge.push(TrayCommand::ShowApiKeys(account_id.to_owned()));
-                }
-                // 版本项是禁用的，不会产生事件；其它未知 id 直接忽略
-            }
+            // 版本项是禁用的，不会产生事件；其它未知 id 直接忽略
+            _ => {}
         }
     }));
 
@@ -400,30 +328,8 @@ mod tests {
     use super::*;
 
     #[test]
-    fn 菜单标题允许中文与状态后缀() {
-        // 只验证"标题是可构造的字符串"，不涉及系统菜单对象（那需要事件循环）
-        let entry = TrayAccountEntry {
-            id: "8f14e45f".to_owned(),
-            title: "zh***@ex***.com · 在线".to_owned(),
-        };
-        assert!(entry.title.contains("在线"));
-    }
-
-    #[test]
-    fn 删除菜单id可以还原出账号id() {
-        let id = format!("{MENU_ID_DELETE_PREFIX}abc-123");
-        let restored = id.strip_prefix(MENU_ID_DELETE_PREFIX).expect("前缀应匹配");
-        assert_eq!(restored, "abc-123");
-    }
-
-    #[test]
     fn 菜单常量互不相同() {
         // 防止将来改常量时把两个入口写成同一个 id（会导致点击行为串台）
-        assert_ne!(MENU_ID_SHOW, MENU_ID_LOGIN);
-        assert_ne!(MENU_ID_SHOW, MENU_ID_QUIT);
-        assert_ne!(MENU_ID_LOGIN, MENU_ID_QUIT);
-        assert_ne!(MENU_ID_REFRESH, MENU_ID_SHOW);
-        assert_ne!(MENU_ID_REFRESH, MENU_ID_LOGIN);
         assert_ne!(MENU_ID_REFRESH, MENU_ID_QUIT);
     }
 
