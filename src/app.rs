@@ -336,6 +336,9 @@ pub struct TrayApp {
     /// 悬浮高亮动画状态（账号卡片、Key 行共用）。
     hover: HoverState,
 
+    /// 调试开关：启动后自动展开第一个账号的 Key 明细（仅截图验收用）。
+    debug_expand: bool,
+
     /// 设置页草稿（`None` 表示未打开）。
     settings: Option<SettingsDraft>,
 
@@ -421,6 +424,7 @@ impl TrayApp {
             account_keys: HashMap::new(),
             keys_rx: None,
             hover: HoverState::default(),
+            debug_expand: std::env::var_os("SUB2API_TRAY_DEBUG_EXPAND").is_some(),
             settings: None,
             copying_key: None,
             copy_rx: None,
@@ -2082,6 +2086,19 @@ impl eframe::App for TrayApp {
         self.poll_refresh(ctx);
         self.poll_api_keys(ctx);
         self.poll_account_keys(ctx);
+
+        // 调试开关：只做一次，方便自动化截图看到展开态
+        if self.debug_expand {
+            self.debug_expand = false;
+            let first_id = match &self.data {
+                DataLayer::Ready(store) => store.accounts().first().map(|item| item.id.clone()),
+                DataLayer::Unavailable(_) => None,
+            };
+            if let Some(id) = first_id {
+                self.expanded_accounts.insert(id.clone());
+                self.request_account_keys(ctx, &id);
+            }
+        }
         self.poll_copy(ctx);
         self.poll_update(ctx);
         self.maybe_start_refresh(ctx);
