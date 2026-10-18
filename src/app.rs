@@ -2531,6 +2531,8 @@ fn draw_account_card(
         .show(ui, |ui| {
             ui.set_width(ui.available_width());
 
+            // 标题行里的"退出"按钮被点时，不应再触发整行的展开/收起
+            let mut exit_clicked = false;
             let header = ui
                 .horizontal(|ui| {
                     // 矢量箭头（替代原来的 ▶/▼ 字符：字符在不同字体下粗细不一，很丑）
@@ -2546,9 +2548,20 @@ fn draw_account_card(
                             .strong()
                             .color(lerp_color(TEXT_PRIMARY, egui::Color32::WHITE, t * 0.45)),
                     );
-                    // 角色只在展开时显示：收起态要尽量干净
+                    // 展开时右侧给"退出"按钮，角色名弱化在它左边
                     if card.expanded {
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if ui
+                                .add(
+                                    egui::Button::new(egui::RichText::new("退出").size(fs(10.0)))
+                                        .small(),
+                                )
+                                .on_hover_text("退出这个账号并删除本地记录")
+                                .clicked()
+                            {
+                                exit_clicked = true;
+                                *delete_request = Some(card.id.clone());
+                            }
                             ui.label(
                                 egui::RichText::new(card.role_label)
                                     .size(fs(10.0))
@@ -2561,7 +2574,7 @@ fn draw_account_card(
                 .interact(egui::Sense::click())
                 .on_hover_cursor(egui::CursorIcon::PointingHand);
 
-            if header.clicked() {
+            if header.clicked() && !exit_clicked {
                 *toggle = Some(card.id.clone());
             }
 
@@ -2607,14 +2620,10 @@ fn draw_account_card(
                 ui.add_space(6.0);
                 ui.separator();
 
-                // 账号操作入口：账号信息不再进原生菜单，全部收在面板里。
-                // 放在 Key 列表之前，展开即可见，不用滚到底部找。
+                // Key 弹窗入口（退出按钮在标题行右侧）
                 ui.horizontal(|ui| {
                     if ui.small_button("查看 API Key…").clicked() {
                         *open_keys = Some(card.id.clone());
-                    }
-                    if ui.small_button("退出账号…").clicked() {
-                        *delete_request = Some(card.id.clone());
                     }
                 });
                 ui.add_space(4.0);
