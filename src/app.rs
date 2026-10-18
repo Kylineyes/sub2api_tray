@@ -52,8 +52,61 @@ const TOGGLE_DEBOUNCE: Duration = Duration::from_millis(250);
 pub const PANEL_BG: egui::Color32 = egui::Color32::from_rgb(15, 23, 42);
 
 /// 面板边框色，用来在浅色桌面上勾勒出气泡的轮廓。
-/// 悬浮高亮底色：半透明白，深浅背景下都能看出选区但不遮住文字。
-const HOVER_BG: egui::Color32 = egui::Color32::from_rgba_premultiplied(255, 255, 255, 20);
+/// 卡片悬浮时的高亮底色：比 CARD_BG 亮一档，文字对比度反而更高。
+const HOVER_CARD_BG: egui::Color32 = egui::Color32::from_rgb(52, 63, 82);
+
+/// 线性插值两个颜色（用于悬浮淡入淡出）。
+fn lerp_color(from: egui::Color32, to: egui::Color32, t: f32) -> egui::Color32 {
+    let t = t.clamp(0.0, 1.0);
+    let mix = |a: u8, b: u8| (a as f32 + (b as f32 - a as f32) * t).round() as u8;
+    egui::Color32::from_rgba_premultiplied(
+        mix(from.r(), to.r()),
+        mix(from.g(), to.g()),
+        mix(from.b(), to.b()),
+        mix(from.a(), to.a()),
+    )
+}
+
+/// 悬浮动画状态：按 key 记录"当前淡入进度"与"上一帧的命中矩形"。
+///
+/// 为什么不用 egui 自带的 `animate_bool`：它要求稳定的 `Id`，而这里的行是按
+/// 账号/Key 动态生成的；自己存一张表更直观，也方便统一调时间常数。
+/// 效果是约 90ms 的指数式淡入/淡出（接近系统菜单的高亮过渡），不会"闪一下"。
+#[derive(Default)]
+struct HoverState {
+    anim: HashMap<String, f32>,
+    rects: HashMap<String, egui::Rect>,
+}
+
+impl HoverState {
+    /// 取某个元素的当前悬浮进度（0.0～1.0），并根据上一帧矩形判断是否悬浮。
+    fn t(&mut self, ctx: &egui::Context, key: &str) -> f32 {
+        let pointer = ctx.pointer_hover_pos();
+        let hovered = match (pointer, self.rects.get(key)) {
+            (Some(position), Some(rect)) => rect.contains(position),
+            _ => false,
+        };
+        let target = if hovered { 1.0 } else { 0.0 };
+
+        // stable_dt 在 60fps 下约 0.016；夹住上限避免掉帧时突跳
+        let dt = ctx.input(|input| input.stable_dt).clamp(0.001, 0.05);
+        let current = self.anim.entry(key.to_owned()).or_insert(target);
+        let step = (dt / 0.09).min(1.0);
+        *current += (target - *current) * step;
+        if (*current - target).abs() < 0.01 {
+            *current = target;
+        } else {
+            // 动画未结束：主动排下一帧，否则按需重绘会让过渡卡住
+            ctx.request_repaint();
+        }
+        *current
+    }
+
+    /// 记录元素本帧的矩形，供下一帧判断悬浮。
+    fn store(&mut self, key: &str, rect: egui::Rect) {
+        self.rects.insert(key.to_owned(), rect);
+    }
+}
 
 pub const PANEL_BORDER: egui::Color32 = egui::Color32::from_rgb(51, 65, 85);
 
@@ -259,6 +312,9 @@ pub struct TrayApp {
 
     /// 面板展开时进行中的拉取（同一时间只允许一个）。
     keys_rx: Option<(String, Receiver<ApiKeysReply>)>,
+
+    /// 悬浮高亮动画状态（账号卡片、Key 行共用）。
+    hover: HoverState,
 }
 
 impl TrayApp {
@@ -320,6 +376,7 @@ impl TrayApp {
             expanded_accounts: HashSet::new(),
             account_keys: HashMap::new(),
             keys_rx: None,
+            hover: HoverState::default(),
         };
 
         // 启动时先按已加载的账号建一次菜单（此时状态都是"未知"）
@@ -787,7 +844,7 @@ impl TrayApp {
     }
 
     /// 绘制 API Key 弹窗。
-    fn draw_api_keys(&mut self, ctx: &egui::Context) {
+    fn draw_api_keys(&mut self, ctx: &egui::Context, hover: &mut HoverState) {
         let Some(dialog) = self.api_keys.as_mut() else {
             return;
         };
@@ -852,43 +909,65 @@ impl TrayApp {
                     .max_height(220.0)
                     .show(ui, |ui| {
                         for key in &dialog.keys {
-                            ui.horizontal(|ui| {
-                                ui.label(
-                                    egui::RichText::new(&key.name)
-                                        .size(fs(12.0))
-                                        .color(TEXT_PRIMARY),
-                                );
-                                ui.with_layout(
-                                    egui::Layout::right_to_left(egui::Align::Center),
-                                    |ui| {
-                                        if ui
-                                            .add_sized(
-                                                [52.0, 20.0],
-                                                egui::Button::new(
-                                                    egui::RichText::new("复制").size(fs(10.0)),
+                            // 与面板内 Key 行一致的悬浮动画：底色淡入 + 文字提亮
+                            let hover_key = format!("dlg:{}", key.id);
+                            let kt = hover.t(ui.ctx(), &hover_key);
+                            let row_frame = egui::Frame::new()
+                                .fill(lerp_color(egui::Color32::TRANSPARENT, HOVER_CARD_BG, kt))
+                                .corner_radius(egui::CornerRadius::same(5))
+                                .inner_margin(egui::Margin::symmetric(5, 3))
+                                .show(ui, |ui| {
+                                    ui.set_width(ui.available_width());
+                                    ui.horizontal(|ui| {
+                                        ui.label(
+                                            egui::RichText::new(&key.name).size(fs(12.0)).color(
+                                                lerp_color(
+                                                    TEXT_PRIMARY,
+                                                    egui::Color32::WHITE,
+                                                    kt * 0.4,
                                                 ),
-                                            )
-                                            .clicked()
-                                        {
-                                            copy_id = Some(key.id.clone());
-                                        }
-                                    },
-                                );
-                            });
-                            ui.label(
-                                egui::RichText::new(&key.masked)
-                                    .size(fs(10.0))
-                                    .color(TEXT_SECONDARY),
-                            );
-                            let mut meta = key.status.clone();
-                            if let Some(group) = &key.group {
-                                meta.push_str(&format!(" · {group}"));
-                            }
-                            if let Some(last_used) = &key.last_used_at {
-                                meta.push_str(&format!(" · 最近使用 {last_used}"));
-                            }
-                            ui.label(egui::RichText::new(meta).size(fs(9.0)).color(TEXT_DIM));
-                            ui.add_space(6.0);
+                                            ),
+                                        );
+                                        ui.with_layout(
+                                            egui::Layout::right_to_left(egui::Align::Center),
+                                            |ui| {
+                                                if ui
+                                                    .add_sized(
+                                                        [52.0, 20.0],
+                                                        egui::Button::new(
+                                                            egui::RichText::new("复制")
+                                                                .size(fs(10.0)),
+                                                        ),
+                                                    )
+                                                    .clicked()
+                                                {
+                                                    copy_id = Some(key.id.clone());
+                                                }
+                                            },
+                                        );
+                                    });
+                                    ui.label(
+                                        egui::RichText::new(&key.masked).size(fs(10.0)).color(
+                                            lerp_color(
+                                                TEXT_SECONDARY,
+                                                egui::Color32::WHITE,
+                                                kt * 0.3,
+                                            ),
+                                        ),
+                                    );
+                                    let mut meta = key.status.clone();
+                                    if let Some(group) = &key.group {
+                                        meta.push_str(&format!(" · {group}"));
+                                    }
+                                    if let Some(last_used) = &key.last_used_at {
+                                        meta.push_str(&format!(" · 最近使用 {last_used}"));
+                                    }
+                                    ui.label(
+                                        egui::RichText::new(meta).size(fs(9.0)).color(TEXT_DIM),
+                                    );
+                                });
+                            hover.store(&hover_key, row_frame.response.rect);
+                            ui.add_space(4.0);
                         }
                     });
             });
@@ -1304,6 +1383,7 @@ impl TrayApp {
     /// `ui` 是 eframe 提供的根 Ui（没有边距也没有背景），因此这里用 [`egui::CentralPanel`]
     /// 再包一层，才能得到带圆角/内边距的气泡外观。
     fn draw_panel(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
+        let at_limit = self.data_account_count() >= MAX_ACCOUNTS;
         // 先在闭包外把需要的信息整理成"纯数据"：
         // 闭包内若再借用 `self.data`，会和 `&mut self` 的方法签名打架，
         // 提前算出字符串既避免了借用冲突，也让闭包只依赖局部变量。
@@ -1320,6 +1400,8 @@ impl TrayApp {
         let mut refresh_clicked = false;
         // 被点击要展开/收起的账号 id
         let mut toggle_account: Option<String> = None;
+        // 悬浮动画状态：先取出来，绘制闭包里才能可变借用
+        let mut hover = std::mem::take(&mut self.hover);
 
         egui::CentralPanel::default()
             .frame(
@@ -1337,7 +1419,7 @@ impl TrayApp {
                 egui::Panel::top("panel_header")
                     .frame(egui::Frame::NONE.fill(PANEL_BG))
                     .show(ui, |ui| {
-                        if draw_header(ui) {
+                        if draw_header(ui, at_limit) {
                             open_login = true;
                         }
 
@@ -1359,7 +1441,7 @@ impl TrayApp {
                         }),
                     )
                     .show(ui, |ui| {
-                        draw_footer(ui, ctx, toast.as_deref());
+                        draw_footer(ui, toast.as_deref());
                     });
 
                 egui::ScrollArea::vertical()
@@ -1376,7 +1458,7 @@ impl TrayApp {
                             draw_account_summary(ui, &cards, &mut refresh_clicked);
                             ui.add_space(12.0);
                             for card in &cards {
-                                draw_account_card(ui, card, &mut toggle_account);
+                                draw_account_card(ui, card, &mut toggle_account, &mut hover);
                                 ui.add_space(10.0);
                             }
                         }
@@ -1417,7 +1499,8 @@ impl TrayApp {
         self.draw_delete_confirm(ctx);
 
         // ---- API Key 弹窗（从托盘子菜单进入，只读 + 复制） ----
-        self.draw_api_keys(ctx);
+        self.draw_api_keys(ctx, &mut hover);
+        self.hover = hover;
     }
 
     /// 绘制"退出账号并删除记录"的确认框。
@@ -1647,7 +1730,7 @@ fn fallback_position(monitor: egui::Vec2, size: egui::Vec2) -> (f32, f32) {
 /// 返回 `true` 表示用户点击了「登陆新用户」按钮。
 /// 之所以把按钮放在标题区（面板最顶部），是需求方明确的位置要求：
 /// 登录是这块面板最主要的新增操作，必须第一眼可见。
-fn draw_header(ui: &mut egui::Ui) -> bool {
+fn draw_header(ui: &mut egui::Ui, at_limit: bool) -> bool {
     ui.horizontal(|ui| {
         ui.label(
             egui::RichText::new("Sub2API 托盘")
@@ -1691,8 +1774,22 @@ fn draw_header(ui: &mut egui::Ui) -> bool {
             .color(egui::Color32::from_rgb(15, 23, 42)),
     )
     .fill(ACCENT);
-    ui.add_sized([ui.available_width(), 32.0], button)
-        .on_hover_text("填写实例地址与账号密码，登录后账号会出现在托盘里")
+    // 达到账号上限时禁用入口：比"登录完才提示"更早地把限制告诉用户
+    let response = if at_limit {
+        ui.add_enabled_ui(false, |ui| {
+            ui.add_sized([ui.available_width(), 32.0], button)
+        })
+        .inner
+    } else {
+        ui.add_sized([ui.available_width(), 32.0], button)
+    };
+
+    response
+        .on_hover_text(if at_limit {
+            format!("已达 {MAX_ACCOUNTS} 个账号上限，请先在托盘里删除一个")
+        } else {
+            "填写实例地址与账号密码，登录后账号会出现在托盘里".to_owned()
+        })
         .clicked()
 }
 /// 生成账号子菜单标题：`打码邮箱 · 状态`，过长时截断。
@@ -1819,9 +1916,17 @@ fn draw_account_summary(ui: &mut egui::Ui, cards: &[AccountCard], refresh_clicke
 ///
 /// 点标题行可以展开/收起该账号的 API Key 明细；`toggle` 把被点击的账号 id 回传给调用方
 /// （绘制函数拿不到 `&mut TrayApp`）。
-fn draw_account_card(ui: &mut egui::Ui, card: &AccountCard, toggle: &mut Option<String>) {
-    egui::Frame::new()
-        .fill(CARD_BG)
+fn draw_account_card(
+    ui: &mut egui::Ui,
+    card: &AccountCard,
+    toggle: &mut Option<String>,
+    hover: &mut HoverState,
+) {
+    // 悬浮进度：上一帧矩形的命中 + 指数淡入，避免"闪一下"
+    let hover_key = format!("acct:{}", card.id);
+    let t = hover.t(ui.ctx(), &hover_key);
+    let frame = egui::Frame::new()
+        .fill(lerp_color(CARD_BG, HOVER_CARD_BG, t))
         .corner_radius(egui::CornerRadius::same(10))
         .inner_margin(egui::Margin::same(12))
         .show(ui, |ui| {
@@ -1843,7 +1948,7 @@ fn draw_account_card(ui: &mut egui::Ui, card: &AccountCard, toggle: &mut Option<
                         egui::RichText::new(&card.display)
                             .size(fs(13.0))
                             .strong()
-                            .color(TEXT_PRIMARY),
+                            .color(lerp_color(TEXT_PRIMARY, egui::Color32::WHITE, t * 0.45)),
                     );
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         ui.label(
@@ -1860,14 +1965,6 @@ fn draw_account_card(ui: &mut egui::Ui, card: &AccountCard, toggle: &mut Option<
                 } else {
                     "点击展开 API Key"
                 });
-
-            if header.hovered() {
-                ui.painter().rect_filled(
-                    header.rect.expand2(egui::vec2(6.0, 3.0)),
-                    egui::CornerRadius::same(6),
-                    HOVER_BG,
-                );
-            }
 
             if header.clicked() {
                 *toggle = Some(card.id.clone());
@@ -1912,16 +2009,18 @@ fn draw_account_card(ui: &mut egui::Ui, card: &AccountCard, toggle: &mut Option<
             if card.expanded {
                 ui.add_space(6.0);
                 ui.separator();
-                draw_account_keys(ui, card);
+                draw_account_keys(ui, card, hover);
             }
         });
+
+    hover.store(&hover_key, frame.response.rect);
 }
 
 /// 绘制展开后的 API Key 明细。
 ///
 /// 每个 Key 一行块：名称 + 打码值、已用/总额度、近 5 小时用量、订阅名。
 /// 后端只提供 5 小时/1 天/7 天窗口，没有 1 小时口径，这里如实标注"近 5 小时"。
-fn draw_account_keys(ui: &mut egui::Ui, card: &AccountCard) {
+fn draw_account_keys(ui: &mut egui::Ui, card: &AccountCard, hover: &mut HoverState) {
     let Some(state) = &card.keys else {
         ui.horizontal(|ui| {
             ui.spinner();
@@ -1967,43 +2066,51 @@ fn draw_account_keys(ui: &mut egui::Ui, card: &AccountCard) {
     for key in &state.keys {
         ui.add_space(3.0);
 
-        // 第一行：名称 + 打码值（左），订阅名（右）——把订阅放到右侧可以省掉一整行
-        let row = ui
-            .horizontal(|ui| {
-                ui.label(
-                    egui::RichText::new(format!("{}  {}", key.name, key.masked))
-                        .size(fs(11.0))
-                        .color(TEXT_PRIMARY),
-                );
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if let Some(group) = key.group.as_ref().or(card.subscription.as_ref()) {
-                        ui.label(egui::RichText::new(group).size(fs(9.0)).color(TEXT_DIM));
-                    }
+        let hover_key = format!("key:{}:{}", card.id, key.id);
+        let kt = hover.t(ui.ctx(), &hover_key);
+        // 底色随淡入进度插值：0 时完全透明，1 时是比卡片略亮的深蓝，
+        // 文字同时提亮，保证高亮后依然清晰（不再"白底盖字"）。
+        let row_frame = egui::Frame::new()
+            .fill(lerp_color(egui::Color32::TRANSPARENT, HOVER_CARD_BG, kt))
+            .corner_radius(egui::CornerRadius::same(5))
+            .inner_margin(egui::Margin::symmetric(5, 3))
+            .show(ui, |ui| {
+                ui.set_width(ui.available_width());
+                // 第一行：名称 + 打码值（左），订阅名（右）——订阅右置可省掉一整行
+                ui.horizontal(|ui| {
+                    ui.label(
+                        egui::RichText::new(format!("{}  {}", key.name, key.masked))
+                            .size(fs(11.0))
+                            .color(lerp_color(TEXT_PRIMARY, egui::Color32::WHITE, kt * 0.4)),
+                    );
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if let Some(group) = key.group.as_ref().or(card.subscription.as_ref()) {
+                            ui.label(egui::RichText::new(group).size(fs(9.0)).color(lerp_color(
+                                TEXT_DIM,
+                                TEXT_SECONDARY,
+                                kt,
+                            )));
+                        }
+                    });
                 });
-            })
-            .response;
 
-        // 悬浮高亮：让用户一眼看出这一行是可选中区域
-        if row.hovered() {
-            ui.painter().rect_filled(
-                row.rect.expand2(egui::vec2(4.0, 2.0)),
-                egui::CornerRadius::same(4),
-                HOVER_BG,
-            );
-        }
+                // 第二行：额度与用量
+                let used = key.quota_used.unwrap_or(0.0);
+                let quota_text = match key.quota {
+                    Some(quota) if quota > 0.0 => {
+                        format!("已用 ${used:.2} / 总额度 ${quota:.2}")
+                    }
+                    _ => format!("已用 ${used:.2} / 总额度 不限"),
+                };
+                let usage_5h = key.usage_5h.unwrap_or(0.0);
+                ui.label(
+                    egui::RichText::new(format!("{quota_text} · 近 5 小时 ${usage_5h:.2}"))
+                        .size(fs(10.0))
+                        .color(lerp_color(TEXT_SECONDARY, egui::Color32::WHITE, kt * 0.3)),
+                );
+            });
 
-        // 第二行：额度与用量
-        let used = key.quota_used.unwrap_or(0.0);
-        let quota_text = match key.quota {
-            Some(quota) if quota > 0.0 => format!("已用 ${used:.2} / 总额度 ${quota:.2}"),
-            _ => format!("已用 ${used:.2} / 总额度 不限"),
-        };
-        let usage_5h = key.usage_5h.unwrap_or(0.0);
-        ui.label(
-            egui::RichText::new(format!("{quota_text} · 近 5 小时 ${usage_5h:.2}"))
-                .size(fs(10.0))
-                .color(TEXT_SECONDARY),
-        );
+        hover.store(&hover_key, row_frame.response.rect);
     }
 }
 
@@ -2075,7 +2182,8 @@ fn draw_empty_state(ui: &mut egui::Ui) {
 ///
 /// `data_line` 与 `toast` 由调用方提前算好（见 `draw_panel`），
 /// 这样闭包里不需要再借用 `self`。
-fn draw_footer(ui: &mut egui::Ui, ctx: &egui::Context, toast: Option<&str>) {
+fn draw_footer(ui: &mut egui::Ui, toast: Option<&str>) {
+    // 底栏只保留操作反馈（如"已复制"）；退出入口统一放在托盘右键菜单里。
     if let Some(text) = toast {
         ui.horizontal(|ui| {
             ui.label(
@@ -2085,20 +2193,6 @@ fn draw_footer(ui: &mut egui::Ui, ctx: &egui::Context, toast: Option<&str>) {
             );
         });
     }
-    ui.horizontal(|ui| {
-        ui.label(
-            egui::RichText::new("左键托盘图标显示 / 隐藏面板 · Esc 收起")
-                .size(fs(11.0))
-                .color(TEXT_SECONDARY),
-        );
-
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            if ui.button("退出").clicked() {
-                // 与托盘菜单的“退出”走同一条路径：关闭根视口即结束进程
-                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
-            }
-        });
-    });
 }
 
 /// 把登录成功的草稿落库：加密凭据 → 组装账号 → 去重并写盘。
