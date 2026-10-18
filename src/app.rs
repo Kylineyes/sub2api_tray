@@ -53,7 +53,7 @@ pub const PANEL_BG: egui::Color32 = egui::Color32::from_rgb(15, 23, 42);
 
 /// 面板边框色，用来在浅色桌面上勾勒出气泡的轮廓。
 /// 卡片悬浮时的高亮底色：比 CARD_BG 亮一档，文字对比度反而更高。
-const HOVER_CARD_BG: egui::Color32 = egui::Color32::from_rgb(52, 63, 82);
+const HOVER_CARD_BG: egui::Color32 = egui::Color32::from_rgb(62, 78, 104);
 
 /// 线性插值两个颜色（用于悬浮淡入淡出）。
 fn lerp_color(from: egui::Color32, to: egui::Color32, t: f32) -> egui::Color32 {
@@ -65,6 +65,17 @@ fn lerp_color(from: egui::Color32, to: egui::Color32, t: f32) -> egui::Color32 {
         mix(from.b(), to.b()),
         mix(from.a(), to.a()),
     )
+}
+
+/// 设置页的编辑草稿：先在本地改，点"保存"才写盘并生效。
+#[derive(Debug, Clone)]
+struct SettingsDraft {
+    /// 账号名是否打码。
+    mask_accounts: bool,
+    /// 状态刷新间隔（秒）。
+    refresh_interval_seconds: u64,
+    /// 单次请求超时（秒）。
+    request_timeout_seconds: u64,
 }
 
 /// 悬浮动画状态：按 key 记录"当前淡入进度"与"上一帧的命中矩形"。
@@ -191,6 +202,8 @@ struct AccountCard {
 struct AccountKeysState {
     /// 是否正在拉取。
     loading: bool,
+    /// 是否是"离线回退"的缓存数据。
+    cached: bool,
     /// 错误提示。
     error: Option<String>,
     /// 已拉取到的 Key 列表。
@@ -315,6 +328,9 @@ pub struct TrayApp {
 
     /// 悬浮高亮动画状态（账号卡片、Key 行共用）。
     hover: HoverState,
+
+    /// 设置页草稿（`None` 表示未打开）。
+    settings: Option<SettingsDraft>,
 }
 
 impl TrayApp {
@@ -377,6 +393,7 @@ impl TrayApp {
             account_keys: HashMap::new(),
             keys_rx: None,
             hover: HoverState::default(),
+            settings: None,
         };
 
         // 启动时先按已加载的账号建一次菜单（此时状态都是"未知"）
@@ -699,6 +716,25 @@ impl TrayApp {
         }
     }
 
+    /// 从 `accounts.json` 读取某账号的 Key 缓存（断网回退用）。
+    fn cached_api_keys(&self, account_id: &str) -> Vec<crate::api::ApiKeyInfo> {
+        let DataLayer::Ready(store) = &self.data else {
+            return Vec::new();
+        };
+        store
+            .accounts()
+            .iter()
+            .find(|account| account.id == account_id)
+            .map(|account| {
+                account
+                    .api_keys
+                    .iter()
+                    .filter_map(crate::api::ApiKeyInfo::from_cache_value)
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
     /// 后台拉取某个账号的 API Key 列表（面板展开时用）。
     ///
     /// 与弹窗那条路径的区别：结果写进 `account_keys`，供面板卡片内联展示；
@@ -725,6 +761,7 @@ impl TrayApp {
             id.clone(),
             AccountKeysState {
                 loading: true,
+                cached: false,
                 ..AccountKeysState::default()
             },
         );
@@ -765,6 +802,7 @@ impl TrayApp {
                     account_id,
                     AccountKeysState {
                         loading: false,
+                        cached: false,
                         error: Some("拉取 Key 的线程意外退出".to_owned()),
                         keys: Vec::new(),
                     },
@@ -783,15 +821,30 @@ impl TrayApp {
                     self.cache_api_keys(&account_id, &keys);
                     AccountKeysState {
                         loading: false,
+                        cached: false,
                         error: None,
                         keys,
                     }
                 }
-                Err(message) => AccountKeysState {
-                    loading: false,
-                    error: Some(message),
-                    keys: Vec::new(),
-                },
+                Err(message) => {
+                    // 拉取失败时回退到 accounts.json 里的缓存，至少让用户看到上次结果
+                    let cached_keys = self.cached_api_keys(&account_id);
+                    if cached_keys.is_empty() {
+                        AccountKeysState {
+                            loading: false,
+                            cached: false,
+                            error: Some(message),
+                            keys: Vec::new(),
+                        }
+                    } else {
+                        AccountKeysState {
+                            loading: false,
+                            cached: true,
+                            error: Some(format!("{message}（下面是上次的缓存）")),
+                            keys: cached_keys,
+                        }
+                    }
+                }
             };
             self.account_keys.insert(account_id, state);
         }
@@ -841,6 +894,153 @@ impl TrayApp {
             let _ = sender.send(ApiKeysReply::Value { result: reply });
             repaint.request_repaint();
         });
+    }
+
+    /// 打开设置页：把当前配置拷进草稿，改动在点"保存"前不生效。
+    fn open_settings(&mut self) {
+        let DataLayer::Ready(store) = &self.data else {
+            self.toast = Some(("数据目录不可用，无法打开设置".to_owned(), Instant::now()));
+            return;
+        };
+        let config = store.config();
+        self.settings = Some(SettingsDraft {
+            mask_accounts: config.mask_accounts,
+            refresh_interval_seconds: config.refresh_interval_seconds,
+            request_timeout_seconds: config.request_timeout_seconds,
+        });
+    }
+
+    /// 把设置草稿写盘并立即生效（打码会影响菜单与卡片，需要重建）。
+    fn save_settings(&mut self) -> Result<(), String> {
+        let Some(draft) = self.settings.clone() else {
+            return Ok(());
+        };
+        let DataLayer::Ready(store) = &mut self.data else {
+            return Err("数据目录不可用".to_owned());
+        };
+
+        let mut config = store.config().clone();
+        config.mask_accounts = draft.mask_accounts;
+        config.refresh_interval_seconds = draft.refresh_interval_seconds.clamp(30, 86400);
+        config.request_timeout_seconds = draft.request_timeout_seconds.clamp(1, 120);
+
+        crate::config::save(store.dir(), &config)
+            .map_err(|err| format!("保存 app.json 失败：{err:#}"))?;
+        *store.config_mut() = config;
+
+        // 打码开关会影响菜单标题与卡片，立即重建
+        self.rebuild_menu();
+        self.toast = Some(("设置已保存".to_owned(), Instant::now()));
+        Ok(())
+    }
+
+    /// 绘制设置页（打码开关、刷新间隔、请求超时）。
+    fn draw_settings(&mut self, ctx: &egui::Context) {
+        let Some(draft) = self.settings.as_mut() else {
+            return;
+        };
+
+        let mut close = false;
+        let mut save = false;
+
+        let modal = egui::Modal::new(egui::Id::unique("settings-dialog"))
+            .backdrop_color(egui::Color32::from_black_alpha(150))
+            .frame(
+                egui::Frame::new()
+                    .fill(PANEL_BG)
+                    .corner_radius(egui::CornerRadius::same(12))
+                    .stroke(egui::Stroke::new(1.0, PANEL_BORDER))
+                    .inner_margin(egui::Margin::same(16)),
+            )
+            .show(ctx, |ui| {
+                ui.set_width(280.0);
+                ui.horizontal(|ui| {
+                    ui.label(
+                        egui::RichText::new("设置")
+                            .size(fs(14.0))
+                            .strong()
+                            .color(TEXT_PRIMARY),
+                    );
+                });
+                ui.add_space(10.0);
+
+                ui.checkbox(
+                    &mut draft.mask_accounts,
+                    egui::RichText::new("账号名打码显示（只影响界面）").size(fs(12.0)),
+                );
+
+                ui.add_space(8.0);
+                ui.horizontal(|ui| {
+                    ui.label(
+                        egui::RichText::new("状态刷新间隔")
+                            .size(fs(12.0))
+                            .color(TEXT_SECONDARY),
+                    );
+                    ui.add(
+                        egui::DragValue::new(&mut draft.refresh_interval_seconds)
+                            .range(30..=86400)
+                            .speed(10.0),
+                    );
+                    ui.label(egui::RichText::new("秒").size(fs(11.0)).color(TEXT_DIM));
+                });
+
+                ui.add_space(4.0);
+                ui.horizontal(|ui| {
+                    ui.label(
+                        egui::RichText::new("请求超时")
+                            .size(fs(12.0))
+                            .color(TEXT_SECONDARY),
+                    );
+                    ui.add(egui::DragValue::new(&mut draft.request_timeout_seconds).range(1..=120));
+                    ui.label(egui::RichText::new("秒").size(fs(11.0)).color(TEXT_DIM));
+                });
+
+                ui.add_space(8.0);
+                ui.label(
+                    egui::RichText::new("保存后立即生效并写入 app.json。")
+                        .size(fs(10.0))
+                        .color(TEXT_DIM),
+                );
+                ui.add_space(10.0);
+
+                ui.horizontal(|ui| {
+                    let save_button = egui::Button::new(
+                        egui::RichText::new("保存")
+                            .size(fs(12.0))
+                            .strong()
+                            .color(egui::Color32::from_rgb(15, 23, 42)),
+                    )
+                    .fill(ACCENT);
+                    if ui.add_sized([80.0, 26.0], save_button).clicked() {
+                        save = true;
+                    }
+                    if ui
+                        .add_sized(
+                            [80.0, 26.0],
+                            egui::Button::new(egui::RichText::new("取消").size(fs(12.0))),
+                        )
+                        .clicked()
+                    {
+                        close = true;
+                    }
+                });
+            });
+
+        if modal.backdrop_response.clicked() {
+            close = true;
+        }
+
+        if save {
+            match self.save_settings() {
+                Ok(()) => close = true,
+                Err(message) => {
+                    self.toast = Some((message, Instant::now()));
+                }
+            }
+        }
+        if close {
+            self.settings = None;
+        }
     }
 
     /// 绘制 API Key 弹窗。
@@ -1247,7 +1447,10 @@ impl TrayApp {
         if !ctx.input(|input| input.key_pressed(egui::Key::Escape)) {
             return;
         }
-        if self.api_keys.is_some() {
+        if self.settings.is_some() {
+            log::debug!("Esc：关闭设置页");
+            self.settings = None;
+        } else if self.api_keys.is_some() {
             log::debug!("Esc：关闭 API Key 弹窗");
             self.api_keys = None;
         } else if self.pending_delete.is_some() {
@@ -1400,6 +1603,8 @@ impl TrayApp {
         let mut refresh_clicked = false;
         // 被点击要展开/收起的账号 id
         let mut toggle_account: Option<String> = None;
+        // 设置页入口的点击结果
+        let mut open_settings = false;
         // 悬浮动画状态：先取出来，绘制闭包里才能可变借用
         let mut hover = std::mem::take(&mut self.hover);
 
@@ -1419,7 +1624,7 @@ impl TrayApp {
                 egui::Panel::top("panel_header")
                     .frame(egui::Frame::NONE.fill(PANEL_BG))
                     .show(ui, |ui| {
-                        if draw_header(ui, at_limit) {
+                        if draw_header(ui, at_limit, &mut open_settings) {
                             open_login = true;
                         }
 
@@ -1497,6 +1702,13 @@ impl TrayApp {
 
         // ---- 删除确认（从托盘子菜单进入） ----
         self.draw_delete_confirm(ctx);
+
+        if open_settings {
+            self.open_settings();
+        }
+
+        // ---- 设置页 ----
+        self.draw_settings(ctx);
 
         // ---- API Key 弹窗（从托盘子菜单进入，只读 + 复制） ----
         self.draw_api_keys(ctx, &mut hover);
@@ -1730,7 +1942,7 @@ fn fallback_position(monitor: egui::Vec2, size: egui::Vec2) -> (f32, f32) {
 /// 返回 `true` 表示用户点击了「登陆新用户」按钮。
 /// 之所以把按钮放在标题区（面板最顶部），是需求方明确的位置要求：
 /// 登录是这块面板最主要的新增操作，必须第一眼可见。
-fn draw_header(ui: &mut egui::Ui, at_limit: bool) -> bool {
+fn draw_header(ui: &mut egui::Ui, at_limit: bool, open_settings: &mut bool) -> bool {
     ui.horizontal(|ui| {
         ui.label(
             egui::RichText::new("Sub2API 托盘")
@@ -1741,6 +1953,14 @@ fn draw_header(ui: &mut egui::Ui, at_limit: bool) -> bool {
 
         // 版本号靠右显示，弱化处理，避免抢标题的视觉重心
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            // 设置入口：齿轮放在版本号左边
+            if ui
+                .add(egui::Button::new(egui::RichText::new("⚙").size(fs(13.0))).frame(false))
+                .on_hover_text("设置（打码、刷新间隔、超时）")
+                .clicked()
+            {
+                *open_settings = true;
+            }
             ui.label(
                 egui::RichText::new(format!("v{}", crate::APP_VERSION))
                     .size(fs(11.0))
@@ -2051,6 +2271,16 @@ fn draw_account_keys(ui: &mut egui::Ui, card: &AccountCard, hover: &mut HoverSta
                 .size(fs(10.0))
                 .color(egui::Color32::from_rgb(248, 113, 113)),
         );
+        // 离线回退：明确告诉用户这是缓存，数据可能已经变化
+        if state.cached {
+            ui.label(
+                egui::RichText::new("缓存数据 · 可能已过期，联网后会刷新")
+                    .size(fs(9.0))
+                    .color(TEXT_DIM),
+            );
+        }
+    }
+    if state.error.is_some() && !state.cached {
         return;
     }
 
@@ -2072,8 +2302,12 @@ fn draw_account_keys(ui: &mut egui::Ui, card: &AccountCard, hover: &mut HoverSta
         // 文字同时提亮，保证高亮后依然清晰（不再"白底盖字"）。
         let row_frame = egui::Frame::new()
             .fill(lerp_color(egui::Color32::TRANSPARENT, HOVER_CARD_BG, kt))
-            .corner_radius(egui::CornerRadius::same(5))
-            .inner_margin(egui::Margin::symmetric(5, 3))
+            .stroke(egui::Stroke::new(
+                1.0,
+                lerp_color(egui::Color32::TRANSPARENT, ACCENT, kt * 0.7),
+            ))
+            .corner_radius(egui::CornerRadius::same(6))
+            .inner_margin(egui::Margin::symmetric(7, 4))
             .show(ui, |ui| {
                 ui.set_width(ui.available_width());
                 // 第一行：名称 + 打码值（左），订阅名（右）——订阅右置可省掉一整行

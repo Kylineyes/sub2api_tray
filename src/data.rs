@@ -77,6 +77,11 @@ impl DataStore {
     }
 
     /// 生效中的配置。
+    /// 可变配置引用（设置页保存后立即生效，不需要重启面板）。
+    pub fn config_mut(&mut self) -> &mut AppConfig {
+        &mut self.config
+    }
+
     pub fn config(&self) -> &AppConfig {
         &self.config
     }

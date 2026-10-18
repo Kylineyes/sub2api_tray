@@ -137,6 +137,16 @@ impl AppConfig {
 }
 
 /// `app.json` 的完整路径。
+/// 把配置写回 `app.json`（原子写，先写临时文件再改名）。
+///
+/// 设置页保存时调用；写入失败会把错误抛给界面，由它提示用户（例如目录只读）。
+pub fn save(dir: &Path, config: &AppConfig) -> Result<()> {
+    let path = config_path(dir);
+    let mut text = serde_json::to_string_pretty(config).context("序列化 app.json 失败")?;
+    text.push('\n');
+    crate::paths::write_atomic(&path, &text)
+}
+
 pub fn config_path(dir: &Path) -> PathBuf {
     dir.join(paths::APP_CONFIG_FILE_NAME)
 }
