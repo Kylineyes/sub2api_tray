@@ -339,6 +339,9 @@ pub struct TrayApp {
     /// 调试开关：启动后自动展开第一个账号的 Key 明细（仅截图验收用）。
     debug_expand: bool,
 
+    /// 是否已经从 `accounts.json` 恢复过展开状态（只在启动后做一次）。
+    restored_expansion: bool,
+
     /// 设置页草稿（`None` 表示未打开）。
     settings: Option<SettingsDraft>,
 
@@ -425,6 +428,7 @@ impl TrayApp {
             keys_rx: None,
             hover: HoverState::default(),
             debug_expand: std::env::var_os("SUB2API_TRAY_DEBUG_EXPAND").is_some(),
+            restored_expansion: false,
             settings: None,
             copying_key: None,
             copy_rx: None,
@@ -832,6 +836,28 @@ impl TrayApp {
         });
     }
 
+    /// 依次为"已展开但还没拉到 Key"的账号发起拉取（同一时间只跑一个）。
+    ///
+    /// 重启后可能同时有多个账号处于展开状态，而 `keys_rx` 只允许一个在途请求，
+    /// 因此每次请求结束都会再调一次这里，把剩下的补上。
+    fn request_next_keys(&mut self, ctx: &egui::Context) {
+        if self.keys_rx.is_some() {
+            return;
+        }
+        let next = match &self.data {
+            DataLayer::Ready(store) => store
+                .accounts()
+                .iter()
+                .filter(|item| self.expanded_accounts.contains(&item.id))
+                .map(|item| item.id.clone())
+                .find(|id| !self.account_keys.contains_key(id)),
+            DataLayer::Unavailable(_) => None,
+        };
+        if let Some(id) = next {
+            self.request_account_keys(ctx, &id);
+        }
+    }
+
     /// 取一次"面板展开"的 Key 拉取结果。
     fn poll_account_keys(&mut self, ctx: &egui::Context) {
         let Some((account_id, receiver)) = self.keys_rx.as_ref() else {
@@ -894,6 +920,8 @@ impl TrayApp {
             };
             self.account_keys.insert(account_id, state);
         }
+        // 可能还有别的展开账号没拉取，接着来
+        self.request_next_keys(ctx);
         ctx.request_repaint();
     }
 
@@ -1458,6 +1486,10 @@ impl TrayApp {
             }
         }
 
+        // 账号没了，展开状态与 Key 缓存也要一起清掉
+        self.expanded_accounts.remove(id);
+        self.account_keys.remove(id);
+
         self.rebuild_menu();
         self.update_badge();
     }
@@ -1938,16 +1970,24 @@ impl TrayApp {
         }
 
         if let Some(account_id) = toggle_account {
-            if self.expanded_accounts.contains(&account_id) {
-                self.expanded_accounts.remove(&account_id);
-                log::debug!("收起账号 {account_id} 的 API Key");
-            } else {
+            let expanded = !self.expanded_accounts.contains(&account_id);
+            if expanded {
                 self.expanded_accounts.insert(account_id.clone());
                 log::debug!("展开账号 {account_id} 的 API Key");
                 // 没有缓存就拉一次；有缓存则直接用
                 if !self.account_keys.contains_key(&account_id) {
                     self.request_account_keys(ctx, &account_id);
                 }
+            } else {
+                self.expanded_accounts.remove(&account_id);
+                log::debug!("收起账号 {account_id} 的 API Key");
+            }
+
+            // 展开状态要跨重启保留：写进 accounts.json（失败只影响下次启动）
+            if let DataLayer::Ready(store) = &mut self.data
+                && let Err(err) = store.accounts_mut().set_expanded(&account_id, expanded)
+            {
+                log::warn!("保存展开状态失败：{err:#}");
             }
             ctx.request_repaint();
         }
@@ -2087,6 +2127,27 @@ impl eframe::App for TrayApp {
         self.poll_api_keys(ctx);
         self.poll_account_keys(ctx);
 
+        // 启动后恢复上次的展开状态（记录在 accounts.json 的 expanded 字段里）
+        if !self.restored_expansion {
+            self.restored_expansion = true;
+            let stored: Vec<String> = match &self.data {
+                DataLayer::Ready(store) => store
+                    .accounts()
+                    .iter()
+                    .filter(|item| item.expanded)
+                    .map(|item| item.id.clone())
+                    .collect(),
+                DataLayer::Unavailable(_) => Vec::new(),
+            };
+            if !stored.is_empty() {
+                log::debug!("恢复 {} 个账号的展开状态", stored.len());
+                for id in stored {
+                    self.expanded_accounts.insert(id);
+                }
+                self.request_next_keys(ctx);
+            }
+        }
+
         // 调试开关：只做一次，方便自动化截图看到展开态
         if self.debug_expand {
             self.debug_expand = false;
@@ -2097,6 +2158,12 @@ impl eframe::App for TrayApp {
             if let Some(id) = first_id {
                 self.expanded_accounts.insert(id.clone());
                 self.request_account_keys(ctx, &id);
+                // 调试路径也写盘，这样"重启后是否保持展开"也能被自动化验收
+                if let DataLayer::Ready(store) = &mut self.data
+                    && let Err(err) = store.accounts_mut().set_expanded(&id, true)
+                {
+                    log::warn!("保存展开状态失败：{err:#}");
+                }
             }
         }
         self.poll_copy(ctx);

@@ -95,6 +95,12 @@ pub struct Account {
     /// access token 的过期时间；用来决定什么时候主动走恢复链。
     #[serde(default)]
     pub token_expires_at: Option<String>,
+    /// 面板里是否保持展开（Key 明细）状态。
+    ///
+    /// 纯 UI 状态，但需要跨重启保留，所以放进账号记录：删除账号时状态自然一起消失，
+    /// 也不必为一行展示状态单独开文件。
+    #[serde(default)]
+    pub expanded: bool,
     /// 预留：该账号下的 API Key 列表。
     #[serde(default)]
     pub api_keys: Vec<serde_json::Value>,
@@ -115,6 +121,8 @@ impl Account {
             created_at: now_rfc3339(),
             last_login_at: None,
             token_expires_at: None,
+            // 新账号默认收起，登录后不会自动铺开一屏
+            expanded: false,
             api_keys: Vec::new(),
         }
     }
@@ -240,6 +248,25 @@ impl AccountsStore {
             next[index].last_login_at = last_login_at;
         }
 
+        self.persist(&next)?;
+        self.accounts = next;
+        Ok(true)
+    }
+
+    /// 记录某个账号的展开/收起状态（写盘，供下次启动恢复）。
+    ///
+    /// 返回 `false` 表示账号已不存在。失败只影响"下次启动记不记得"，不阻塞交互，
+    /// 因此调用方拿到 `Err` 时记录日志即可。
+    pub fn set_expanded(&mut self, id: &str, expanded: bool) -> Result<bool> {
+        let Some(index) = self.accounts.iter().position(|account| account.id == id) else {
+            return Ok(false);
+        };
+        if self.accounts[index].expanded == expanded {
+            return Ok(true);
+        }
+
+        let mut next = self.accounts.clone();
+        next[index].expanded = expanded;
         self.persist(&next)?;
         self.accounts = next;
         Ok(true)
