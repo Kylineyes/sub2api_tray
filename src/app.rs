@@ -21,7 +21,7 @@ use crate::fonts;
 use crate::login::{LoginDialog, LoginDraft};
 use crate::refresh::{self, RefreshOutcome, RoundResult};
 use crate::state::{AccountStatus, RuntimeTable};
-use crate::tray::{TrayAccountEntry, TrayBridge, TrayCommand, TrayHandle};
+use crate::tray::{TrayBridge, TrayCommand, TrayHandle};
 
 /// 面板逻辑宽度（单位：egui 点；100% 缩放下等于像素）。
 pub const PANEL_WIDTH: f32 = 360.0;
@@ -165,11 +165,6 @@ pub(crate) fn fs(base: f32) -> f32 {
 
 /// 同时允许登录的账号上限（需求方要求：同时最多 10 个）。
 const MAX_ACCOUNTS: usize = 10;
-
-/// 托盘菜单里账号标题的最大字符数。
-///
-/// 邮箱太长会把菜单撑得很难看；超过就截断并加省略号（打码后的邮箱一般不会超）。
-const MENU_TITLE_MAX_CHARS: usize = 24;
 
 /// 面板里一张账号卡片需要的展示数据。
 ///
@@ -451,28 +446,9 @@ impl TrayApp {
     /// `muda` 菜单不能增删项，所以这里是"整份重建"。调用时机：
     /// 启动、登录成功、删除账号、每轮刷新结束、状态标记为"刷新中"。
     fn rebuild_menu(&self) {
-        let entries = match &self.data {
-            DataLayer::Ready(store) => store
-                .accounts()
-                .iter()
-                .map(|account| {
-                    let display = store.display_email(&account.email);
-                    let status = self
-                        .runtime
-                        .get(&account.id)
-                        .map(|runtime| runtime.status)
-                        .unwrap_or_default();
-                    TrayAccountEntry {
-                        id: account.id.clone(),
-                        title: menu_title(&display, status),
-                    }
-                })
-                .collect::<Vec<_>>(),
-            // 数据层不可用时没有账号可展示，菜单只保留固定项
-            DataLayer::Unavailable(_) => Vec::new(),
-        };
-
-        match crate::tray::build_menu(&entries) {
+        // 账号不再进原生菜单（Windows/macOS 的系统菜单既不能滚动也不能展开），
+        // 菜单只保留固定入口；账号的一切操作都在面板里完成。
+        match crate::tray::build_menu() {
             Ok(menu) => self.tray.set_menu(menu),
             Err(err) => log::warn!("重建托盘菜单失败：{err:#}"),
         }
@@ -639,16 +615,6 @@ impl TrayApp {
                     // 菜单入口：先把面板叫出来，再打开弹窗（弹窗画在面板窗口里）
                     self.show_panel(ctx);
                     self.login.open();
-                }
-                TrayCommand::DeleteAccount(id) => {
-                    // 删除要二次确认：先把面板叫出来，再让面板画确认框
-                    log::debug!("收到删除账号请求：{id}");
-                    self.show_panel(ctx);
-                    self.pending_delete = Some(id);
-                }
-                TrayCommand::ShowApiKeys(id) => {
-                    log::debug!("收到查看 API Key 请求：{id}");
-                    self.open_api_keys(ctx, &id);
                 }
                 TrayCommand::Quit => {
                     log::info!("收到退出指令，关闭应用");
@@ -1881,6 +1847,9 @@ impl TrayApp {
         let mut toggle_account: Option<String> = None;
         // 被点击要复制的 (账号 id, Key id)
         let mut copy_request: Option<(String, String)> = None;
+        // 面板内的账号操作：打开 Key 弹窗 / 请求删除
+        let mut open_keys: Option<String> = None;
+        let mut delete_request: Option<String> = None;
         // 设置页入口的点击结果
         let mut open_settings = false;
         // 悬浮动画状态：先取出来，绘制闭包里才能可变借用
@@ -1952,6 +1921,8 @@ impl TrayApp {
                                     &mut toggle_account,
                                     &mut hover,
                                     &mut copy_request,
+                                    &mut open_keys,
+                                    &mut delete_request,
                                 );
                                 ui.add_space(10.0);
                             }
@@ -1972,6 +1943,16 @@ impl TrayApp {
 
         if let Some((account_id, key_id)) = copy_request {
             self.request_copy(ctx, &account_id, &key_id);
+        }
+
+        if let Some(account_id) = open_keys {
+            self.open_api_keys(ctx, &account_id);
+        }
+
+        if let Some(account_id) = delete_request {
+            // 复用已有的二次确认弹窗
+            self.pending_delete = Some(account_id);
+            self.show_panel(ctx);
         }
 
         if let Some(account_id) = toggle_account {
@@ -2377,19 +2358,6 @@ fn draw_login_button(ui: &mut egui::Ui, at_limit: bool) -> bool {
         })
         .clicked()
 }
-/// 生成账号子菜单标题：`打码邮箱 · 状态`，过长时截断。
-///
-/// 截断按字符而不是字节，避免把中文/emoji 邮箱切成半个字。
-fn menu_title(display: &str, status: AccountStatus) -> String {
-    let chars: Vec<char> = display.chars().collect();
-    let short = if chars.len() > MENU_TITLE_MAX_CHARS {
-        let head: String = chars[..MENU_TITLE_MAX_CHARS].iter().collect();
-        format!("{head}…")
-    } else {
-        display.to_owned()
-    };
-    format!("{short} · {}", status.label())
-}
 
 /// 徽标颜色：全部在线（品牌薄荷绿）。
 const BADGE_ONLINE: [u8; 3] = [121, 244, 189];
@@ -2556,6 +2524,8 @@ fn draw_account_card(
     toggle: &mut Option<String>,
     hover: &mut HoverState,
     copy_request: &mut Option<(String, String)>,
+    open_keys: &mut Option<String>,
+    delete_request: &mut Option<String>,
 ) {
     // 悬浮进度：上一帧矩形的命中 + 指数淡入，避免"闪一下"
     let hover_key = format!("acct:{}", card.id);
@@ -2642,6 +2612,19 @@ fn draw_account_card(
 
                 ui.add_space(6.0);
                 ui.separator();
+
+                // 账号操作入口：账号信息不再进原生菜单，全部收在面板里。
+                // 放在 Key 列表之前，展开即可见，不用滚到底部找。
+                ui.horizontal(|ui| {
+                    if ui.small_button("查看 API Key…").clicked() {
+                        *open_keys = Some(card.id.clone());
+                    }
+                    if ui.small_button("退出账号…").clicked() {
+                        *delete_request = Some(card.id.clone());
+                    }
+                });
+                ui.add_space(4.0);
+
                 draw_account_keys(ui, card, hover, copy_request);
             }
         });
@@ -2998,12 +2981,6 @@ mod tests {
     }
 
     #[test]
-    fn 菜单标题带状态且短邮箱不截断() {
-        let title = menu_title("zh***@ex***.com", AccountStatus::Online);
-        assert_eq!(title, "zh***@ex***.com · 在线");
-    }
-
-    #[test]
     fn 徽标聚合规则() {
         // 没有账号：不显示徽标
         assert_eq!(aggregate_badge(0, 0, 0, 0), None);
@@ -3022,20 +2999,6 @@ mod tests {
         assert!(badge_label(BADGE_ONLINE).contains("在线"));
         assert!(badge_label(BADGE_OFFLINE).contains("离线"));
         assert!(badge_label(BADGE_INVALID).contains("凭据损坏"));
-    }
-
-    #[test]
-    fn 菜单标题过长时按字符截断() {
-        let long = "a".repeat(MENU_TITLE_MAX_CHARS + 10);
-        let title = menu_title(&long, AccountStatus::Offline);
-        let head = &title[..title.find(" · ").expect("应包含分隔符")];
-        assert_eq!(
-            head.chars().count(),
-            MENU_TITLE_MAX_CHARS + 1,
-            "截断后应保留 N 个字符加省略号"
-        );
-        assert!(head.ends_with('…'));
-        assert!(title.ends_with(" · 离线"));
     }
 
     #[test]
