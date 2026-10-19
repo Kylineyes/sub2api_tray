@@ -136,13 +136,13 @@ impl UsageRange {
 type UsageReply = (
     String,
     UsageRange,
-    Receiver<Result<Vec<crate::api::UsagePoint>, String>>,
+    Receiver<Result<crate::api::UsageTrend, String>>,
 );
 
 /// 某个账号在某个区间下的用量曲线缓存。
 #[derive(Debug, Clone, Default)]
 struct UsageSeries {
-    /// 服务端返回的时间桶（稀疏）。
+    /// 已按真实时间轴补齐的时间桶（缺失桶为 0）。
     points: Vec<crate::api::UsagePoint>,
     /// 是否正在拉取。
     loading: bool,
@@ -284,7 +284,7 @@ struct AccountCard {
     copied_key: Option<String>,
     /// 当前选中的用量区间。
     usage_range: UsageRange,
-    /// 该区间的用量点（稀疏）。
+    /// 该区间补齐后的用量点。
     usage_points: Vec<crate::api::UsagePoint>,
     /// 用量是否正在拉取。
     usage_loading: bool,
@@ -886,8 +886,13 @@ impl TrayApp {
         let entry = self.usage.entry(key).or_default();
         entry.loading = false;
         match result {
-            Ok(points) => {
-                entry.points = points;
+            Ok(trend) => {
+                let raw_count = trend.points.len();
+                entry.points = crate::api::fill_usage_gaps(&trend);
+                log::debug!(
+                    "用量曲线已补齐：原始 {raw_count} 个时间桶，绘制 {} 个",
+                    entry.points.len()
+                );
                 entry.error = None;
                 entry.fetched_at = Some(Instant::now());
             }
@@ -2741,7 +2746,7 @@ fn draw_usage_section(
 ) {
     ui.horizontal(|ui| {
         ui.label(
-            egui::RichText::new("用量")
+            egui::RichText::new("我的用量")
                 .size(fs(11.0))
                 .strong()
                 .color(TEXT_PRIMARY),
@@ -2790,7 +2795,11 @@ fn draw_usage_section(
         return;
     }
 
-    if card.usage_points.is_empty() {
+    let has_usage = card
+        .usage_points
+        .iter()
+        .any(|point| point.requests != 0 || point.total_tokens != 0 || point.actual_cost != 0.0);
+    if card.usage_points.is_empty() || !has_usage {
         ui.label(
             egui::RichText::new("该区间暂无用量")
                 .size(fs(9.0))
@@ -2814,7 +2823,7 @@ fn draw_usage_section(
         .sum();
     ui.label(
         egui::RichText::new(format!(
-            "合计 {} tokens · {} 次请求 · ${cost:.3}",
+            "本账号合计 {} tokens · {} 次请求 · ${cost:.3}",
             fmt_tokens(total),
             requests
         ))
@@ -2828,15 +2837,23 @@ fn draw_usage_section(
 /// 点数最多 31 个，全部在 CPU 上算完直接交给 painter，
 /// 不引入图表库，也不做逐帧分配（`line` 是每帧临时 Vec，但只有几十个点）。
 fn draw_usage_chart(ui: &mut egui::Ui, points: &[crate::api::UsagePoint]) {
-    let width = ui.available_width().max(40.0);
-    let height = fs(76.0);
-    let (rect, response) = ui.allocate_exact_size(egui::vec2(width, height), egui::Sense::hover());
+    let width = ui.available_width().max(80.0);
+    let axis_height = fs(12.0);
+    let plot_height = fs(72.0);
+    let (rect, response) = ui.allocate_exact_size(
+        egui::vec2(width, plot_height + axis_height),
+        egui::Sense::hover(),
+    );
+    let plot = egui::Rect::from_min_max(
+        rect.min,
+        egui::pos2(rect.right(), rect.bottom() - axis_height),
+    );
     let painter = ui.painter();
 
     for step in 0..=3 {
-        let y = rect.top() + rect.height() * step as f32 / 3.0;
+        let y = plot.top() + plot.height() * step as f32 / 3.0;
         painter.line_segment(
-            [egui::pos2(rect.left(), y), egui::pos2(rect.right(), y)],
+            [egui::pos2(plot.left(), y), egui::pos2(plot.right(), y)],
             egui::Stroke::new(1.0, egui::Color32::from_white_alpha(12)),
         );
     }
@@ -2850,13 +2867,13 @@ fn draw_usage_chart(ui: &mut egui::Ui, points: &[crate::api::UsagePoint]) {
     let count = points.len();
     let x_at = |index: usize| -> f32 {
         if count <= 1 {
-            rect.center().x
+            plot.center().x
         } else {
-            rect.left() + rect.width() * index as f32 / (count - 1) as f32
+            plot.left() + plot.width() * index as f32 / (count - 1) as f32
         }
     };
     let y_at =
-        |value: f32| -> f32 { rect.bottom() - rect.height() * (value / max_value).clamp(0.0, 1.0) };
+        |value: f32| -> f32 { plot.bottom() - plot.height() * (value / max_value).clamp(0.0, 1.0) };
 
     let line: Vec<egui::Pos2> = points
         .iter()
@@ -2865,10 +2882,10 @@ fn draw_usage_chart(ui: &mut egui::Ui, points: &[crate::api::UsagePoint]) {
         .collect();
 
     let mut area = line.clone();
-    let left = line.first().copied().unwrap_or(rect.center());
-    let right = line.last().copied().unwrap_or(rect.center());
-    area.push(egui::pos2(right.x, rect.bottom()));
-    area.push(egui::pos2(left.x, rect.bottom()));
+    let left = line.first().copied().unwrap_or(plot.center());
+    let right = line.last().copied().unwrap_or(plot.center());
+    area.push(egui::pos2(right.x, plot.bottom()));
+    area.push(egui::pos2(left.x, plot.bottom()));
     painter.add(egui::Shape::convex_polygon(
         area,
         egui::Color32::from_rgba_unmultiplied(121, 244, 189, 36),
@@ -2878,17 +2895,21 @@ fn draw_usage_chart(ui: &mut egui::Ui, points: &[crate::api::UsagePoint]) {
         line.clone(),
         egui::Stroke::new(1.8, ACCENT),
     ));
-    for point in &line {
-        painter.circle_filled(*point, 2.0, ACCENT);
+
+    // 只给有数据的时间桶画点，避免补零后的 0 值把曲线压成一排圆点。
+    for (index, point) in points.iter().enumerate() {
+        if point.total_tokens > 0 {
+            painter.circle_filled(line[index], 2.0, ACCENT);
+        }
     }
 
-    if let Some(pointer) = response.hover_pos() {
-        let ratio = ((pointer.x - rect.left()) / rect.width()).clamp(0.0, 1.0);
+    if let Some(pointer) = response.hover_pos().filter(|pos| plot.contains(*pos)) {
+        let ratio = ((pointer.x - plot.left()) / plot.width()).clamp(0.0, 1.0);
         let index = (ratio * (count.max(2) - 1) as f32).round() as usize;
         let index = index.min(count.saturating_sub(1));
         let x = x_at(index);
         painter.line_segment(
-            [egui::pos2(x, rect.top()), egui::pos2(x, rect.bottom())],
+            [egui::pos2(x, plot.top()), egui::pos2(x, plot.bottom())],
             egui::Stroke::new(1.0, egui::Color32::from_white_alpha(70)),
         );
         painter.circle_filled(
@@ -2898,16 +2919,17 @@ fn draw_usage_chart(ui: &mut egui::Ui, points: &[crate::api::UsagePoint]) {
         );
 
         let text = format!(
-            "{}\n{} tokens · {} 次请求",
+            "{}\n{} tokens · {} 次请求 · ${:.3}",
             points[index].label,
             fmt_tokens(points[index].total_tokens),
-            points[index].requests
+            points[index].requests,
+            points[index].actual_cost
         );
         let galley =
             painter.layout_no_wrap(text, egui::FontId::proportional(fs(9.0)), TEXT_PRIMARY);
-        let mut pos = egui::pos2(x + 10.0, rect.top() + 4.0);
-        if pos.x + galley.size().x > rect.right() {
-            pos.x = (x - galley.size().x - 10.0).max(rect.left());
+        let mut pos = egui::pos2(x + 10.0, plot.top() + 4.0);
+        if pos.x + galley.size().x > plot.right() {
+            pos.x = (x - galley.size().x - 10.0).max(plot.left());
         }
         let background = egui::Rect::from_min_size(
             pos - egui::vec2(5.0, 3.0),
@@ -2919,6 +2941,52 @@ fn draw_usage_chart(ui: &mut egui::Ui, points: &[crate::api::UsagePoint]) {
             egui::Color32::from_rgba_unmultiplied(15, 23, 42, 240),
         );
         painter.galley(pos, galley, TEXT_PRIMARY);
+    }
+
+    // 横轴只标首尾两个真实时间桶，空间足够时再补中间点。
+    let axis_font = egui::FontId::proportional(fs(8.0));
+    let first = short_usage_label(&points[0].label);
+    let last = short_usage_label(&points[count.saturating_sub(1)].label);
+    painter.text(
+        egui::pos2(plot.left(), rect.bottom()),
+        egui::Align2::LEFT_BOTTOM,
+        first,
+        axis_font.clone(),
+        TEXT_DIM,
+    );
+    if count > 1 {
+        painter.text(
+            egui::pos2(plot.right(), rect.bottom()),
+            egui::Align2::RIGHT_BOTTOM,
+            last,
+            axis_font.clone(),
+            TEXT_DIM,
+        );
+    }
+    if count > 2 {
+        let middle = short_usage_label(&points[count / 2].label);
+        painter.text(
+            egui::pos2(plot.center().x, rect.bottom()),
+            egui::Align2::CENTER_BOTTOM,
+            middle,
+            axis_font,
+            TEXT_DIM,
+        );
+    }
+}
+
+/// 把服务端时间标签缩短为横轴可读形式。
+///
+/// `2026-10-18 02:00` -> `10-18 02:00`，`2026-10-18` -> `10-18`。
+/// 只处理接口约定的 ASCII 标签；异常格式原样返回。
+fn short_usage_label(label: &str) -> String {
+    let mut parts = label.splitn(2, ' ');
+    let date = parts.next().unwrap_or(label);
+    let time = parts.next();
+    let short_date = date.get(5..).unwrap_or(date);
+    match time {
+        Some(time) => format!("{short_date} {time}"),
+        None => short_date.to_owned(),
     }
 }
 

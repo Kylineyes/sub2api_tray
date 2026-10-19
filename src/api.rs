@@ -509,9 +509,15 @@ fn expires_at_from_now(seconds: i64) -> Option<String> {
 /// 用量曲线接口路径（用户态，范围就是当前登录账号自己）。
 pub const USAGE_TREND_PATH: &str = "/api/v1/usage/dashboard/trend";
 
+/// 用量补零后的最大时间桶数量。
+///
+/// 当前 UI 最多查询 30 天；即使服务端误返回小时粒度，30 天也只有 720 个桶。
+/// 留出余量后仍限制上限，避免异常响应让界面分配过大的向量。
+const MAX_USAGE_BUCKETS: i64 = 2_048;
+
 /// 用量曲线上的一个时间桶。
 ///
-/// 服务端**只返回有数据的桶**（稀疏），客户端要自己接受"点数少于区间长度"。
+/// 服务端只返回有数据的时间桶（稀疏），展示前由 [`fill_usage_gaps`] 补齐。
 #[derive(Debug, Clone, PartialEq)]
 pub struct UsagePoint {
     /// 时间标签：小时粒度是 `2026-10-18 02:00`，天粒度是 `2026-10-18`。
@@ -524,8 +530,25 @@ pub struct UsagePoint {
     pub actual_cost: f64,
 }
 
+/// 用量接口返回的完整趋势数据。
+///
+/// `points` 保留服务端的稀疏时间桶；`start_date` / `end_date` / `granularity`
+/// 用来在客户端补出完整时间轴。老版本服务端缺少这些字段时保留空字符串，
+/// 调用方会退化为"按原始点绘制"。
+#[derive(Debug, Clone, PartialEq)]
+pub struct UsageTrend {
+    /// 服务端返回的稀疏用量点。
+    pub points: Vec<UsagePoint>,
+    /// 查询起始日期，格式 `YYYY-MM-DD`。
+    pub start_date: String,
+    /// 查询结束日期，格式 `YYYY-MM-DD`。
+    pub end_date: String,
+    /// 聚合粒度：`hour` 或 `day`。
+    pub granularity: String,
+}
+
 /// 纯函数：解析 `GET /api/v1/usage/dashboard/trend`。
-pub fn parse_usage_trend(status: u16, body: &str) -> Result<Vec<UsagePoint>, ApiError> {
+pub fn parse_usage_trend(status: u16, body: &str) -> Result<UsageTrend, ApiError> {
     let data = read_data(status, body, RequestKind::Me)?;
     let items = data
         .get("trend")
@@ -533,7 +556,7 @@ pub fn parse_usage_trend(status: u16, body: &str) -> Result<Vec<UsagePoint>, Api
         .cloned()
         .unwrap_or_default();
 
-    Ok(items
+    let points = items
         .iter()
         .map(|item| UsagePoint {
             label: item
@@ -554,7 +577,104 @@ pub fn parse_usage_trend(status: u16, body: &str) -> Result<Vec<UsagePoint>, Api
                 .and_then(|value| value.as_f64())
                 .unwrap_or(0.0),
         })
-        .collect())
+        .collect();
+
+    // 兼容 snake_case 与 camelCase：不同版本后端返回字段名可能不同。
+    let read_text = |names: &[&str]| -> String {
+        names
+            .iter()
+            .find_map(|name| data.get(*name).and_then(|value| value.as_str()))
+            .unwrap_or_default()
+            .to_owned()
+    };
+
+    Ok(UsageTrend {
+        points,
+        start_date: read_text(&["start_date", "startDate"]),
+        end_date: read_text(&["end_date", "endDate"]),
+        granularity: read_text(&["granularity"]),
+    })
+}
+
+/// 纯函数：把稀疏用量点补齐成完整时间轴，缺失桶记为 0。
+///
+/// 服务端只返回有流量的桶。直接按数组下标等距绘制会把相隔数小时甚至数天的
+/// 两个点画成相邻点，历史趋势会被压缩。这里优先使用响应里的
+/// `start_date` / `end_date` / `granularity` 生成完整桶：
+///
+/// * `hour`：范围内每天 00:00 到 23:00，共 24 个桶；
+/// * `day`：范围内每天一个桶；
+/// * 重复标签会合并 requests/total_tokens/actual_cost；
+/// * 日期缺失或非法、粒度未知、桶数异常时，回退为按标签排序后的原始点。
+pub fn fill_usage_gaps(trend: &UsageTrend) -> Vec<UsagePoint> {
+    let merged = merge_usage_points(&trend.points);
+    let fallback = || merged.values().cloned().collect::<Vec<_>>();
+    let format = time::macros::format_description!("[year]-[month]-[day]");
+    let (Ok(start), Ok(end)) = (
+        time::Date::parse(&trend.start_date, &format),
+        time::Date::parse(&trend.end_date, &format),
+    ) else {
+        return fallback();
+    };
+    if start > end {
+        return fallback();
+    }
+
+    let by_hour = match trend.granularity.as_str() {
+        "hour" => true,
+        "day" => false,
+        _ => return fallback(),
+    };
+    let days = (end - start).whole_days() + 1;
+    let bucket_count = if by_hour { days * 24 } else { days };
+    if bucket_count <= 0 || bucket_count > MAX_USAGE_BUCKETS {
+        return fallback();
+    }
+
+    let mut filled = Vec::with_capacity(bucket_count as usize);
+    let mut day = start;
+    while day <= end {
+        let date_label = day.format(&format).unwrap_or_default();
+        if by_hour {
+            for hour in 0..24 {
+                let label = format!("{date_label} {hour:02}:00");
+                filled.push(merged.get(&label).cloned().unwrap_or(UsagePoint {
+                    label,
+                    requests: 0,
+                    total_tokens: 0,
+                    actual_cost: 0.0,
+                }));
+            }
+        } else {
+            filled.push(merged.get(&date_label).cloned().unwrap_or(UsagePoint {
+                label: date_label,
+                requests: 0,
+                total_tokens: 0,
+                actual_cost: 0.0,
+            }));
+        }
+        day += time::Duration::days(1);
+    }
+    filled
+}
+
+/// 把同一时间标签的重复桶合并，并保持标签顺序。
+fn merge_usage_points(points: &[UsagePoint]) -> std::collections::BTreeMap<String, UsagePoint> {
+    let mut merged = std::collections::BTreeMap::new();
+    for point in points {
+        if point.label.is_empty() {
+            continue;
+        }
+        merged
+            .entry(point.label.clone())
+            .and_modify(|entry: &mut UsagePoint| {
+                entry.requests += point.requests;
+                entry.total_tokens += point.total_tokens;
+                entry.actual_cost += point.actual_cost;
+            })
+            .or_insert_with(|| point.clone());
+    }
+    merged
 }
 
 /// 纯函数：解析 `GET /api/v1/keys` 的列表。
@@ -743,7 +863,7 @@ impl HttpClient {
         start: &str,
         end: &str,
         granularity: &str,
-    ) -> Result<Vec<UsagePoint>, ApiError> {
+    ) -> Result<UsageTrend, ApiError> {
         let url = format!(
             "{}{USAGE_TREND_PATH}?start_date={start}&end_date={end}&granularity={granularity}",
             self.base_url
@@ -1169,22 +1289,127 @@ mod tests {
     }
 
     #[test]
-    fn 解析用量曲线并接受稀疏点() {
+    fn 解析用量曲线并保留时间范围与粒度() {
         let body = r#"{"code":0,"message":"success","data":{"trend":[
             {"date":"2026-10-18 02:00","requests":1,"total_tokens":1660,"actual_cost":0.0268},
             {"date":"2026-10-18 05:00","requests":3,"total_tokens":900,"actual_cost":0.01}
-        ],"granularity":"hour"}}"#;
-        let points = parse_usage_trend(200, body).expect("解析成功");
-        assert_eq!(points.len(), 2, "稀疏点应原样保留");
-        assert_eq!(points[0].label, "2026-10-18 02:00");
-        assert_eq!(points[0].total_tokens, 1660);
-        assert_eq!(points[1].requests, 3);
+        ],"start_date":"2026-10-17","end_date":"2026-10-18","granularity":"hour"}}"#;
+        let trend = parse_usage_trend(200, body).expect("解析成功");
+        assert_eq!(trend.points.len(), 2, "稀疏点应原样保留");
+        assert_eq!(trend.points[0].label, "2026-10-18 02:00");
+        assert_eq!(trend.points[0].total_tokens, 1660);
+        assert_eq!(trend.points[1].requests, 3);
+        assert_eq!(trend.start_date, "2026-10-17");
+        assert_eq!(trend.end_date, "2026-10-18");
+        assert_eq!(trend.granularity, "hour");
     }
 
     #[test]
-    fn 用量曲线为空时返回空数组() {
-        let body = r#"{"code":0,"message":"success","data":{"trend":[],"granularity":"day"}}"#;
-        let points = parse_usage_trend(200, body).expect("解析成功");
-        assert!(points.is_empty());
+    fn 按小时补齐缺失时间桶() {
+        let trend = UsageTrend {
+            points: vec![
+                UsagePoint {
+                    label: "2026-10-18 02:00".to_owned(),
+                    requests: 1,
+                    total_tokens: 1660,
+                    actual_cost: 0.0268,
+                },
+                UsagePoint {
+                    label: "2026-10-18 05:00".to_owned(),
+                    requests: 3,
+                    total_tokens: 900,
+                    actual_cost: 0.01,
+                },
+            ],
+            start_date: "2026-10-18".to_owned(),
+            end_date: "2026-10-18".to_owned(),
+            granularity: "hour".to_owned(),
+        };
+
+        let filled = fill_usage_gaps(&trend);
+        assert_eq!(filled.len(), 24, "一天应有 24 个小时桶");
+        assert_eq!(filled[2].total_tokens, 1660);
+        assert_eq!(filled[5].requests, 3);
+        assert_eq!(filled[3].total_tokens, 0, "缺失小时必须补零");
+        assert_eq!(filled[4].total_tokens, 0);
+    }
+
+    #[test]
+    fn 按天补齐并合并重复与乱序时间桶() {
+        let trend = UsageTrend {
+            points: vec![
+                UsagePoint {
+                    label: "2026-10-19".to_owned(),
+                    requests: 2,
+                    total_tokens: 200,
+                    actual_cost: 0.02,
+                },
+                UsagePoint {
+                    label: "2026-10-17".to_owned(),
+                    requests: 1,
+                    total_tokens: 100,
+                    actual_cost: 0.01,
+                },
+                UsagePoint {
+                    label: "2026-10-19".to_owned(),
+                    requests: 3,
+                    total_tokens: 300,
+                    actual_cost: 0.03,
+                },
+            ],
+            start_date: "2026-10-17".to_owned(),
+            end_date: "2026-10-19".to_owned(),
+            granularity: "day".to_owned(),
+        };
+
+        let filled = fill_usage_gaps(&trend);
+        assert_eq!(filled.len(), 3);
+        assert_eq!(filled[0].label, "2026-10-17");
+        assert_eq!(filled[1].label, "2026-10-18");
+        assert_eq!(filled[1].total_tokens, 0, "中间缺失日期必须补零");
+        assert_eq!(filled[2].label, "2026-10-19");
+        assert_eq!(filled[2].requests, 5, "重复桶应合并");
+        assert_eq!(filled[2].total_tokens, 500);
+    }
+
+    #[test]
+    fn 空趋势在已知范围时补成零值时间轴() {
+        let trend = UsageTrend {
+            points: Vec::new(),
+            start_date: "2026-10-18".to_owned(),
+            end_date: "2026-10-18".to_owned(),
+            granularity: "day".to_owned(),
+        };
+        let filled = fill_usage_gaps(&trend);
+        assert_eq!(filled.len(), 1);
+        assert_eq!(filled[0].label, "2026-10-18");
+        assert_eq!(filled[0].total_tokens, 0);
+    }
+
+    #[test]
+    fn 日期非法时回退为排序后的原始点() {
+        let trend = UsageTrend {
+            points: vec![
+                UsagePoint {
+                    label: "b".to_owned(),
+                    requests: 2,
+                    total_tokens: 2,
+                    actual_cost: 0.0,
+                },
+                UsagePoint {
+                    label: "a".to_owned(),
+                    requests: 1,
+                    total_tokens: 1,
+                    actual_cost: 0.0,
+                },
+            ],
+            start_date: "not-a-date".to_owned(),
+            end_date: String::new(),
+            granularity: "day".to_owned(),
+        };
+        let filled = fill_usage_gaps(&trend);
+        assert_eq!(filled.len(), 2);
+        assert_eq!(filled[0].label, "a");
+        assert_eq!(filled[1].label, "b");
     }
 }
