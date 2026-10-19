@@ -524,10 +524,35 @@ pub struct UsagePoint {
     pub label: String,
     /// 该时间桶的请求数。
     pub requests: i64,
+    /// 输入 token 数。
+    pub input_tokens: i64,
+    /// 输出 token 数。
+    pub output_tokens: i64,
+    /// Cache 写入 token 数。
+    pub cache_creation_tokens: i64,
+    /// Cache 读取 token 数。
+    pub cache_read_tokens: i64,
     /// 该时间桶消耗的总 token 数。
     pub total_tokens: i64,
+    /// 标准计费（美元）。
+    pub cost: f64,
     /// 实际扣费（美元）。
     pub actual_cost: f64,
+}
+
+impl UsagePoint {
+    /// 按网页端一致的口径计算 Cache 命中率百分比。
+    ///
+    /// 分母是全部 prompt token：输入 + Cache 写入 + Cache 读取。
+    /// 没有 prompt token 时返回 0，避免除零。
+    pub fn cache_hit_rate_percent(&self) -> f64 {
+        let denominator = self.input_tokens + self.cache_creation_tokens + self.cache_read_tokens;
+        if denominator <= 0 {
+            0.0
+        } else {
+            self.cache_read_tokens as f64 / denominator as f64 * 100.0
+        }
+    }
 }
 
 /// 用量接口返回的完整趋势数据。
@@ -545,6 +570,27 @@ pub struct UsageTrend {
     pub end_date: String,
     /// 聚合粒度：`hour` 或 `day`。
     pub granularity: String,
+}
+
+/// 拼接用量趋势请求地址。
+///
+/// 把 URL 构造拆成纯函数，方便单测确认 `api_key_id` 只在选择单个 Key 时出现；
+/// Key id 来自服务端数字 id，不需要再做 URL 编码。
+fn usage_trend_url(
+    base_url: &str,
+    start: &str,
+    end: &str,
+    granularity: &str,
+    api_key_id: Option<&str>,
+) -> String {
+    let mut url = format!(
+        "{base_url}{USAGE_TREND_PATH}?start_date={start}&end_date={end}&granularity={granularity}"
+    );
+    if let Some(api_key_id) = api_key_id {
+        url.push_str("&api_key_id=");
+        url.push_str(api_key_id);
+    }
+    url
 }
 
 /// 纯函数：解析 `GET /api/v1/usage/dashboard/trend`。
@@ -568,10 +614,30 @@ pub fn parse_usage_trend(status: u16, body: &str) -> Result<UsageTrend, ApiError
                 .get("requests")
                 .and_then(|value| value.as_i64())
                 .unwrap_or(0),
+            input_tokens: item
+                .get("input_tokens")
+                .and_then(|value| value.as_i64())
+                .unwrap_or(0),
+            output_tokens: item
+                .get("output_tokens")
+                .and_then(|value| value.as_i64())
+                .unwrap_or(0),
+            cache_creation_tokens: item
+                .get("cache_creation_tokens")
+                .and_then(|value| value.as_i64())
+                .unwrap_or(0),
+            cache_read_tokens: item
+                .get("cache_read_tokens")
+                .and_then(|value| value.as_i64())
+                .unwrap_or(0),
             total_tokens: item
                 .get("total_tokens")
                 .and_then(|value| value.as_i64())
                 .unwrap_or(0),
+            cost: item
+                .get("cost")
+                .and_then(|value| value.as_f64())
+                .unwrap_or(0.0),
             actual_cost: item
                 .get("actual_cost")
                 .and_then(|value| value.as_f64())
@@ -641,7 +707,12 @@ pub fn fill_usage_gaps(trend: &UsageTrend) -> Vec<UsagePoint> {
                 filled.push(merged.get(&label).cloned().unwrap_or(UsagePoint {
                     label,
                     requests: 0,
+                    input_tokens: 0,
+                    output_tokens: 0,
+                    cache_creation_tokens: 0,
+                    cache_read_tokens: 0,
                     total_tokens: 0,
+                    cost: 0.0,
                     actual_cost: 0.0,
                 }));
             }
@@ -649,7 +720,12 @@ pub fn fill_usage_gaps(trend: &UsageTrend) -> Vec<UsagePoint> {
             filled.push(merged.get(&date_label).cloned().unwrap_or(UsagePoint {
                 label: date_label,
                 requests: 0,
+                input_tokens: 0,
+                output_tokens: 0,
+                cache_creation_tokens: 0,
+                cache_read_tokens: 0,
                 total_tokens: 0,
+                cost: 0.0,
                 actual_cost: 0.0,
             }));
         }
@@ -669,7 +745,12 @@ fn merge_usage_points(points: &[UsagePoint]) -> std::collections::BTreeMap<Strin
             .entry(point.label.clone())
             .and_modify(|entry: &mut UsagePoint| {
                 entry.requests += point.requests;
+                entry.input_tokens += point.input_tokens;
+                entry.output_tokens += point.output_tokens;
+                entry.cache_creation_tokens += point.cache_creation_tokens;
+                entry.cache_read_tokens += point.cache_read_tokens;
                 entry.total_tokens += point.total_tokens;
+                entry.cost += point.cost;
                 entry.actual_cost += point.actual_cost;
             })
             .or_insert_with(|| point.clone());
@@ -863,10 +944,16 @@ impl HttpClient {
         start: &str,
         end: &str,
         granularity: &str,
+        api_key_id: Option<&str>,
     ) -> Result<UsageTrend, ApiError> {
-        let url = format!(
-            "{}{USAGE_TREND_PATH}?start_date={start}&end_date={end}&granularity={granularity}",
-            self.base_url
+        // 用户态接口会校验 Key 是否属于当前登录账号，因此只能在已登录账号的
+        // access token 下附带该过滤条件，不能跨账号查询。
+        let url = usage_trend_url(
+            &self.base_url,
+            start,
+            end,
+            granularity,
+            api_key_id.filter(|value| !value.is_empty()),
         );
         let (status, text) = self.get_json(&url, access_token)?;
         parse_usage_trend(status, &text)
@@ -1288,38 +1375,85 @@ mod tests {
         )
     }
 
+    /// 构造测试用量点，total_tokens 自动按后端口径求和。
+    fn usage_point(
+        label: &str,
+        requests: i64,
+        input_tokens: i64,
+        output_tokens: i64,
+        cache_creation_tokens: i64,
+        cache_read_tokens: i64,
+        actual_cost: f64,
+    ) -> UsagePoint {
+        UsagePoint {
+            label: label.to_owned(),
+            requests,
+            input_tokens,
+            output_tokens,
+            cache_creation_tokens,
+            cache_read_tokens,
+            total_tokens: input_tokens + output_tokens + cache_creation_tokens + cache_read_tokens,
+            cost: actual_cost,
+            actual_cost,
+        }
+    }
+
     #[test]
-    fn 解析用量曲线并保留时间范围与粒度() {
+    fn 解析用量曲线并保留完整指标() {
         let body = r#"{"code":0,"message":"success","data":{"trend":[
-            {"date":"2026-10-18 02:00","requests":1,"total_tokens":1660,"actual_cost":0.0268},
-            {"date":"2026-10-18 05:00","requests":3,"total_tokens":900,"actual_cost":0.01}
+            {"date":"2026-10-18 02:00","requests":1,"input_tokens":500,"output_tokens":100,
+             "cache_creation_tokens":200,"cache_read_tokens":1200,"total_tokens":2000,
+             "cost":0.03,"actual_cost":0.0268},
+            {"date":"2026-10-18 05:00","requests":3,"input_tokens":300,"output_tokens":100,
+             "cache_creation_tokens":0,"cache_read_tokens":500,"total_tokens":900,
+             "cost":0.02,"actual_cost":0.01}
         ],"start_date":"2026-10-17","end_date":"2026-10-18","granularity":"hour"}}"#;
         let trend = parse_usage_trend(200, body).expect("解析成功");
         assert_eq!(trend.points.len(), 2, "稀疏点应原样保留");
         assert_eq!(trend.points[0].label, "2026-10-18 02:00");
-        assert_eq!(trend.points[0].total_tokens, 1660);
+        assert_eq!(trend.points[0].input_tokens, 500);
+        assert_eq!(trend.points[0].cache_read_tokens, 1200);
+        assert_eq!(trend.points[0].total_tokens, 2000);
         assert_eq!(trend.points[1].requests, 3);
         assert_eq!(trend.start_date, "2026-10-17");
         assert_eq!(trend.end_date, "2026-10-18");
         assert_eq!(trend.granularity, "hour");
+        assert!((trend.points[0].cache_hit_rate_percent() - 63.157_894).abs() < 0.001);
+    }
+
+    #[test]
+    fn 分key查询只附带选中的api_key_id() {
+        let all = usage_trend_url(
+            "https://sub2api.example.com",
+            "2026-10-18",
+            "2026-10-19",
+            "hour",
+            None,
+        );
+        assert!(
+            !all.contains("api_key_id"),
+            "全部 Key 不应带过滤参数：{all}"
+        );
+
+        let one = usage_trend_url(
+            "https://sub2api.example.com",
+            "2026-10-18",
+            "2026-10-19",
+            "hour",
+            Some("42"),
+        );
+        assert!(
+            one.contains("api_key_id=42"),
+            "单 Key 请求应带过滤参数：{one}"
+        );
     }
 
     #[test]
     fn 按小时补齐缺失时间桶() {
         let trend = UsageTrend {
             points: vec![
-                UsagePoint {
-                    label: "2026-10-18 02:00".to_owned(),
-                    requests: 1,
-                    total_tokens: 1660,
-                    actual_cost: 0.0268,
-                },
-                UsagePoint {
-                    label: "2026-10-18 05:00".to_owned(),
-                    requests: 3,
-                    total_tokens: 900,
-                    actual_cost: 0.01,
-                },
+                usage_point("2026-10-18 02:00", 1, 500, 100, 200, 1200, 0.0268),
+                usage_point("2026-10-18 05:00", 3, 300, 100, 0, 500, 0.01),
             ],
             start_date: "2026-10-18".to_owned(),
             end_date: "2026-10-18".to_owned(),
@@ -1328,34 +1462,19 @@ mod tests {
 
         let filled = fill_usage_gaps(&trend);
         assert_eq!(filled.len(), 24, "一天应有 24 个小时桶");
-        assert_eq!(filled[2].total_tokens, 1660);
+        assert_eq!(filled[2].total_tokens, 2000);
         assert_eq!(filled[5].requests, 3);
         assert_eq!(filled[3].total_tokens, 0, "缺失小时必须补零");
-        assert_eq!(filled[4].total_tokens, 0);
+        assert_eq!(filled[4].input_tokens, 0);
     }
 
     #[test]
     fn 按天补齐并合并重复与乱序时间桶() {
         let trend = UsageTrend {
             points: vec![
-                UsagePoint {
-                    label: "2026-10-19".to_owned(),
-                    requests: 2,
-                    total_tokens: 200,
-                    actual_cost: 0.02,
-                },
-                UsagePoint {
-                    label: "2026-10-17".to_owned(),
-                    requests: 1,
-                    total_tokens: 100,
-                    actual_cost: 0.01,
-                },
-                UsagePoint {
-                    label: "2026-10-19".to_owned(),
-                    requests: 3,
-                    total_tokens: 300,
-                    actual_cost: 0.03,
-                },
+                usage_point("2026-10-19", 2, 100, 50, 0, 50, 0.02),
+                usage_point("2026-10-17", 1, 50, 20, 10, 20, 0.01),
+                usage_point("2026-10-19", 3, 150, 70, 30, 50, 0.03),
             ],
             start_date: "2026-10-17".to_owned(),
             end_date: "2026-10-19".to_owned(),
@@ -1369,6 +1488,10 @@ mod tests {
         assert_eq!(filled[1].total_tokens, 0, "中间缺失日期必须补零");
         assert_eq!(filled[2].label, "2026-10-19");
         assert_eq!(filled[2].requests, 5, "重复桶应合并");
+        assert_eq!(filled[2].input_tokens, 250);
+        assert_eq!(filled[2].output_tokens, 120);
+        assert_eq!(filled[2].cache_creation_tokens, 30);
+        assert_eq!(filled[2].cache_read_tokens, 100);
         assert_eq!(filled[2].total_tokens, 500);
     }
 
@@ -1384,24 +1507,15 @@ mod tests {
         assert_eq!(filled.len(), 1);
         assert_eq!(filled[0].label, "2026-10-18");
         assert_eq!(filled[0].total_tokens, 0);
+        assert_eq!(filled[0].cache_hit_rate_percent(), 0.0);
     }
 
     #[test]
     fn 日期非法时回退为排序后的原始点() {
         let trend = UsageTrend {
             points: vec![
-                UsagePoint {
-                    label: "b".to_owned(),
-                    requests: 2,
-                    total_tokens: 2,
-                    actual_cost: 0.0,
-                },
-                UsagePoint {
-                    label: "a".to_owned(),
-                    requests: 1,
-                    total_tokens: 1,
-                    actual_cost: 0.0,
-                },
+                usage_point("b", 2, 2, 0, 0, 0, 0.0),
+                usage_point("a", 1, 1, 0, 0, 0, 0.0),
             ],
             start_date: "not-a-date".to_owned(),
             end_date: String::new(),
@@ -1411,5 +1525,17 @@ mod tests {
         assert_eq!(filled.len(), 2);
         assert_eq!(filled[0].label, "a");
         assert_eq!(filled[1].label, "b");
+    }
+
+    #[test]
+    fn 命中率按网页端口径计算() {
+        let point = usage_point("2026-10-18", 1, 500, 100, 0, 1500, 0.01);
+        assert!((point.cache_hit_rate_percent() - 75.0).abs() < f64::EPSILON);
+
+        let anthropic = usage_point("2026-10-18", 1, 200, 50, 300, 500, 0.01);
+        assert!((anthropic.cache_hit_rate_percent() - 50.0).abs() < f64::EPSILON);
+
+        let empty = usage_point("2026-10-18", 0, 0, 0, 0, 0, 0.0);
+        assert_eq!(empty.cache_hit_rate_percent(), 0.0);
     }
 }

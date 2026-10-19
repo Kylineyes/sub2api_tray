@@ -132,10 +132,141 @@ impl UsageRange {
     }
 }
 
-/// 用量拉取结果：`(账号 id, 区间, 点集或错误文案)`。
+/// 用量曲线的纵轴指标。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum UsageMetric {
+    /// 输入 + 输出 + Cache 写读的总 token。
+    Total,
+    /// 输入 token。
+    Input,
+    /// 输出 token。
+    Output,
+    /// Cache 命中率（0 到 100）。
+    CacheHitRate,
+}
+
+impl UsageMetric {
+    /// 指标切换按钮的排列顺序。
+    const ALL: [UsageMetric; 4] = [
+        UsageMetric::Total,
+        UsageMetric::Input,
+        UsageMetric::Output,
+        UsageMetric::CacheHitRate,
+    ];
+
+    /// 按钮标签。
+    fn label(self) -> &'static str {
+        match self {
+            UsageMetric::Total => "总 Token",
+            UsageMetric::Input => "输入",
+            UsageMetric::Output => "输出",
+            UsageMetric::CacheHitRate => "命中率",
+        }
+    }
+
+    /// 某个时间桶在该指标上的纵轴值。
+    fn value(self, point: &crate::api::UsagePoint) -> f64 {
+        match self {
+            UsageMetric::Total => point.total_tokens as f64,
+            UsageMetric::Input => point.input_tokens as f64,
+            UsageMetric::Output => point.output_tokens as f64,
+            UsageMetric::CacheHitRate => point.cache_hit_rate_percent(),
+        }
+    }
+
+    /// 把指标值格式化成适合悬浮提示/摘要的文字。
+    fn format(self, value: f64) -> String {
+        match self {
+            UsageMetric::CacheHitRate => format!("{value:.1}%"),
+            UsageMetric::Total | UsageMetric::Input | UsageMetric::Output => {
+                fmt_tokens(value.round() as i64)
+            }
+        }
+    }
+
+    /// 该指标的纵轴上限。命中率固定 0 到 100，其余按数据最大值。
+    fn axis_max(self, points: &[crate::api::UsagePoint]) -> f32 {
+        match self {
+            UsageMetric::CacheHitRate => 100.0,
+            _ => points
+                .iter()
+                .map(|point| self.value(point))
+                .fold(0.0_f64, f64::max)
+                .max(1.0) as f32,
+        }
+    }
+}
+
+/// 用量缓存键：账号 id + 区间 + 选中的 API Key（`None` 表示全部 Key）。
+type UsageCacheKey = (String, UsageRange, Option<String>);
+
+/// 绘制阶段收集的用量区交互，交给 `logic()` 统一处理。
+#[derive(Debug, Default)]
+struct UsageUiActions {
+    /// 切换时间区间。
+    range: Option<(String, UsageRange)>,
+    /// 切换 API Key；第二个元素为 `None` 表示全部 Key。
+    api_key: Option<(String, Option<String>)>,
+    /// 切换图表指标。
+    metric: Option<(String, UsageMetric)>,
+    /// 展开/收起整个用量区。
+    toggle_collapse: Option<String>,
+}
+
+/// 用量区汇总指标。
+#[derive(Debug, Clone, Copy, Default)]
+struct UsageTotals {
+    /// 请求总数。
+    requests: i64,
+    /// 输入 token 总数。
+    input_tokens: i64,
+    /// 输出 token 总数。
+    output_tokens: i64,
+    /// Cache 写入 token 总数。
+    cache_creation_tokens: i64,
+    /// Cache 读取 token 总数。
+    cache_read_tokens: i64,
+    /// 总 token 数。
+    total_tokens: i64,
+    /// 标准计费。
+    cost: f64,
+    /// 实际花费。
+    actual_cost: f64,
+}
+
+impl UsageTotals {
+    /// 汇总一组时间桶。
+    fn from_points(points: &[crate::api::UsagePoint]) -> Self {
+        let mut totals = Self::default();
+        for point in points {
+            totals.requests += point.requests;
+            totals.input_tokens += point.input_tokens;
+            totals.output_tokens += point.output_tokens;
+            totals.cache_creation_tokens += point.cache_creation_tokens;
+            totals.cache_read_tokens += point.cache_read_tokens;
+            totals.total_tokens += point.total_tokens;
+            totals.cost += point.cost;
+            totals.actual_cost += point.actual_cost;
+        }
+        totals
+    }
+
+    /// 与网页端一致的 Cache 命中率百分比。
+    fn cache_hit_rate_percent(&self) -> f64 {
+        let denominator = self.input_tokens + self.cache_creation_tokens + self.cache_read_tokens;
+        if denominator <= 0 {
+            0.0
+        } else {
+            self.cache_read_tokens as f64 / denominator as f64 * 100.0
+        }
+    }
+}
+
+/// 用量拉取结果：账号 id、区间、API Key、结果通道。
 type UsageReply = (
     String,
     UsageRange,
+    Option<String>,
     Receiver<Result<crate::api::UsageTrend, String>>,
 );
 
@@ -284,7 +415,13 @@ struct AccountCard {
     copied_key: Option<String>,
     /// 当前选中的用量区间。
     usage_range: UsageRange,
-    /// 该区间补齐后的用量点。
+    /// 当前选中的图表指标。
+    usage_metric: UsageMetric,
+    /// 当前选中的 API Key；`None` 表示全部 Key。
+    usage_api_key_id: Option<String>,
+    /// 用量区是否被用户单独收起。
+    usage_collapsed: bool,
+    /// 当前选择下补齐后的用量点。
     usage_points: Vec<crate::api::UsagePoint>,
     /// 用量是否正在拉取。
     usage_loading: bool,
@@ -406,8 +543,17 @@ pub struct TrayApp {
     /// 每个账号选中的用量区间（默认 24 小时）。
     usage_range: HashMap<String, UsageRange>,
 
-    /// 用量曲线缓存：`(账号 id, 区间)` → 曲线。
-    usage: HashMap<(String, UsageRange), UsageSeries>,
+    /// 每个账号选中的用量图表指标（默认总 Token）。
+    usage_metric: HashMap<String, UsageMetric>,
+
+    /// 每个账号选中的用量 API Key（没有记录表示全部 Key）。
+    usage_api_key: HashMap<String, String>,
+
+    /// 用户单独收起用量区的账号 id（只影响用量区，不影响账号展开）。
+    usage_collapsed: HashSet<String>,
+
+    /// 用量曲线缓存：账号 + 区间 + API Key → 曲线。
+    usage: HashMap<UsageCacheKey, UsageSeries>,
 
     /// 进行中的用量拉取（同一时间只允许一个）。
     usage_rx: Option<UsageReply>,
@@ -520,6 +666,9 @@ impl TrayApp {
             keys_rx: None,
             pinned,
             usage_range: HashMap::new(),
+            usage_metric: HashMap::new(),
+            usage_api_key: HashMap::new(),
+            usage_collapsed: HashSet::new(),
             usage: HashMap::new(),
             usage_rx: None,
             hover: HoverState::default(),
@@ -665,6 +814,13 @@ impl TrayApp {
                     .map(|at| format!("{} 秒前刷新", at.elapsed().as_secs()))
                     .unwrap_or_else(|| "尚未刷新".to_owned());
 
+                let usage_range = self.usage_range_of(&account.id);
+                let usage_metric = self.usage_metric_of(&account.id);
+                let usage_api_key_id = self.usage_api_key_of(&account.id);
+                let usage_series =
+                    self.usage
+                        .get(&(account.id.clone(), usage_range, usage_api_key_id.clone()));
+
                 AccountCard {
                     id: account.id.clone(),
                     display: store.display_email(&account.email),
@@ -681,21 +837,15 @@ impl TrayApp {
                         .and_then(|item| item.summary.as_ref())
                         .map(|item| item.group_names.join("、"))
                         .filter(|names| !names.is_empty()),
-                    usage_range: self.usage_range_of(&account.id),
-                    usage_points: self
-                        .usage
-                        .get(&(account.id.clone(), self.usage_range_of(&account.id)))
+                    usage_range,
+                    usage_metric,
+                    usage_api_key_id,
+                    usage_collapsed: self.usage_collapsed.contains(&account.id),
+                    usage_points: usage_series
                         .map(|series| series.points.clone())
                         .unwrap_or_default(),
-                    usage_loading: self
-                        .usage
-                        .get(&(account.id.clone(), self.usage_range_of(&account.id)))
-                        .map(|series| series.loading)
-                        .unwrap_or(false),
-                    usage_error: self
-                        .usage
-                        .get(&(account.id.clone(), self.usage_range_of(&account.id)))
-                        .and_then(|series| series.error.clone()),
+                    usage_loading: usage_series.map(|series| series.loading).unwrap_or(false),
+                    usage_error: usage_series.and_then(|series| series.error.clone()),
                     copied_key: self
                         .copy_notice
                         .as_ref()
@@ -825,6 +975,19 @@ impl TrayApp {
             .unwrap_or(UsageRange::Day)
     }
 
+    /// 账号当前选中的用量图表指标（默认总 Token）。
+    fn usage_metric_of(&self, account_id: &str) -> UsageMetric {
+        self.usage_metric
+            .get(account_id)
+            .copied()
+            .unwrap_or(UsageMetric::Total)
+    }
+
+    /// 账号当前选中的 API Key；`None` 表示全部 Key 汇总。
+    fn usage_api_key_of(&self, account_id: &str) -> Option<String> {
+        self.usage_api_key.get(account_id).cloned()
+    }
+
     /// 切换某个账号的用量区间，并立刻确保有数据。
     fn set_usage_range(&mut self, ctx: &egui::Context, account_id: &str, range: UsageRange) {
         self.usage_range.insert(account_id.to_owned(), range);
@@ -832,8 +995,42 @@ impl TrayApp {
         ctx.request_repaint();
     }
 
-    /// 后台拉取某账号某区间的用量曲线。
-    fn request_usage(&mut self, ctx: &egui::Context, account_id: &str, range: UsageRange) {
+    /// 切换某个账号的用量图表指标；不重新请求接口。
+    fn set_usage_metric(&mut self, ctx: &egui::Context, account_id: &str, metric: UsageMetric) {
+        self.usage_metric.insert(account_id.to_owned(), metric);
+        ctx.request_repaint();
+    }
+
+    /// 切换某个账号的用量 API Key；`None` 表示回到全部 Key。
+    fn set_usage_api_key(
+        &mut self,
+        ctx: &egui::Context,
+        account_id: &str,
+        api_key_id: Option<String>,
+    ) {
+        match api_key_id {
+            Some(id) => {
+                self.usage_api_key.insert(account_id.to_owned(), id);
+            }
+            None => {
+                self.usage_api_key.remove(account_id);
+            }
+        }
+        self.maybe_request_usage(ctx);
+        ctx.request_repaint();
+    }
+
+    /// 后台拉取某账号某区间、可选用量 API Key 的曲线。
+    ///
+    /// 这里不判断账号角色：接口是用户态 `/usage/dashboard/trend`，
+    /// 任何已登录用户都只能拿到自己的数据；管理员也使用同一路径。
+    fn request_usage(
+        &mut self,
+        ctx: &egui::Context,
+        account_id: &str,
+        range: UsageRange,
+        api_key_id: Option<String>,
+    ) {
         if self.usage_rx.is_some() {
             return;
         }
@@ -851,9 +1048,12 @@ impl TrayApp {
         let (start, end) = range.dates();
         let granularity = range.granularity();
 
-        self.usage.entry((id.clone(), range)).or_default().loading = true;
+        self.usage
+            .entry((id.clone(), range, api_key_id.clone()))
+            .or_default()
+            .loading = true;
         let (sender, receiver) = std::sync::mpsc::channel();
-        self.usage_rx = Some((id.clone(), range, receiver));
+        self.usage_rx = Some((id.clone(), range, api_key_id.clone(), receiver));
         let repaint = ctx.clone();
 
         std::thread::spawn(move || {
@@ -861,7 +1061,13 @@ impl TrayApp {
                 match crate::secrets::open_credentials(secret_store.as_ref(), &id, &secrets_blob) {
                     Ok(credentials) => match crate::api::HttpClient::new(&base_url, timeout) {
                         Ok(client) => client
-                            .usage_trend(&credentials.access_token, &start, &end, granularity)
+                            .usage_trend(
+                                &credentials.access_token,
+                                &start,
+                                &end,
+                                granularity,
+                                api_key_id.as_deref(),
+                            )
                             .map_err(|err| err.user_message()),
                         Err(err) => Err(err.user_message()),
                     },
@@ -874,13 +1080,13 @@ impl TrayApp {
 
     /// 取一次用量拉取结果。
     fn poll_usage(&mut self, ctx: &egui::Context) {
-        let Some((account_id, range, receiver)) = self.usage_rx.as_ref() else {
+        let Some((account_id, range, api_key_id, receiver)) = self.usage_rx.as_ref() else {
             return;
         };
         let Ok(result) = receiver.try_recv() else {
             return;
         };
-        let key = (account_id.clone(), *range);
+        let key = (account_id.clone(), *range, api_key_id.clone());
         self.usage_rx = None;
 
         let entry = self.usage.entry(key).or_default();
@@ -905,7 +1111,7 @@ impl TrayApp {
         ctx.request_repaint();
     }
 
-    /// 为展开中的账号补齐用量曲线（过期或缺失才拉；同一时间只拉一个）。
+    /// 为展开且未折叠的账号补齐用量曲线（过期或缺失才拉；同一时间只拉一个）。
     fn maybe_request_usage(&mut self, ctx: &egui::Context) {
         if self.usage_rx.is_some() {
             return;
@@ -915,6 +1121,7 @@ impl TrayApp {
                 .accounts()
                 .iter()
                 .filter(|item| self.expanded_accounts.contains(&item.id))
+                .filter(|item| !self.usage_collapsed.contains(&item.id))
                 .map(|item| item.id.clone())
                 .collect(),
             DataLayer::Unavailable(_) => Vec::new(),
@@ -922,7 +1129,8 @@ impl TrayApp {
 
         for id in ids {
             let range = self.usage_range_of(&id);
-            let needs_fetch = match self.usage.get(&(id.clone(), range)) {
+            let api_key_id = self.usage_api_key_of(&id);
+            let needs_fetch = match self.usage.get(&(id.clone(), range, api_key_id.clone())) {
                 Some(series) if series.loading => false,
                 Some(series) => series
                     .fetched_at
@@ -931,7 +1139,7 @@ impl TrayApp {
                 None => true,
             };
             if needs_fetch {
-                self.request_usage(ctx, &id, range);
+                self.request_usage(ctx, &id, range, api_key_id);
                 return;
             }
         }
@@ -991,6 +1199,12 @@ impl TrayApp {
         let ApiKeysReply::List(result) = reply;
         let state = match result {
             Ok(keys) => {
+                // Key 可能已在网页端被删除：选中的旧 Key 不存在时回退到全部 Key。
+                if let Some(selected) = self.usage_api_key.get(&account_id)
+                    && !keys.iter().any(|key| &key.id == selected)
+                {
+                    self.usage_api_key.remove(&account_id);
+                }
                 self.cache_api_keys(&account_id, &keys);
                 AccountKeysState {
                     loading: false,
@@ -1416,9 +1630,14 @@ impl TrayApp {
             }
         }
 
-        // 账号没了，展开状态与 Key 缓存也要一起清掉
+        // 账号没了，展开状态、Key 缓存与用量派生状态也要一起清掉。
         self.expanded_accounts.remove(id);
         self.account_keys.remove(id);
+        self.usage_range.remove(id);
+        self.usage_metric.remove(id);
+        self.usage_api_key.remove(id);
+        self.usage_collapsed.remove(id);
+        self.usage.retain(|key, _| key.0 != id);
 
         self.rebuild_menu();
         self.update_badge();
@@ -1821,8 +2040,8 @@ impl TrayApp {
         let mut toggle_account: Option<String> = None;
         // 被点击要复制的 (账号 id, Key id)
         let mut copy_request: Option<(String, String)> = None;
-        // 用量区间切换请求
-        let mut usage_switch: Option<(String, UsageRange)> = None;
+        // 用量区交互：区间、API Key、指标与折叠
+        let mut usage_actions = UsageUiActions::default();
         // 面板内的账号操作：请求删除（标题行右侧按钮触发）
         let mut delete_request: Option<String> = None;
         // 设置页入口的点击结果
@@ -1898,7 +2117,7 @@ impl TrayApp {
                                     &mut toggle_account,
                                     &mut hover,
                                     &mut copy_request,
-                                    &mut usage_switch,
+                                    &mut usage_actions,
                                     &mut delete_request,
                                 );
                                 ui.add_space(10.0);
@@ -1918,8 +2137,21 @@ impl TrayApp {
             self.try_start_refresh(ctx, true);
         }
 
-        if let Some((account_id, range)) = usage_switch {
+        if let Some((account_id, range)) = usage_actions.range {
             self.set_usage_range(ctx, &account_id, range);
+        }
+        if let Some((account_id, api_key_id)) = usage_actions.api_key {
+            self.set_usage_api_key(ctx, &account_id, api_key_id);
+        }
+        if let Some((account_id, metric)) = usage_actions.metric {
+            self.set_usage_metric(ctx, &account_id, metric);
+        }
+        if let Some(account_id) = usage_actions.toggle_collapse {
+            if !self.usage_collapsed.remove(&account_id) {
+                self.usage_collapsed.insert(account_id);
+            }
+            self.maybe_request_usage(ctx);
+            ctx.request_repaint();
         }
 
         if let Some((account_id, key_id)) = copy_request {
@@ -2559,7 +2791,7 @@ fn draw_account_summary(
 /// 展开/收起只换折线朝向：收起时朝右，展开时朝下。
 fn draw_chevron(ui: &mut egui::Ui, expanded: bool, hover_t: f32) -> egui::Response {
     let size = fs(16.0);
-    let (rect, response) = ui.allocate_exact_size(egui::vec2(size, size), egui::Sense::hover());
+    let (rect, response) = ui.allocate_exact_size(egui::vec2(size, size), egui::Sense::click());
     let center = rect.center();
 
     let painter = ui.painter();
@@ -2610,7 +2842,7 @@ fn draw_account_card(
     toggle: &mut Option<String>,
     hover: &mut HoverState,
     copy_request: &mut Option<(String, String)>,
-    usage_switch: &mut Option<(String, UsageRange)>,
+    usage_actions: &mut UsageUiActions,
     delete_request: &mut Option<String>,
 ) {
     // 悬浮进度：上一帧矩形的命中 + 指数淡入，避免"闪一下"
@@ -2716,7 +2948,7 @@ fn draw_account_card(
                 ui.separator();
 
                 // 用量曲线：走用户态接口，看到的是本账号自己的数据
-                draw_usage_section(ui, card, usage_switch);
+                draw_usage_section(ui, card, usage_actions);
                 ui.add_space(6.0);
                 ui.separator();
 
@@ -2738,21 +2970,84 @@ fn fmt_tokens(value: i64) -> String {
     }
 }
 
-/// 绘制"用量"区：区间切换按钮 + token 曲线 + 合计。
-fn draw_usage_section(
-    ui: &mut egui::Ui,
-    card: &AccountCard,
-    usage_switch: &mut Option<(String, UsageRange)>,
-) {
+/// 绘制"用量"区：折叠标题、Key 选择、区间切换、指标切换、曲线与汇总。
+fn draw_usage_section(ui: &mut egui::Ui, card: &AccountCard, actions: &mut UsageUiActions) {
+    let mut toggle_collapse = false;
     ui.horizontal(|ui| {
-        ui.label(
-            egui::RichText::new("我的用量")
-                .size(fs(11.0))
-                .strong()
-                .color(TEXT_PRIMARY),
-        );
+        let chevron = draw_chevron(ui, !card.usage_collapsed, 0.0);
+        if chevron.clicked() {
+            toggle_collapse = true;
+        }
+        let title = ui
+            .add(
+                egui::Label::new(
+                    egui::RichText::new("我的用量")
+                        .size(fs(11.0))
+                        .strong()
+                        .color(TEXT_PRIMARY),
+                )
+                .sense(egui::Sense::click()),
+            )
+            .on_hover_cursor(egui::CursorIcon::PointingHand);
+        if title.clicked() {
+            toggle_collapse = true;
+        }
+        if card.usage_collapsed {
+            ui.label(egui::RichText::new("已收起").size(fs(8.5)).color(TEXT_DIM));
+        }
+    });
+    if toggle_collapse {
+        actions.toggle_collapse = Some(card.id.clone());
+    }
+    if card.usage_collapsed {
+        return;
+    }
+
+    let keys = card
+        .keys
+        .as_ref()
+        .map(|state| state.keys.as_slice())
+        .unwrap_or(&[]);
+    let selected_key_label = card
+        .usage_api_key_id
+        .as_ref()
+        .and_then(|id| keys.iter().find(|key| &key.id == id))
+        .map(|key| key.name.clone())
+        .unwrap_or_else(|| {
+            if card.usage_api_key_id.is_some() {
+                "已选 Key".to_owned()
+            } else {
+                "全部 Key".to_owned()
+            }
+        });
+
+    ui.add_space(3.0);
+    ui.horizontal(|ui| {
+        // 「全部 Key」是默认项；Key 列表加载完成后再出现具体选项。
+        egui::ComboBox::from_id_salt(("usage-key", card.id.as_str()))
+            .selected_text(
+                egui::RichText::new(selected_key_label)
+                    .size(fs(9.0))
+                    .color(TEXT_PRIMARY),
+            )
+            .width(fs(108.0))
+            .show_ui(ui, |ui| {
+                if ui
+                    .selectable_label(card.usage_api_key_id.is_none(), "全部 Key")
+                    .clicked()
+                {
+                    actions.api_key = Some((card.id.clone(), None));
+                }
+                for key in keys {
+                    let selected = card.usage_api_key_id.as_deref() == Some(key.id.as_str());
+                    if ui.selectable_label(selected, &key.name).clicked() {
+                        actions.api_key = Some((card.id.clone(), Some(key.id.clone())));
+                    }
+                }
+            });
+
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            // 从右往左排，视觉顺序仍是 24 小时 → 7 天 → 30 天
+            // 从右往左排，视觉顺序仍是 24 小时 -> 7 天 -> 30 天。
             for range in UsageRange::ALL.iter().rev() {
                 let selected = *range == card.usage_range;
                 let text = egui::RichText::new(range.label())
@@ -2762,18 +3057,41 @@ fn draw_usage_section(
                     } else {
                         TEXT_SECONDARY
                     });
-                let button = egui::Button::new(text).fill(if selected {
+                let button = egui::Button::new(text).small().fill(if selected {
                     ACCENT
                 } else {
                     egui::Color32::TRANSPARENT
                 });
                 if ui.add(button).clicked() && !selected {
-                    *usage_switch = Some((card.id.clone(), *range));
+                    actions.range = Some((card.id.clone(), *range));
                 }
             }
         });
     });
 
+    ui.add_space(2.0);
+    ui.horizontal_wrapped(|ui| {
+        for metric in UsageMetric::ALL {
+            let selected = metric == card.usage_metric;
+            let text = egui::RichText::new(metric.label())
+                .size(fs(8.5))
+                .color(if selected {
+                    egui::Color32::from_rgb(15, 23, 42)
+                } else {
+                    TEXT_SECONDARY
+                });
+            let button = egui::Button::new(text).small().fill(if selected {
+                ACCENT
+            } else {
+                egui::Color32::TRANSPARENT
+            });
+            if ui.add(button).clicked() && !selected {
+                actions.metric = Some((card.id.clone(), metric));
+            }
+        }
+    });
+
+    ui.add_space(4.0);
     if card.usage_loading {
         ui.horizontal(|ui| {
             ui.spinner();
@@ -2808,35 +3126,62 @@ fn draw_usage_section(
         return;
     }
 
-    draw_usage_chart(ui, &card.usage_points);
+    draw_usage_chart(ui, &card.usage_points, card.usage_metric);
+    draw_usage_totals(ui, card);
+}
 
-    let total: i64 = card
-        .usage_points
-        .iter()
-        .map(|point| point.total_tokens)
-        .sum();
-    let requests: i64 = card.usage_points.iter().map(|point| point.requests).sum();
-    let cost: f64 = card
-        .usage_points
-        .iter()
-        .map(|point| point.actual_cost)
-        .sum();
+/// 绘制用量区底部的完整指标。
+fn draw_usage_totals(ui: &mut egui::Ui, card: &AccountCard) {
+    let totals = UsageTotals::from_points(&card.usage_points);
+    let scope = if card.usage_api_key_id.is_some() {
+        "当前 Key 合计"
+    } else {
+        "全部 Key 合计"
+    };
+
+    ui.add_space(2.0);
     ui.label(
-        egui::RichText::new(format!(
-            "本账号合计 {} tokens · {} 次请求 · ${cost:.3}",
-            fmt_tokens(total),
-            requests
-        ))
-        .size(fs(9.0))
-        .color(TEXT_SECONDARY),
+        egui::RichText::new(scope)
+            .size(fs(8.5))
+            .strong()
+            .color(TEXT_SECONDARY),
     );
+    ui.horizontal_wrapped(|ui| {
+        usage_metric_chip(ui, "总", fmt_tokens(totals.total_tokens));
+        usage_metric_chip(ui, "输入", fmt_tokens(totals.input_tokens));
+        usage_metric_chip(ui, "输出", fmt_tokens(totals.output_tokens));
+        usage_metric_chip(
+            ui,
+            "命中率",
+            format!("{:.1}%", totals.cache_hit_rate_percent()),
+        );
+        usage_metric_chip(ui, "Cache 写", fmt_tokens(totals.cache_creation_tokens));
+        usage_metric_chip(ui, "Cache 读", fmt_tokens(totals.cache_read_tokens));
+        usage_metric_chip(ui, "请求", totals.requests.to_string());
+        usage_metric_chip(ui, "花费", format!("${:.3}", totals.actual_cost));
+    });
+}
+
+/// 一个紧凑的指标小标签。
+fn usage_metric_chip(ui: &mut egui::Ui, label: &str, value: String) {
+    egui::Frame::new()
+        .fill(EMPTY_BG)
+        .corner_radius(egui::CornerRadius::same(4))
+        .inner_margin(egui::Margin::symmetric(5, 2))
+        .show(ui, |ui| {
+            ui.label(
+                egui::RichText::new(format!("{label} {value}"))
+                    .size(fs(8.5))
+                    .color(TEXT_SECONDARY),
+            );
+        });
 }
 
 /// 用原生绘制画 token 用量折线：网格 + 面积 + 折线 + 悬浮提示。
 ///
 /// 点数最多 31 个，全部在 CPU 上算完直接交给 painter，
 /// 不引入图表库，也不做逐帧分配（`line` 是每帧临时 Vec，但只有几十个点）。
-fn draw_usage_chart(ui: &mut egui::Ui, points: &[crate::api::UsagePoint]) {
+fn draw_usage_chart(ui: &mut egui::Ui, points: &[crate::api::UsagePoint], metric: UsageMetric) {
     let width = ui.available_width().max(80.0);
     let axis_height = fs(12.0);
     let plot_height = fs(72.0);
@@ -2858,12 +3203,14 @@ fn draw_usage_chart(ui: &mut egui::Ui, points: &[crate::api::UsagePoint]) {
         );
     }
 
-    let max_value = points
-        .iter()
-        .map(|point| point.total_tokens)
-        .max()
-        .unwrap_or(0)
-        .max(1) as f32;
+    let max_value = metric.axis_max(points);
+    painter.text(
+        egui::pos2(plot.right(), plot.top() + 2.0),
+        egui::Align2::RIGHT_TOP,
+        metric.format(max_value as f64),
+        egui::FontId::proportional(fs(7.5)),
+        TEXT_DIM,
+    );
     let count = points.len();
     let x_at = |index: usize| -> f32 {
         if count <= 1 {
@@ -2875,10 +3222,14 @@ fn draw_usage_chart(ui: &mut egui::Ui, points: &[crate::api::UsagePoint]) {
     let y_at =
         |value: f32| -> f32 { plot.bottom() - plot.height() * (value / max_value).clamp(0.0, 1.0) };
 
-    let line: Vec<egui::Pos2> = points
+    let values: Vec<f32> = points
+        .iter()
+        .map(|point| metric.value(point) as f32)
+        .collect();
+    let line: Vec<egui::Pos2> = values
         .iter()
         .enumerate()
-        .map(|(index, point)| egui::pos2(x_at(index), y_at(point.total_tokens as f32)))
+        .map(|(index, value)| egui::pos2(x_at(index), y_at(*value)))
         .collect();
 
     let mut area = line.clone();
@@ -2896,9 +3247,9 @@ fn draw_usage_chart(ui: &mut egui::Ui, points: &[crate::api::UsagePoint]) {
         egui::Stroke::new(1.8, ACCENT),
     ));
 
-    // 只给有数据的时间桶画点，避免补零后的 0 值把曲线压成一排圆点。
-    for (index, point) in points.iter().enumerate() {
-        if point.total_tokens > 0 {
+    // 只给非零时间桶画点，避免补零后的 0 值把曲线压成一排圆点。
+    for (index, value) in values.iter().enumerate() {
+        if *value > 0.0 {
             painter.circle_filled(line[index], 2.0, ACCENT);
         }
     }
@@ -2913,20 +3264,30 @@ fn draw_usage_chart(ui: &mut egui::Ui, points: &[crate::api::UsagePoint]) {
             egui::Stroke::new(1.0, egui::Color32::from_white_alpha(70)),
         );
         painter.circle_filled(
-            egui::pos2(x, y_at(points[index].total_tokens as f32)),
+            egui::pos2(x, y_at(values[index])),
             3.2,
             egui::Color32::WHITE,
         );
 
+        let point = &points[index];
         let text = format!(
-            "{}\n{} tokens · {} 次请求 · ${:.3}",
-            points[index].label,
-            fmt_tokens(points[index].total_tokens),
-            points[index].requests,
-            points[index].actual_cost
+            "{}\n总 {} · 输入 {} · 输出 {}\nCache 写 {} · 读 {} · 命中率 {:.1}%\n{} 次请求 · 实际 ${:.3}",
+            point.label,
+            fmt_tokens(point.total_tokens),
+            fmt_tokens(point.input_tokens),
+            fmt_tokens(point.output_tokens),
+            fmt_tokens(point.cache_creation_tokens),
+            fmt_tokens(point.cache_read_tokens),
+            point.cache_hit_rate_percent(),
+            point.requests,
+            point.actual_cost
         );
-        let galley =
-            painter.layout_no_wrap(text, egui::FontId::proportional(fs(9.0)), TEXT_PRIMARY);
+        let galley = painter.layout(
+            text,
+            egui::FontId::proportional(fs(8.5)),
+            TEXT_PRIMARY,
+            plot.width() * 0.62,
+        );
         let mut pos = egui::pos2(x + 10.0, plot.top() + 4.0);
         if pos.x + galley.size().x > plot.right() {
             pos.x = (x - galley.size().x - 10.0).max(plot.left());
@@ -3461,6 +3822,44 @@ mod tests {
             assert_eq!(end.len(), 10, "end={end}");
             assert!(start <= end, "start={start} end={end}");
         }
+    }
+
+    /// 构造测试用量点。
+    fn test_usage_point() -> crate::api::UsagePoint {
+        crate::api::UsagePoint {
+            label: "2026-10-18".to_owned(),
+            requests: 3,
+            input_tokens: 500,
+            output_tokens: 100,
+            cache_creation_tokens: 100,
+            cache_read_tokens: 1400,
+            total_tokens: 2100,
+            cost: 0.04,
+            actual_cost: 0.03,
+        }
+    }
+
+    #[test]
+    fn 用量指标切换取到正确字段() {
+        let point = test_usage_point();
+        assert_eq!(UsageMetric::Total.value(&point), 2100.0);
+        assert_eq!(UsageMetric::Input.value(&point), 500.0);
+        assert_eq!(UsageMetric::Output.value(&point), 100.0);
+        assert!((UsageMetric::CacheHitRate.value(&point) - 70.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn 用量汇总包含输入输出与命中率() {
+        let point = test_usage_point();
+        let totals = UsageTotals::from_points(&[point]);
+        assert_eq!(totals.requests, 3);
+        assert_eq!(totals.input_tokens, 500);
+        assert_eq!(totals.output_tokens, 100);
+        assert_eq!(totals.cache_creation_tokens, 100);
+        assert_eq!(totals.cache_read_tokens, 1400);
+        assert_eq!(totals.total_tokens, 2100);
+        assert!((totals.cache_hit_rate_percent() - 70.0).abs() < f64::EPSILON);
+        assert!((totals.actual_cost - 0.03).abs() < f64::EPSILON);
     }
 
     #[test]
