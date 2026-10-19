@@ -376,6 +376,17 @@ pub(crate) fn fs(base: f32) -> f32 {
     base + FONT_BOOST
 }
 
+/// 用量区专用字号增量。
+///
+/// 需求方反馈用量区的曲线、横轴和指标比面板其他区域更小，因此在全局 [fs]
+/// 基础上再放大 1 点；只影响用量区，不把整个面板撑得过于松散。
+const USAGE_FONT_BOOST: f32 = 1.0;
+
+/// 用量区字号。
+fn usage_fs(base: f32) -> f32 {
+    fs(base) + USAGE_FONT_BOOST
+}
+
 /// 同时允许登录的账号上限（需求方要求：同时最多 10 个）。
 const MAX_ACCOUNTS: usize = 10;
 
@@ -2187,59 +2198,9 @@ impl TrayApp {
             ctx.request_repaint();
         }
 
-        // ---- 右下角缩放手柄 ----
-        //
-        // 无边框窗口的系统缩放边缘只有几个像素宽，而且会把拖拽"抢"走
-        // （egui 收不到 pointer delta）。所以手柄**往内缩 8px**，由我们自己算尺寸：
-        // 既避开系统命中区，又能画一个看得见的抓手。
-        let grip = egui::Rect::from_min_size(
-            egui::pos2(ui.max_rect().right() - 24.0, ui.max_rect().bottom() - 24.0),
-            egui::vec2(16.0, 16.0),
-        );
-        let grip_response = ui.interact(
-            grip,
-            egui::Id::unique("panel-resize-grip"),
-            egui::Sense::drag(),
-        );
-        if grip_response.hovered() || grip_response.dragged() {
-            ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeNwSe);
-        }
-        if grip_response.dragged() {
-            let delta = ui.ctx().input(|input| input.pointer.delta());
-            if delta != egui::Vec2::ZERO {
-                let current = ui
-                    .ctx()
-                    .input(|input| input.viewport().inner_rect)
-                    .map(|rect| rect.size())
-                    .unwrap_or_else(|| egui::vec2(PANEL_WIDTH, PANEL_HEIGHT));
-                let next = egui::vec2(
-                    (current.x + delta.x).max(MIN_PANEL_WIDTH),
-                    (current.y + delta.y).max(MIN_PANEL_HEIGHT),
-                );
-                ui.ctx()
-                    .send_viewport_cmd(egui::ViewportCommand::InnerSize(next));
-            }
-        }
-
-        // 三条斜线，暗示"可以拖"
-        let painter = ui.painter();
-        let stroke = egui::Stroke::new(
-            1.4,
-            if grip_response.hovered() {
-                ACCENT
-            } else {
-                TEXT_DIM
-            },
-        );
-        for offset in [3.0, 7.0, 11.0] {
-            painter.line_segment(
-                [
-                    egui::pos2(grip.right() - offset, grip.bottom() - 2.0),
-                    egui::pos2(grip.right() - 2.0, grip.bottom() - offset),
-                ],
-                stroke,
-            );
-        }
+        // 四角与四边都可以缩放；用全局指针判断，避免被滚动区抢走边缘事件。
+        handle_window_resize(ctx, ctx.input(|input| input.viewport_rect()));
+        draw_resize_ticks(ui);
 
         // 弹窗画在面板之后，保证它在最上层（Modal 自带遮罩与输入拦截）
         let timeout = self.request_timeout();
@@ -2614,12 +2575,23 @@ fn draw_gear(ui: &mut egui::Ui) -> egui::Response {
 /// 顶部条：只保留标题、版本号与齿轮。
 fn draw_header(ui: &mut egui::Ui, open_settings: &mut bool, pinned: bool, toggle_pin: &mut bool) {
     ui.horizontal(|ui| {
-        ui.label(
-            egui::RichText::new("Sub2API 托盘")
-                .size(fs(13.0))
-                .strong()
-                .color(TEXT_PRIMARY),
-        );
+        draw_window_drag_handle(ui);
+        // 标题本身也可以拖动窗口：边框窗口没有系统标题栏，需要给用户一个
+        // 明确、面积足够大的拖拽入口；右侧图钉/齿轮仍保持独立点击。
+        let title = ui
+            .add(
+                egui::Label::new(
+                    egui::RichText::new("Sub2API 托盘")
+                        .size(fs(13.0))
+                        .strong()
+                        .color(TEXT_PRIMARY),
+                )
+                .sense(egui::Sense::drag()),
+            )
+            .on_hover_cursor(egui::CursorIcon::Grab);
+        if title.drag_started() {
+            ui.ctx().send_viewport_cmd(egui::ViewportCommand::StartDrag);
+        }
 
         // 版本号与齿轮靠右，弱化处理，避免抢标题的视觉重心
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -2644,6 +2616,158 @@ fn draw_header(ui: &mut egui::Ui, open_settings: &mut bool, pinned: bool, toggle
         ui.allocate_exact_size(egui::vec2(ui.available_width(), 2.0), egui::Sense::hover());
     ui.painter()
         .rect_filled(line_rect, egui::CornerRadius::same(1), ACCENT);
+}
+
+/// 标题栏左侧的拖动抓手。
+///
+/// 画六个小圆点而不是用字符：不同中文字体下 `⠿` / `⋮⋮` 的字形宽度差异很大。
+fn draw_window_drag_handle(ui: &mut egui::Ui) {
+    let size = egui::vec2(fs(12.0), fs(18.0));
+    let (rect, response) = ui.allocate_exact_size(size, egui::Sense::drag());
+    let active = response.hovered() || response.dragged();
+    if active {
+        ui.ctx().set_cursor_icon(if response.dragged() {
+            egui::CursorIcon::Grabbing
+        } else {
+            egui::CursorIcon::Grab
+        });
+    }
+    if response.drag_started() {
+        ui.ctx().send_viewport_cmd(egui::ViewportCommand::StartDrag);
+    }
+
+    let painter = ui.painter();
+    let color = if active { ACCENT } else { TEXT_DIM };
+    let center = rect.center();
+    for row in -1..=1 {
+        for column in 0..2 {
+            painter.circle_filled(
+                egui::pos2(
+                    center.x + (column as f32 - 0.5) * 4.0,
+                    center.y + row as f32 * 4.0,
+                ),
+                1.2,
+                color,
+            );
+        }
+    }
+}
+
+/// 根据窗口内的指针位置判断缩放方向。
+///
+/// 四角优先于四边：角落区域较大（18 点），边区域只有 8 点。这样用户从
+/// 右下角拖动时一定得到 SouthEast，而不是只改高度的 South。
+fn resize_direction_at(
+    pos: egui::Pos2,
+    bounds: egui::Rect,
+) -> Option<egui::viewport::ResizeDirection> {
+    const CORNER: f32 = 18.0;
+    const EDGE: f32 = 8.0;
+
+    if !bounds.contains(pos) {
+        return None;
+    }
+
+    let near_left = pos.x <= bounds.left() + CORNER;
+    let near_right = pos.x >= bounds.right() - CORNER;
+    let near_top = pos.y <= bounds.top() + CORNER;
+    let near_bottom = pos.y >= bounds.bottom() - CORNER;
+    let corner = match (near_left, near_right, near_top, near_bottom) {
+        (true, _, true, _) => Some(egui::viewport::ResizeDirection::NorthWest),
+        (_, true, true, _) => Some(egui::viewport::ResizeDirection::NorthEast),
+        (true, _, _, true) => Some(egui::viewport::ResizeDirection::SouthWest),
+        (_, true, _, true) => Some(egui::viewport::ResizeDirection::SouthEast),
+        _ => None,
+    };
+    if corner.is_some() {
+        return corner;
+    }
+
+    if pos.x <= bounds.left() + EDGE {
+        Some(egui::viewport::ResizeDirection::West)
+    } else if pos.x >= bounds.right() - EDGE {
+        Some(egui::viewport::ResizeDirection::East)
+    } else if pos.y <= bounds.top() + EDGE {
+        Some(egui::viewport::ResizeDirection::North)
+    } else if pos.y >= bounds.bottom() - EDGE {
+        Some(egui::viewport::ResizeDirection::South)
+    } else {
+        None
+    }
+}
+
+/// 缩放方向对应的鼠标指针。
+fn resize_cursor(direction: egui::viewport::ResizeDirection) -> egui::CursorIcon {
+    use egui::viewport::ResizeDirection;
+    match direction {
+        ResizeDirection::North => egui::CursorIcon::ResizeNorth,
+        ResizeDirection::South => egui::CursorIcon::ResizeSouth,
+        ResizeDirection::East => egui::CursorIcon::ResizeEast,
+        ResizeDirection::West => egui::CursorIcon::ResizeWest,
+        ResizeDirection::NorthEast => egui::CursorIcon::ResizeNorthEast,
+        ResizeDirection::SouthEast => egui::CursorIcon::ResizeSouthEast,
+        ResizeDirection::NorthWest => egui::CursorIcon::ResizeNorthWest,
+        ResizeDirection::SouthWest => egui::CursorIcon::ResizeSouthWest,
+    }
+}
+
+/// 用全局指针位置处理窗口四角/四边缩放。
+///
+/// 不依赖 `Ui::interact`：面板内部的 ScrollArea / 页脚会覆盖窗口边缘，
+/// 交互区域在同一层里可能被它们抢走。这里在每帧末尾统一判断指针位置，
+/// 左键按下时直接让 winit 进入系统缩放；指针靠近边缘时同步显示缩放光标。
+fn handle_window_resize(ctx: &egui::Context, bounds: egui::Rect) {
+    let Some(pos) = ctx.input(|input| input.pointer.hover_pos()) else {
+        return;
+    };
+    let Some(direction) = resize_direction_at(pos, bounds) else {
+        return;
+    };
+    ctx.set_cursor_icon(resize_cursor(direction));
+    if ctx.input(|input| input.pointer.primary_pressed()) {
+        ctx.send_viewport_cmd(egui::ViewportCommand::BeginResize(direction));
+    }
+}
+
+/// 四角画三条短斜线，提示这些位置可以缩放。
+fn draw_resize_ticks(ui: &mut egui::Ui) {
+    let bounds = ui.max_rect();
+    let left = bounds.left();
+    let right = bounds.right();
+    let top = bounds.top();
+    let bottom = bounds.bottom();
+    let painter = ui.painter();
+    let stroke = egui::Stroke::new(1.2, egui::Color32::from_white_alpha(70));
+    for offset in [4.0, 8.0, 12.0] {
+        painter.line_segment(
+            [
+                egui::pos2(right - offset, bottom - 1.0),
+                egui::pos2(right - 1.0, bottom - offset),
+            ],
+            stroke,
+        );
+        painter.line_segment(
+            [
+                egui::pos2(left + offset, bottom - 1.0),
+                egui::pos2(left + 1.0, bottom - offset),
+            ],
+            stroke,
+        );
+        painter.line_segment(
+            [
+                egui::pos2(right - offset, top + 1.0),
+                egui::pos2(right - 1.0, top + offset),
+            ],
+            stroke,
+        );
+        painter.line_segment(
+            [
+                egui::pos2(left + offset, top + 1.0),
+                egui::pos2(left + 1.0, top + offset),
+            ],
+            stroke,
+        );
+    }
 }
 
 /// 徽标颜色：全部在线（品牌薄荷绿）。
@@ -2982,7 +3106,7 @@ fn draw_usage_section(ui: &mut egui::Ui, card: &AccountCard, actions: &mut Usage
             .add(
                 egui::Label::new(
                     egui::RichText::new("我的用量")
-                        .size(fs(11.0))
+                        .size(usage_fs(11.0))
                         .strong()
                         .color(TEXT_PRIMARY),
                 )
@@ -2993,7 +3117,11 @@ fn draw_usage_section(ui: &mut egui::Ui, card: &AccountCard, actions: &mut Usage
             toggle_collapse = true;
         }
         if card.usage_collapsed {
-            ui.label(egui::RichText::new("已收起").size(fs(8.5)).color(TEXT_DIM));
+            ui.label(
+                egui::RichText::new("已收起")
+                    .size(usage_fs(8.5))
+                    .color(TEXT_DIM),
+            );
         }
     });
     if toggle_collapse {
@@ -3027,10 +3155,10 @@ fn draw_usage_section(ui: &mut egui::Ui, card: &AccountCard, actions: &mut Usage
         egui::ComboBox::from_id_salt(("usage-key", card.id.as_str()))
             .selected_text(
                 egui::RichText::new(selected_key_label)
-                    .size(fs(9.0))
+                    .size(usage_fs(9.0))
                     .color(TEXT_PRIMARY),
             )
-            .width(fs(108.0))
+            .width(usage_fs(108.0))
             .show_ui(ui, |ui| {
                 if ui
                     .selectable_label(card.usage_api_key_id.is_none(), "全部 Key")
@@ -3051,7 +3179,7 @@ fn draw_usage_section(ui: &mut egui::Ui, card: &AccountCard, actions: &mut Usage
             for range in UsageRange::ALL.iter().rev() {
                 let selected = *range == card.usage_range;
                 let text = egui::RichText::new(range.label())
-                    .size(fs(9.0))
+                    .size(usage_fs(9.0))
                     .color(if selected {
                         egui::Color32::from_rgb(15, 23, 42)
                     } else {
@@ -3074,7 +3202,7 @@ fn draw_usage_section(ui: &mut egui::Ui, card: &AccountCard, actions: &mut Usage
         for metric in UsageMetric::ALL {
             let selected = metric == card.usage_metric;
             let text = egui::RichText::new(metric.label())
-                .size(fs(8.5))
+                .size(usage_fs(8.5))
                 .color(if selected {
                     egui::Color32::from_rgb(15, 23, 42)
                 } else {
@@ -3097,7 +3225,7 @@ fn draw_usage_section(ui: &mut egui::Ui, card: &AccountCard, actions: &mut Usage
             ui.spinner();
             ui.label(
                 egui::RichText::new("加载用量…")
-                    .size(fs(9.0))
+                    .size(usage_fs(9.0))
                     .color(TEXT_DIM),
             );
         });
@@ -3107,7 +3235,7 @@ fn draw_usage_section(ui: &mut egui::Ui, card: &AccountCard, actions: &mut Usage
     if let Some(error) = &card.usage_error {
         ui.label(
             egui::RichText::new(error)
-                .size(fs(9.0))
+                .size(usage_fs(9.0))
                 .color(egui::Color32::from_rgb(248, 113, 113)),
         );
         return;
@@ -3120,7 +3248,7 @@ fn draw_usage_section(ui: &mut egui::Ui, card: &AccountCard, actions: &mut Usage
     if card.usage_points.is_empty() || !has_usage {
         ui.label(
             egui::RichText::new("该区间暂无用量")
-                .size(fs(9.0))
+                .size(usage_fs(9.0))
                 .color(TEXT_DIM),
         );
         return;
@@ -3142,7 +3270,7 @@ fn draw_usage_totals(ui: &mut egui::Ui, card: &AccountCard) {
     ui.add_space(2.0);
     ui.label(
         egui::RichText::new(scope)
-            .size(fs(8.5))
+            .size(usage_fs(8.5))
             .strong()
             .color(TEXT_SECONDARY),
     );
@@ -3171,7 +3299,7 @@ fn usage_metric_chip(ui: &mut egui::Ui, label: &str, value: String) {
         .show(ui, |ui| {
             ui.label(
                 egui::RichText::new(format!("{label} {value}"))
-                    .size(fs(8.5))
+                    .size(usage_fs(8.5))
                     .color(TEXT_SECONDARY),
             );
         });
@@ -3183,8 +3311,8 @@ fn usage_metric_chip(ui: &mut egui::Ui, label: &str, value: String) {
 /// 不引入图表库，也不做逐帧分配（`line` 是每帧临时 Vec，但只有几十个点）。
 fn draw_usage_chart(ui: &mut egui::Ui, points: &[crate::api::UsagePoint], metric: UsageMetric) {
     let width = ui.available_width().max(80.0);
-    let axis_height = fs(12.0);
-    let plot_height = fs(72.0);
+    let axis_height = usage_fs(14.0);
+    let plot_height = usage_fs(84.0);
     let (rect, response) = ui.allocate_exact_size(
         egui::vec2(width, plot_height + axis_height),
         egui::Sense::hover(),
@@ -3208,7 +3336,7 @@ fn draw_usage_chart(ui: &mut egui::Ui, points: &[crate::api::UsagePoint], metric
         egui::pos2(plot.right(), plot.top() + 2.0),
         egui::Align2::RIGHT_TOP,
         metric.format(max_value as f64),
-        egui::FontId::proportional(fs(7.5)),
+        egui::FontId::proportional(usage_fs(7.5)),
         TEXT_DIM,
     );
     let count = points.len();
@@ -3284,7 +3412,7 @@ fn draw_usage_chart(ui: &mut egui::Ui, points: &[crate::api::UsagePoint], metric
         );
         let galley = painter.layout(
             text,
-            egui::FontId::proportional(fs(8.5)),
+            egui::FontId::proportional(usage_fs(8.5)),
             TEXT_PRIMARY,
             plot.width() * 0.62,
         );
@@ -3305,7 +3433,7 @@ fn draw_usage_chart(ui: &mut egui::Ui, points: &[crate::api::UsagePoint], metric
     }
 
     // 横轴只标首尾两个真实时间桶，空间足够时再补中间点。
-    let axis_font = egui::FontId::proportional(fs(8.0));
+    let axis_font = egui::FontId::proportional(usage_fs(8.0));
     let first = short_usage_label(&points[0].label);
     let last = short_usage_label(&points[count.saturating_sub(1)].label);
     painter.text(
@@ -3860,6 +3988,37 @@ mod tests {
         assert_eq!(totals.total_tokens, 2100);
         assert!((totals.cache_hit_rate_percent() - 70.0).abs() < f64::EPSILON);
         assert!((totals.actual_cost - 0.03).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn 四角缩放优先于四边() {
+        let bounds = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(360.0, 460.0));
+        use egui::viewport::ResizeDirection;
+        assert_eq!(
+            resize_direction_at(egui::pos2(2.0, 2.0), bounds),
+            Some(ResizeDirection::NorthWest)
+        );
+        assert_eq!(
+            resize_direction_at(egui::pos2(358.0, 2.0), bounds),
+            Some(ResizeDirection::NorthEast)
+        );
+        assert_eq!(
+            resize_direction_at(egui::pos2(2.0, 458.0), bounds),
+            Some(ResizeDirection::SouthWest)
+        );
+        assert_eq!(
+            resize_direction_at(egui::pos2(358.0, 458.0), bounds),
+            Some(ResizeDirection::SouthEast)
+        );
+        assert_eq!(
+            resize_direction_at(egui::pos2(180.0, 2.0), bounds),
+            Some(ResizeDirection::North)
+        );
+        assert_eq!(
+            resize_direction_at(egui::pos2(358.0, 230.0), bounds),
+            Some(ResizeDirection::East)
+        );
+        assert_eq!(resize_direction_at(egui::pos2(180.0, 230.0), bounds), None);
     }
 
     #[test]
