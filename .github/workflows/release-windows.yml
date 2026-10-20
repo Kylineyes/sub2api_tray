@@ -121,7 +121,9 @@ jobs:
       - name: 创建 / 更新 Release 并上传产物
         uses: softprops/action-gh-release@v2
         with:
-          name: v${{ github.ref_name }}
+          # github.ref_name 已经包含前导 v（例如 v0.3.0），这里不能再加 v，
+          # 否则 Release 标题会变成 vv0.3.0。
+          name: ${{ github.ref_name }}
           body_path: release-notes.md
           files: |
             dist/sub2api_tray-*-windows-x64.exe
