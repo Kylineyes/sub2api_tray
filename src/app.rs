@@ -3572,33 +3572,66 @@ fn draw_usage_totals(ui: &mut egui::Ui, card: &AccountCard) {
             .strong()
             .color(theme().text_secondary),
     );
-    ui.horizontal_wrapped(|ui| {
-        usage_metric_chip(ui, "总", fmt_tokens(totals.total_tokens));
-        usage_metric_chip(ui, "输入", fmt_tokens(totals.input_tokens));
-        usage_metric_chip(ui, "输出", fmt_tokens(totals.output_tokens));
-        usage_metric_chip(
-            ui,
-            "命中率",
-            format!("{:.1}%", totals.cache_hit_rate_percent()),
-        );
-        usage_metric_chip(ui, "Cache 写", fmt_tokens(totals.cache_creation_tokens));
-        usage_metric_chip(ui, "Cache 读", fmt_tokens(totals.cache_read_tokens));
-        usage_metric_chip(ui, "请求", totals.requests.to_string());
-        usage_metric_chip(ui, "花费", format!("${:.3}", totals.actual_cost));
+
+    // 指标很多，不能直接 horizontal_wrapped：最后一项会被压到只剩几像素，
+    // 中文就会一字一行。先按可用宽度计算列数，再每行显式排固定宽度的标签。
+    let metrics = [
+        ("总", fmt_tokens(totals.total_tokens)),
+        ("输入", fmt_tokens(totals.input_tokens)),
+        ("输出", fmt_tokens(totals.output_tokens)),
+        ("命中率", format!("{:.1}%", totals.cache_hit_rate_percent())),
+        ("Cache 写", fmt_tokens(totals.cache_creation_tokens)),
+        ("Cache 读", fmt_tokens(totals.cache_read_tokens)),
+        ("请求", totals.requests.to_string()),
+        ("花费", format!("${:.3}", totals.actual_cost)),
+    ];
+
+    let available = ui.available_width().max(1.0);
+    let columns = usage_metric_columns(available);
+    let gap = 8.0;
+    let column_width = ((available - gap * (columns.saturating_sub(1)) as f32)
+        / columns.max(1) as f32)
+        .clamp(1.0, 220.0);
+    let rows = metrics.len().div_ceil(columns);
+
+    // 用固定的左右两列纵向堆叠，而不是 horizontal_wrapped。
+    // 这样标签宽度由列宽决定，不会因为最后一行剩余空间太小而一字一行；
+    // 父布局也会按两列中较高的一列正确累计高度。
+    ui.horizontal_top(|ui| {
+        ui.spacing_mut().item_spacing.x = gap;
+        for column_metrics in metrics.chunks(rows) {
+            ui.vertical(|ui| {
+                ui.set_width(column_width);
+                for (label, value) in column_metrics {
+                    usage_metric_chip(ui, label, value, column_width);
+                    ui.add_space(2.0);
+                }
+            });
+        }
     });
 }
 
-/// 一个紧凑的指标小标签。
-fn usage_metric_chip(ui: &mut egui::Ui, label: &str, value: String) {
+/// 指标区列数：可用宽度够时两列，极窄时退回单列。
+fn usage_metric_columns(available_width: f32) -> usize {
+    if available_width >= 250.0 { 2 } else { 1 }
+}
+
+/// 一个固定宽度的紧凑指标小标签。
+fn usage_metric_chip(ui: &mut egui::Ui, label: &str, value: &str, width: f32) {
     egui::Frame::new()
         .fill(theme().empty_bg)
         .corner_radius(egui::CornerRadius::same(4))
         .inner_margin(egui::Margin::symmetric(5, 2))
         .show(ui, |ui| {
-            ui.label(
-                egui::RichText::new(format!("{label} {value}"))
-                    .size(usage_fs(8.5))
-                    .color(theme().text_secondary),
+            // Frame 的左右内边距各 5，内容宽度要扣掉，保证总宽度固定。
+            ui.set_min_width((width - 10.0).max(0.0));
+            ui.add(
+                egui::Label::new(
+                    egui::RichText::new(format!("{label} {value}"))
+                        .size(usage_fs(8.5))
+                        .color(theme().text_secondary),
+                )
+                .truncate(),
             );
         });
 }
@@ -4385,6 +4418,12 @@ mod tests {
         let empty = usage_area_mesh(&line[..1], 100.0, egui::Color32::RED);
         assert!(empty.vertices.is_empty());
         assert!(empty.indices.is_empty());
+    }
+
+    #[test]
+    fn 用量指标窄宽度退回单列() {
+        assert_eq!(usage_metric_columns(200.0), 1);
+        assert_eq!(usage_metric_columns(300.0), 2);
     }
 
     #[test]
