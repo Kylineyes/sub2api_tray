@@ -3603,6 +3603,42 @@ fn usage_metric_chip(ui: &mut egui::Ui, label: &str, value: String) {
         });
 }
 
+/// 构造折线与基线之间的面积网格。
+///
+/// egui 的 `convex_polygon` 只适合凸多边形；用量曲线会上下起伏，直接喂给
+/// 它会产生跨越折线的错误三角面。这里按每个相邻时间点生成两个三角形：
+///
+/// ```text
+/// top_i ---- top_i+1
+///   |  \      |
+///   |   \     |
+/// bot_i ---- bot_i+1
+/// ```
+///
+/// 所有三角形共用一个 Mesh，颜色透明度只会混合一次，不会在接缝处叠深。
+fn usage_area_mesh(line: &[egui::Pos2], baseline_y: f32, color: egui::Color32) -> egui::Mesh {
+    let mut mesh = egui::Mesh::default();
+    if line.len() < 2 {
+        return mesh;
+    }
+
+    mesh.reserve_vertices(line.len() * 2);
+    mesh.reserve_triangles((line.len() - 1) * 2);
+    for point in line {
+        mesh.colored_vertex(*point, color);
+        mesh.colored_vertex(egui::pos2(point.x, baseline_y), color);
+    }
+    for index in 0..line.len() - 1 {
+        let top_left = (index * 2) as u32;
+        let bottom_left = top_left + 1;
+        let top_right = top_left + 2;
+        let bottom_right = top_left + 3;
+        mesh.add_triangle(top_left, bottom_left, top_right);
+        mesh.add_triangle(top_right, bottom_left, bottom_right);
+    }
+    mesh
+}
+
 /// 用原生绘制画 token 用量折线：网格 + 面积 + 折线 + 悬浮提示。
 ///
 /// 点数最多 31 个，全部在 CPU 上算完直接交给 painter，
@@ -3658,16 +3694,11 @@ fn draw_usage_chart(ui: &mut egui::Ui, points: &[crate::api::UsagePoint], metric
         .map(|(index, value)| egui::pos2(x_at(index), y_at(*value)))
         .collect();
 
-    let mut area = line.clone();
-    let left = line.first().copied().unwrap_or(plot.center());
-    let right = line.last().copied().unwrap_or(plot.center());
-    area.push(egui::pos2(right.x, plot.bottom()));
-    area.push(egui::pos2(left.x, plot.bottom()));
-    painter.add(egui::Shape::convex_polygon(
-        area,
+    painter.add(egui::Shape::mesh(usage_area_mesh(
+        &line,
+        plot.bottom(),
         theme().chart_fill,
-        egui::Stroke::NONE,
-    ));
+    )));
     painter.add(egui::Shape::line(
         line.clone(),
         egui::Stroke::new(1.8, theme().accent),
@@ -4335,6 +4366,25 @@ mod tests {
         assert_ne!(dark.text_primary, light.text_primary);
         assert_ne!(dark.accent, light.accent);
         assert!(light.panel_bg.r() > 200, "日间背景应当是浅色");
+    }
+
+    #[test]
+    fn 面积网格按相邻点生成三角形() {
+        let line = vec![
+            egui::pos2(0.0, 30.0),
+            egui::pos2(10.0, 10.0),
+            egui::pos2(20.0, 25.0),
+        ];
+        let mesh = usage_area_mesh(&line, 100.0, egui::Color32::RED);
+        assert_eq!(mesh.vertices.len(), 6, "每个点应生成曲线顶点和基线顶点");
+        assert_eq!(mesh.indices.len(), 12, "两个区间应各生成两个三角形");
+        assert_eq!(mesh.vertices[0].pos, line[0]);
+        assert_eq!(mesh.vertices[1].pos, egui::pos2(0.0, 100.0));
+        assert_eq!(mesh.vertices[4].pos, line[2]);
+
+        let empty = usage_area_mesh(&line[..1], 100.0, egui::Color32::RED);
+        assert!(empty.vertices.is_empty());
+        assert!(empty.indices.is_empty());
     }
 
     #[test]
