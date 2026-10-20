@@ -68,6 +68,12 @@ pub struct AppConfig {
     /// 钉住时点面板外部不会自动收起，方便边看数据边操作别的窗口。
     /// 这是 UI 偏好，但放 `app.json` 才能跨重启保留。
     pub panel_pinned: bool,
+
+    /// 界面主题：`dark`（夜间）或 `light`（日间）。
+    ///
+    /// 用字符串而不是 bool，是为了将来可平滑扩展 `system` 等模式；
+    /// 非法值在 [`AppConfig::sanitize`] 中回落到夜间。
+    pub theme: String,
 }
 
 impl Default for AppConfig {
@@ -80,6 +86,8 @@ impl Default for AppConfig {
             request_timeout_seconds: DEFAULT_REQUEST_TIMEOUT_SECONDS,
             // 默认不钉住：托盘面板的常见预期是"点别处就收起"
             panel_pinned: false,
+            // 保持现有观感，老用户升级后不会突然变成浅色
+            theme: "dark".to_owned(),
         }
     }
 }
@@ -131,6 +139,12 @@ impl AppConfig {
                 self.request_timeout_seconds, actual
             ));
             self.request_timeout_seconds = actual;
+        }
+
+        if self.theme != "dark" && self.theme != "light" {
+            let actual = "dark".to_owned();
+            adjustments.push(format!("theme: {} -> {actual}", self.theme));
+            self.theme = actual;
         }
 
         adjustments
@@ -222,6 +236,8 @@ mod tests {
         assert_eq!(parsed["refreshIntervalSeconds"], 300);
         assert_eq!(parsed["requestTimeoutSeconds"], 10);
         assert_eq!(parsed["maskAccounts"], false);
+        assert_eq!(config.theme, "dark");
+        assert_eq!(parsed["theme"], "dark");
     }
 
     #[test]
@@ -285,6 +301,20 @@ mod tests {
         let text = std::fs::read_to_string(config_path(dir.path())).unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&text).unwrap();
         assert_eq!(parsed["refreshIntervalSeconds"], 300);
+    }
+
+    #[test]
+    fn 主题只接受日间与夜间() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(config_path(dir.path()), "{\"theme\":\"light\"}").unwrap();
+        let (light, report) = load_or_create(dir.path()).unwrap();
+        assert_eq!(light.theme, "light");
+        assert!(report.adjustments.is_empty());
+
+        std::fs::write(config_path(dir.path()), "{\"theme\":\"sepia\"}").unwrap();
+        let (fallback, report) = load_or_create(dir.path()).unwrap();
+        assert_eq!(fallback.theme, "dark");
+        assert_eq!(report.adjustments.len(), 1);
     }
 
     #[test]

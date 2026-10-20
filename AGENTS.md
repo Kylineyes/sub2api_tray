@@ -363,6 +363,7 @@ cargo build --release                  # 产物：target/release/sub2api_tray
 | `refreshIntervalSeconds` | number | `300` | 状态刷新间隔，合法范围 30～86400 |
 | `requestTimeoutSeconds` | number | `10` | 单次 HTTP 超时，合法范围 1～120 |
 | `panelPinned` | bool | `false` | 面板是否钉住（置顶显示，点外部不收起） |
+| `theme` | string | `dark` | 界面主题：`dark` / `light`，非法值回落 `dark` |
 
 * 缺失字段用默认值补齐；非法值回落到默认值并写 `warn` 日志，同时**回写**文件；
 * 语法损坏时改名为 `app.json.corrupt-<时间戳>` 后用默认值重建；
@@ -407,6 +408,8 @@ cargo build --release                  # 产物：target/release/sub2api_tray
 | 2026-10-18 | 补充测试分层约定 | 默认套件必须可重复；loopback 端到端用例标 `#[ignore]`，验收时显式运行；假服务器公共代码集中在 `main.rs::test_support`；阶段 2 标记完成 |
 | 2026-10-18 | 补充 API Key 约定 | 阶段表新增 1d；`accounts.json` 的 `apiKeys` 只存摘要（id/名称/打码值/状态/分组/最近使用/抓取时间），**不存完整 Key** |
 | 2026-10-18 | 补充浏览约定 | 阶段表新增 1e；明确"托盘"= 弹出面板（原生菜单不能滚动/展开）；账号上限 10；面板默认不显示数据目录 |
+| 2026-10-20 | 修复用量面积填充 | 折线面积不再用 `convex_polygon`（非凸会三角化穿越折线），改为相邻时间点逐段构建 Mesh：每段两个三角形、共用基线顶点，面积严格限制在曲线与基线之间 |
+| 2026-10-19 | Sub2API 双主题 | 按前端 Tailwind 色板新增日间/夜间 Palette：夜间 dark-950/dark-800/primary-400，日间 gray-50/white/primary-600；标题栏日月按钮和设置页均可切换，`app.json` 新增 `theme` 并持久化；所有面板、弹窗和默认控件同步换色 |
 | 2026-10-19 | 面板拖动与四边缩放 | 用量区字号与曲线单独放大一档；标题左侧六点抓手和标题文字可拖动无边框面板；四角/四边用全局指针判断并调 `BeginResize`，角落优先于边缘，避免只改单一方向 |
 | 2026-10-19 | 用量分 API Key | 用量区支持独立折叠和「全部 Key」下拉；单 Key 走用户态接口 `api_key_id` 过滤并按账号+区间+Key 缓存；曲线可切换总 Token/输入/输出/命中率，汇总展示输入、输出、Cache 写读、命中率、请求与实际花费；不限制用户角色 |
 | 2026-10-19 | 用量历史时间轴 | 服务端稀疏时间桶按响应 start_date/end_date/granularity 补零；24 小时/7 天/30 天曲线按真实小时/日期绘制，横轴标起止时间；重复桶合并，范围字段缺失时回退原始点 |

@@ -244,9 +244,9 @@ impl LoginDialog {
             .backdrop_color(egui::Color32::from_black_alpha(150))
             .frame(
                 egui::Frame::new()
-                    .fill(crate::app::PANEL_BG)
+                    .fill(crate::app::theme().panel_bg)
                     .corner_radius(egui::CornerRadius::same(12))
-                    .stroke(egui::Stroke::new(1.0, crate::app::PANEL_BORDER))
+                    .stroke(egui::Stroke::new(1.0, crate::app::theme().panel_border))
                     .inner_margin(egui::Margin::same(16)),
             )
             .show(ctx, |ui| {
@@ -256,13 +256,13 @@ impl LoginDialog {
                     egui::RichText::new("登陆新用户")
                         .size(crate::app::fs(15.0))
                         .strong()
-                        .color(crate::app::TEXT_PRIMARY),
+                        .color(crate::app::theme().text_primary),
                 );
                 ui.add_space(2.0);
                 ui.label(
                     egui::RichText::new("填写 Sub2API 实例地址与登录信息")
                         .size(crate::app::fs(10.0))
-                        .color(crate::app::TEXT_SECONDARY),
+                        .color(crate::app::theme().text_secondary),
                 );
                 ui.add_space(12.0);
 
@@ -312,7 +312,7 @@ impl LoginDialog {
                     ui.label(
                         egui::RichText::new(hint)
                             .size(crate::app::fs(10.0))
-                            .color(crate::app::TEXT_SECONDARY),
+                            .color(crate::app::theme().text_secondary),
                     );
                 }
 
@@ -322,7 +322,7 @@ impl LoginDialog {
                     ui.label(
                         egui::RichText::new(error)
                             .size(crate::app::fs(11.0))
-                            .color(egui::Color32::from_rgb(248, 113, 113)),
+                            .color(crate::app::theme().danger),
                     );
                 }
 
@@ -348,7 +348,7 @@ impl LoginDialog {
                             ui.label(
                                 egui::RichText::new("登录中…")
                                     .size(crate::app::fs(11.0))
-                                    .color(crate::app::TEXT_SECONDARY),
+                                    .color(crate::app::theme().text_secondary),
                             );
                         } else {
                             let label = if need_totp {
@@ -453,7 +453,7 @@ fn field_label(ui: &mut egui::Ui, text: &str) {
     ui.label(
         egui::RichText::new(text)
             .size(crate::app::fs(10.0))
-            .color(crate::app::TEXT_SECONDARY),
+            .color(crate::app::theme().text_secondary),
     );
 }
 
