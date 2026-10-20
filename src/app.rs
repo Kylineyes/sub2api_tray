@@ -54,12 +54,188 @@ const FOCUS_GRACE: Duration = Duration::from_millis(400);
 /// 再派发一次托盘单击事件（触发“切换显示”）。若不去抖，面板会关掉又立刻弹回来。
 const TOGGLE_DEBOUNCE: Duration = Duration::from_millis(250);
 
-/// 面板背景色（深色，接近 sub2api logo 的深蓝黑）。
-pub const PANEL_BG: egui::Color32 = egui::Color32::from_rgb(15, 23, 42);
+/// Sub2API 双主题调色板。
+///
+/// 颜色取自 Sub2API 前端 Tailwind 配置：
+/// 主色 primary-500 `#14b8a6`；浅色主题使用 gray-50 / white；
+/// 深色主题使用 dark-950 / dark-800 / dark-700。
+#[derive(Debug, Clone, Copy)]
+pub struct Palette {
+    /// 面板背景。
+    pub(crate) panel_bg: egui::Color32,
+    /// 面板和卡片边框。
+    pub(crate) panel_border: egui::Color32,
+    /// 普通卡片背景。
+    pub(crate) card_bg: egui::Color32,
+    /// 卡片悬浮背景。
+    pub(crate) hover_card_bg: egui::Color32,
+    /// 空状态/输入控件背景。
+    pub(crate) empty_bg: egui::Color32,
+    /// 主要文字。
+    pub(crate) text_primary: egui::Color32,
+    /// 次要文字。
+    pub(crate) text_secondary: egui::Color32,
+    /// 弱化文字。
+    pub(crate) text_dim: egui::Color32,
+    /// 悬浮时提亮/加深的文字。
+    pub(crate) text_hover: egui::Color32,
+    /// 品牌强调色。
+    pub(crate) accent: egui::Color32,
+    /// 强调色上的文字。
+    pub(crate) on_accent: egui::Color32,
+    /// 图表面积填充。
+    pub(crate) chart_fill: egui::Color32,
+    /// 错误主色。
+    pub(crate) danger: egui::Color32,
+    /// 错误提示标题。
+    pub(crate) danger_text: egui::Color32,
+    /// 错误提示正文。
+    pub(crate) danger_text_soft: egui::Color32,
+    /// 错误提示背景。
+    pub(crate) danger_bg: egui::Color32,
+    /// 错误提示边框。
+    pub(crate) danger_border: egui::Color32,
+    /// 危险操作按钮底色。
+    pub(crate) danger_button: egui::Color32,
+    /// 刷新中/信息色。
+    pub(crate) info: egui::Color32,
+    /// 离线状态色。
+    pub(crate) offline: egui::Color32,
+    /// 网格线/分隔细线。
+    pub(crate) grid_line: egui::Color32,
+    /// 极淡的悬浮背景。
+    pub(crate) overlay_subtle: egui::Color32,
+    /// 缩放角标。
+    pub(crate) resize_handle: egui::Color32,
+    /// 图表悬浮提示背景。
+    pub(crate) tooltip_bg: egui::Color32,
+    /// 输入框背景。
+    pub(crate) input_bg: egui::Color32,
+}
 
-/// 面板边框色，用来在浅色桌面上勾勒出气泡的轮廓。
-/// 卡片悬浮时的高亮底色：比 CARD_BG 亮一档，文字对比度反而更高。
-const HOVER_CARD_BG: egui::Color32 = egui::Color32::from_rgb(62, 78, 104);
+/// 夜间主题：Sub2API dark-950 + dark-800 + primary-400。
+const DARK_PALETTE: Palette = Palette {
+    panel_bg: egui::Color32::from_rgb(2, 6, 23),
+    panel_border: egui::Color32::from_rgb(51, 65, 85),
+    card_bg: egui::Color32::from_rgb(30, 41, 59),
+    hover_card_bg: egui::Color32::from_rgb(51, 65, 85),
+    empty_bg: egui::Color32::from_rgb(15, 23, 42),
+    text_primary: egui::Color32::from_rgb(243, 244, 246),
+    text_secondary: egui::Color32::from_rgb(203, 213, 225),
+    text_dim: egui::Color32::from_rgb(148, 163, 184),
+    text_hover: egui::Color32::WHITE,
+    accent: egui::Color32::from_rgb(45, 212, 191),
+    on_accent: egui::Color32::from_rgb(4, 47, 46),
+    chart_fill: egui::Color32::from_rgba_unmultiplied_const(45, 212, 191, 36),
+    danger: egui::Color32::from_rgb(248, 113, 113),
+    danger_text: egui::Color32::from_rgb(252, 165, 165),
+    danger_text_soft: egui::Color32::from_rgb(254, 202, 202),
+    danger_bg: egui::Color32::from_rgb(69, 26, 26),
+    danger_border: egui::Color32::from_rgb(153, 27, 27),
+    danger_button: egui::Color32::from_rgb(185, 28, 28),
+    info: egui::Color32::from_rgb(96, 165, 250),
+    offline: egui::Color32::from_rgb(148, 163, 184),
+    grid_line: egui::Color32::from_rgba_unmultiplied_const(255, 255, 255, 12),
+    overlay_subtle: egui::Color32::from_rgba_unmultiplied_const(255, 255, 255, 8),
+    resize_handle: egui::Color32::from_rgba_unmultiplied_const(255, 255, 255, 70),
+    tooltip_bg: egui::Color32::from_rgba_unmultiplied_const(15, 23, 42, 240),
+    input_bg: egui::Color32::from_rgb(15, 23, 42),
+};
+
+/// 日间主题：Sub2API gray-50 + white + primary-600。
+const LIGHT_PALETTE: Palette = Palette {
+    panel_bg: egui::Color32::from_rgb(248, 250, 252),
+    panel_border: egui::Color32::from_rgb(226, 232, 240),
+    card_bg: egui::Color32::WHITE,
+    hover_card_bg: egui::Color32::from_rgb(241, 245, 249),
+    empty_bg: egui::Color32::from_rgb(241, 245, 249),
+    text_primary: egui::Color32::from_rgb(15, 23, 42),
+    text_secondary: egui::Color32::from_rgb(71, 85, 105),
+    text_dim: egui::Color32::from_rgb(148, 163, 184),
+    text_hover: egui::Color32::from_rgb(2, 6, 23),
+    accent: egui::Color32::from_rgb(13, 148, 136),
+    on_accent: egui::Color32::WHITE,
+    chart_fill: egui::Color32::from_rgba_unmultiplied_const(13, 148, 136, 28),
+    danger: egui::Color32::from_rgb(220, 38, 38),
+    danger_text: egui::Color32::from_rgb(185, 28, 28),
+    danger_text_soft: egui::Color32::from_rgb(153, 27, 27),
+    danger_bg: egui::Color32::from_rgb(254, 242, 242),
+    danger_border: egui::Color32::from_rgb(254, 202, 202),
+    danger_button: egui::Color32::from_rgb(220, 38, 38),
+    info: egui::Color32::from_rgb(37, 99, 235),
+    offline: egui::Color32::from_rgb(100, 116, 139),
+    grid_line: egui::Color32::from_rgba_unmultiplied_const(0, 0, 0, 12),
+    overlay_subtle: egui::Color32::from_rgba_unmultiplied_const(0, 0, 0, 8),
+    resize_handle: egui::Color32::from_rgba_unmultiplied_const(0, 0, 0, 70),
+    tooltip_bg: egui::Color32::from_rgba_unmultiplied_const(255, 255, 255, 245),
+    input_bg: egui::Color32::WHITE,
+};
+
+thread_local! {
+    /// 当前 UI 线程使用的调色板。托盘只有一个界面线程，使用线程局部状态
+    /// 可以避免把 Palette 参数穿过几十个纯绘制函数。
+    static PALETTE: std::cell::Cell<Palette> = const { std::cell::Cell::new(DARK_PALETTE) };
+}
+
+/// 当前主题调色板。
+pub(crate) fn theme() -> Palette {
+    PALETTE.with(std::cell::Cell::get)
+}
+
+/// 根据夜间/日间选择返回调色板。
+fn palette_for(dark: bool) -> Palette {
+    if dark { DARK_PALETTE } else { LIGHT_PALETTE }
+}
+
+/// 设置当前线程的调色板。
+fn set_palette(dark: bool) {
+    PALETTE.with(|palette| palette.set(palette_for(dark)));
+}
+
+/// 把主题同步到 egui 的默认控件样式（输入框、ComboBox 弹层、按钮等）。
+fn apply_egui_visuals(ctx: &egui::Context, dark: bool) {
+    let palette = palette_for(dark);
+    let mut visuals = if dark {
+        egui::Visuals::dark()
+    } else {
+        egui::Visuals::light()
+    };
+    visuals.dark_mode = dark;
+    visuals.panel_fill = palette.panel_bg;
+    visuals.window_fill = palette.panel_bg;
+    visuals.extreme_bg_color = palette.input_bg;
+    visuals.faint_bg_color = palette.empty_bg;
+    visuals.override_text_color = Some(palette.text_primary);
+    visuals.hyperlink_color = palette.accent;
+    visuals.error_fg_color = palette.danger;
+    visuals.warn_fg_color = egui::Color32::from_rgb(245, 158, 11);
+    visuals.window_stroke = egui::Stroke::new(1.0, palette.panel_border);
+    visuals.selection.bg_fill = palette.chart_fill;
+    visuals.selection.stroke = egui::Stroke::new(1.0, palette.accent);
+
+    visuals.widgets.noninteractive.bg_fill = palette.card_bg;
+    visuals.widgets.noninteractive.weak_bg_fill = palette.card_bg;
+    visuals.widgets.noninteractive.bg_stroke = egui::Stroke::new(1.0, palette.panel_border);
+    visuals.widgets.noninteractive.fg_stroke = egui::Stroke::new(1.0, palette.text_secondary);
+
+    visuals.widgets.inactive.bg_fill = palette.empty_bg;
+    visuals.widgets.inactive.weak_bg_fill = palette.empty_bg;
+    visuals.widgets.inactive.bg_stroke = egui::Stroke::new(1.0, palette.panel_border);
+    visuals.widgets.inactive.fg_stroke = egui::Stroke::new(1.0, palette.text_primary);
+
+    visuals.widgets.hovered.bg_fill = palette.hover_card_bg;
+    visuals.widgets.hovered.weak_bg_fill = palette.hover_card_bg;
+    visuals.widgets.hovered.bg_stroke = egui::Stroke::new(1.0, palette.accent);
+    visuals.widgets.hovered.fg_stroke = egui::Stroke::new(1.0, palette.text_hover);
+
+    visuals.widgets.active.bg_fill = palette.hover_card_bg;
+    visuals.widgets.active.weak_bg_fill = palette.hover_card_bg;
+    visuals.widgets.active.bg_stroke = egui::Stroke::new(1.0, palette.accent);
+    visuals.widgets.active.fg_stroke = egui::Stroke::new(1.0, palette.text_hover);
+
+    visuals.widgets.open = visuals.widgets.active;
+    ctx.all_styles_mut(|style| style.visuals = visuals.clone());
+}
 
 /// 线性插值两个颜色（用于悬浮淡入淡出）。
 fn lerp_color(from: egui::Color32, to: egui::Color32, t: f32) -> egui::Color32 {
@@ -294,6 +470,7 @@ struct SettingsDraft {
     refresh_interval_seconds: u64,
     /// 单次请求超时（秒）。
     request_timeout_seconds: u64,
+    dark_mode: bool,
 }
 
 /// 悬浮动画状态：按 key 记录"当前淡入进度"与"上一帧的命中矩形"。
@@ -336,26 +513,6 @@ impl HoverState {
         self.rects.insert(key.to_owned(), rect);
     }
 }
-
-pub const PANEL_BORDER: egui::Color32 = egui::Color32::from_rgb(51, 65, 85);
-
-/// 卡片（状态区）背景色。
-pub const CARD_BG: egui::Color32 = egui::Color32::from_rgb(30, 41, 59);
-
-/// 空状态占位区的背景色，比卡片再暗一点，形成层次。
-const EMPTY_BG: egui::Color32 = egui::Color32::from_rgb(22, 33, 51);
-
-/// 主要文字颜色。
-pub const TEXT_PRIMARY: egui::Color32 = egui::Color32::from_rgb(226, 232, 240);
-
-/// 次要文字颜色（说明文字、版本号、快捷键提示）。
-pub const TEXT_SECONDARY: egui::Color32 = egui::Color32::from_rgb(148, 163, 184);
-
-/// 更弱的文字颜色，用于占位说明一类的“可读但不打扰”的内容。
-pub const TEXT_DIM: egui::Color32 = egui::Color32::from_rgb(100, 116, 139);
-
-/// 品牌强调色（取自 sub2api logo 的薄荷绿渐变起始色）。
-pub const ACCENT: egui::Color32 = egui::Color32::from_rgb(121, 244, 189);
 
 /// 操作成功提示在面板底部的停留时长。
 const TOAST_DURATION: Duration = Duration::from_secs(4);
@@ -551,6 +708,8 @@ pub struct TrayApp {
     /// 面板是否被钉住（置顶显示，点外部不自动收起）。
     pinned: bool,
 
+    dark_mode: bool,
+
     /// 每个账号选中的用量区间（默认 24 小时）。
     usage_range: HashMap<String, UsageRange>,
 
@@ -623,14 +782,12 @@ impl TrayApp {
             cc.egui_ctx.pixels_per_point()
         );
 
-        // 深色配色：托盘气泡贴在深色任务栏旁边时观感更统一。
-        // 这里直接改“两套主题”的样式，而不是只改当前主题：否则用户把系统切到浅色后，
-        // 按钮、分隔线等控件会变回浅色，和固定的深色面板底色打架。
-        let mut visuals = egui::Visuals::dark();
-        visuals.panel_fill = PANEL_BG;
-        visuals.window_fill = PANEL_BG;
-        cc.egui_ctx
-            .all_styles_mut(|style| style.visuals = visuals.clone());
+        let dark_mode = match &data {
+            DataLayer::Ready(store) => store.config().theme.as_str() != "light",
+            DataLayer::Unavailable(_) => true,
+        };
+        set_palette(dark_mode);
+        apply_egui_visuals(&cc.egui_ctx, dark_mode);
 
         // 钉住状态是持久化的 UI 偏好，启动时从 app.json 读回
         let pinned = match &data {
@@ -676,6 +833,7 @@ impl TrayApp {
             account_keys: HashMap::new(),
             keys_rx: None,
             pinned,
+            dark_mode,
             usage_range: HashMap::new(),
             usage_metric: HashMap::new(),
             usage_api_key: HashMap::new(),
@@ -1395,6 +1553,35 @@ impl TrayApp {
     }
 
     /// 打开设置页：把当前配置拷进草稿，改动在点"保存"前不生效。
+    fn apply_theme(&self, ctx: &egui::Context) {
+        set_palette(self.dark_mode);
+        apply_egui_visuals(ctx, self.dark_mode);
+    }
+
+    fn set_dark_mode(&mut self, ctx: &egui::Context, dark_mode: bool) {
+        self.dark_mode = dark_mode;
+        let result = if let DataLayer::Ready(store) = &mut self.data {
+            let mut config = store.config().clone();
+            config.theme = if dark_mode { "dark" } else { "light" }.to_owned();
+            match crate::config::save(store.dir(), &config) {
+                Ok(()) => {
+                    *store.config_mut() = config;
+                    Ok(())
+                }
+                Err(err) => Err(err),
+            }
+        } else {
+            Ok(())
+        };
+        if let Err(err) = result {
+            let message = format!("保存主题失败：{err:#}");
+            log::warn!("{message}");
+            self.toast = Some((message, Instant::now()));
+        }
+        self.apply_theme(ctx);
+        ctx.request_repaint();
+    }
+
     fn open_settings(&mut self) {
         let DataLayer::Ready(store) = &self.data else {
             self.toast = Some(("数据目录不可用，无法打开设置".to_owned(), Instant::now()));
@@ -1406,6 +1593,7 @@ impl TrayApp {
             autostart: crate::autostart::is_enabled(),
             refresh_interval_seconds: config.refresh_interval_seconds,
             request_timeout_seconds: config.request_timeout_seconds,
+            dark_mode: self.dark_mode,
         });
     }
 
@@ -1422,6 +1610,7 @@ impl TrayApp {
         config.mask_accounts = draft.mask_accounts;
         config.refresh_interval_seconds = draft.refresh_interval_seconds.clamp(30, 86400);
         config.request_timeout_seconds = draft.request_timeout_seconds.clamp(1, 120);
+        config.theme = if draft.dark_mode { "dark" } else { "light" }.to_owned();
 
         crate::config::save(store.dir(), &config)
             .map_err(|err| format!("保存 app.json 失败：{err:#}"))?;
@@ -1436,6 +1625,7 @@ impl TrayApp {
         }
 
         // 打码开关会影响菜单标题与卡片，立即重建
+        self.dark_mode = draft.dark_mode;
         self.rebuild_menu();
         self.toast = Some(("设置已保存".to_owned(), Instant::now()));
         Ok(())
@@ -1461,9 +1651,9 @@ impl TrayApp {
             .backdrop_color(egui::Color32::from_black_alpha(150))
             .frame(
                 egui::Frame::new()
-                    .fill(PANEL_BG)
+                    .fill(theme().panel_bg)
                     .corner_radius(egui::CornerRadius::same(12))
-                    .stroke(egui::Stroke::new(1.0, PANEL_BORDER))
+                    .stroke(egui::Stroke::new(1.0, theme().panel_border))
                     .inner_margin(egui::Margin::same(16)),
             )
             .show(ctx, |ui| {
@@ -1473,11 +1663,26 @@ impl TrayApp {
                         egui::RichText::new("设置")
                             .size(fs(14.0))
                             .strong()
-                            .color(TEXT_PRIMARY),
+                            .color(theme().text_primary),
                     );
                 });
                 ui.add_space(10.0);
 
+                ui.horizontal(|ui| {
+                    ui.label(
+                        egui::RichText::new("主题")
+                            .size(fs(12.0))
+                            .color(theme().text_secondary),
+                    );
+                    if ui.selectable_label(!draft.dark_mode, "日间").clicked() {
+                        draft.dark_mode = false;
+                    }
+                    if ui.selectable_label(draft.dark_mode, "夜间").clicked() {
+                        draft.dark_mode = true;
+                    }
+                });
+
+                ui.add_space(8.0);
                 ui.checkbox(
                     &mut draft.mask_accounts,
                     egui::RichText::new("账号名打码显示（只影响界面）").size(fs(12.0)),
@@ -1488,14 +1693,18 @@ impl TrayApp {
                     ui.label(
                         egui::RichText::new("状态刷新间隔")
                             .size(fs(12.0))
-                            .color(TEXT_SECONDARY),
+                            .color(theme().text_secondary),
                     );
                     ui.add(
                         egui::DragValue::new(&mut draft.refresh_interval_seconds)
                             .range(30..=86400)
                             .speed(10.0),
                     );
-                    ui.label(egui::RichText::new("秒").size(fs(11.0)).color(TEXT_DIM));
+                    ui.label(
+                        egui::RichText::new("秒")
+                            .size(fs(11.0))
+                            .color(theme().text_dim),
+                    );
                 });
 
                 ui.add_space(4.0);
@@ -1503,10 +1712,14 @@ impl TrayApp {
                     ui.label(
                         egui::RichText::new("请求超时")
                             .size(fs(12.0))
-                            .color(TEXT_SECONDARY),
+                            .color(theme().text_secondary),
                     );
                     ui.add(egui::DragValue::new(&mut draft.request_timeout_seconds).range(1..=120));
-                    ui.label(egui::RichText::new("秒").size(fs(11.0)).color(TEXT_DIM));
+                    ui.label(
+                        egui::RichText::new("秒")
+                            .size(fs(11.0))
+                            .color(theme().text_dim),
+                    );
                 });
 
                 ui.add_space(6.0);
@@ -1533,7 +1746,7 @@ impl TrayApp {
                         ui.label(
                             egui::RichText::new("检查中…")
                                 .size(fs(10.0))
-                                .color(TEXT_DIM),
+                                .color(theme().text_dim),
                         );
                     }
                 });
@@ -1541,7 +1754,7 @@ impl TrayApp {
                     ui.label(
                         egui::RichText::new(message)
                             .size(fs(10.0))
-                            .color(TEXT_SECONDARY),
+                            .color(theme().text_secondary),
                     );
                 }
                 if let Some(url) = update_url.as_deref()
@@ -1559,7 +1772,7 @@ impl TrayApp {
                 ui.label(
                     egui::RichText::new("保存后立即生效并写入 app.json。")
                         .size(fs(10.0))
-                        .color(TEXT_DIM),
+                        .color(theme().text_dim),
                 );
                 ui.add_space(10.0);
 
@@ -1568,9 +1781,9 @@ impl TrayApp {
                         egui::RichText::new("保存")
                             .size(fs(12.0))
                             .strong()
-                            .color(egui::Color32::from_rgb(15, 23, 42)),
+                            .color(theme().on_accent),
                     )
-                    .fill(ACCENT);
+                    .fill(theme().accent);
                     if ui.add_sized([80.0, 26.0], save_button).clicked() {
                         save = true;
                     }
@@ -2032,6 +2245,7 @@ impl TrayApp {
     /// `ui` 是 eframe 提供的根 Ui（没有边距也没有背景），因此这里用 [`egui::CentralPanel`]
     /// 再包一层，才能得到带圆角/内边距的气泡外观。
     fn draw_panel(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
+        self.apply_theme(ctx);
         let at_limit = self.data_account_count() >= MAX_ACCOUNTS;
         // 先在闭包外把需要的信息整理成"纯数据"：
         // 闭包内若再借用 `self.data`，会和 `&mut self` 的方法签名打架，
@@ -2059,6 +2273,7 @@ impl TrayApp {
         let mut open_settings = false;
         // 图钉（置顶）点击结果
         let mut toggle_pin = false;
+        let mut toggle_theme = false;
         // 悬浮动画状态：先取出来，绘制闭包里才能可变借用
         let mut hover = std::mem::take(&mut self.hover);
 
@@ -2066,9 +2281,9 @@ impl TrayApp {
             .frame(
                 egui::Frame::new()
                     // 圆角 + 深色填充 + 细边框，构成气泡本体
-                    .fill(PANEL_BG)
+                    .fill(theme().panel_bg)
                     .corner_radius(egui::CornerRadius::same(12))
-                    .stroke(egui::Stroke::new(1.0, PANEL_BORDER))
+                    .stroke(egui::Stroke::new(1.0, theme().panel_border))
                     .inner_margin(egui::Margin::same(16)),
             )
             .show(ui, |ui| {
@@ -2076,9 +2291,16 @@ impl TrayApp {
                 // 底部（数据目录 + 退出）固定、中间内容可滚动。
                 // 这样即使账号很多或出现很长的错误提示，也不会把页脚挤出去与正文重叠。
                 egui::Panel::top("panel_header")
-                    .frame(egui::Frame::NONE.fill(PANEL_BG))
+                    .frame(egui::Frame::NONE.fill(theme().panel_bg))
                     .show(ui, |ui| {
-                        draw_header(ui, &mut open_settings, self.pinned, &mut toggle_pin);
+                        draw_header(
+                            ui,
+                            &mut open_settings,
+                            self.pinned,
+                            &mut toggle_pin,
+                            self.dark_mode,
+                            &mut toggle_theme,
+                        );
 
                         if let Some(reason) = storage_error.as_deref() {
                             ui.add_space(12.0);
@@ -2090,12 +2312,14 @@ impl TrayApp {
                     .frame(
                         // 页脚要不透明并留出上边距：滚动区的内容一旦超出，
                         // 会正好被页脚裁掉，透明背景会让被裁的卡片文字"压"在页脚上。
-                        egui::Frame::NONE.fill(PANEL_BG).inner_margin(egui::Margin {
-                            left: 0,
-                            right: 0,
-                            top: 8,
-                            bottom: 0,
-                        }),
+                        egui::Frame::NONE
+                            .fill(theme().panel_bg)
+                            .inner_margin(egui::Margin {
+                                left: 0,
+                                right: 0,
+                                top: 8,
+                                bottom: 0,
+                            }),
                     )
                     .show(ui, |ui| {
                         draw_footer(ui, toast.as_deref());
@@ -2216,6 +2440,9 @@ impl TrayApp {
         if toggle_pin {
             self.set_pinned(ctx, !self.pinned);
         }
+        if toggle_theme {
+            self.set_dark_mode(ctx, !self.dark_mode);
+        }
 
         // ---- 设置页 ----
         self.draw_settings(ctx);
@@ -2249,9 +2476,9 @@ impl TrayApp {
             .backdrop_color(egui::Color32::from_black_alpha(150))
             .frame(
                 egui::Frame::new()
-                    .fill(PANEL_BG)
+                    .fill(theme().panel_bg)
                     .corner_radius(egui::CornerRadius::same(12))
-                    .stroke(egui::Stroke::new(1.0, PANEL_BORDER))
+                    .stroke(egui::Stroke::new(1.0, theme().panel_border))
                     .inner_margin(egui::Margin::same(16)),
             )
             .show(ctx, |ui| {
@@ -2260,7 +2487,7 @@ impl TrayApp {
                     egui::RichText::new("退出账号并删除记录")
                         .size(fs(14.0))
                         .strong()
-                        .color(TEXT_PRIMARY),
+                        .color(theme().text_primary),
                 );
                 ui.add_space(8.0);
                 ui.label(
@@ -2268,7 +2495,7 @@ impl TrayApp {
                         "确定退出 {display} 并删除记录？删除后需要重新登录才能恢复。"
                     ))
                     .size(fs(11.0))
-                    .color(TEXT_SECONDARY),
+                    .color(theme().text_secondary),
                 );
                 ui.add_space(14.0);
                 ui.horizontal(|ui| {
@@ -2279,8 +2506,7 @@ impl TrayApp {
                         cancel = true;
                     }
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        let delete_button =
-                            egui::Button::new("删除").fill(egui::Color32::from_rgb(185, 28, 28));
+                        let delete_button = egui::Button::new("删除").fill(theme().danger_button);
                         if ui.add_sized([96.0, 28.0], delete_button).clicked() {
                             confirm = true;
                         }
@@ -2504,11 +2730,11 @@ fn draw_pin(ui: &mut egui::Ui, pinned: bool) -> egui::Response {
     let (rect, response) = ui.allocate_exact_size(egui::vec2(size, size), egui::Sense::click());
     let hovered = response.hovered();
     let color = if pinned {
-        ACCENT
+        theme().accent
     } else if hovered {
-        TEXT_PRIMARY
+        theme().text_primary
     } else {
-        TEXT_SECONDARY
+        theme().text_secondary
     };
     let painter = ui.painter();
     let center = rect.center();
@@ -2547,7 +2773,11 @@ fn draw_gear(ui: &mut egui::Ui) -> egui::Response {
     let size = fs(16.0);
     let (rect, response) = ui.allocate_exact_size(egui::vec2(size, size), egui::Sense::click());
     let hovered = response.hovered();
-    let color = if hovered { ACCENT } else { TEXT_SECONDARY };
+    let color = if hovered {
+        theme().accent
+    } else {
+        theme().text_secondary
+    };
     let center = rect.center();
     let painter = ui.painter();
 
@@ -2572,19 +2802,75 @@ fn draw_gear(ui: &mut egui::Ui) -> egui::Response {
     response.on_hover_cursor(egui::CursorIcon::PointingHand)
 }
 
+/// 日间/夜间主题切换按钮。
+///
+/// 当前是夜间时显示太阳，表示点击切到日间；当前是日间时显示月亮。
+fn draw_theme_toggle(ui: &mut egui::Ui, dark_mode: bool) -> egui::Response {
+    let size = fs(16.0);
+    let (rect, response) = ui.allocate_exact_size(egui::vec2(size, size), egui::Sense::click());
+    let hovered = response.hovered();
+    let color = if hovered {
+        theme().accent
+    } else {
+        theme().text_secondary
+    };
+    let center = rect.center();
+    let painter = ui.painter();
+
+    if dark_mode {
+        // 太阳：空心圆 + 8 条短射线。
+        painter.circle_stroke(center, size * 0.25, egui::Stroke::new(1.5, color));
+        for index in 0..8 {
+            let angle = index as f32 * std::f32::consts::TAU / 8.0;
+            let (sin, cos) = angle.sin_cos();
+            painter.line_segment(
+                [
+                    egui::pos2(center.x + cos * size * 0.36, center.y + sin * size * 0.36),
+                    egui::pos2(center.x + cos * size * 0.48, center.y + sin * size * 0.48),
+                ],
+                egui::Stroke::new(1.4, color),
+            );
+        }
+    } else {
+        // 月亮：实心圆再用面板底色挖掉一块，形成月牙。
+        painter.circle_filled(center, size * 0.34, color);
+        painter.circle_filled(
+            center + egui::vec2(size * 0.18, -size * 0.12),
+            size * 0.29,
+            theme().panel_bg,
+        );
+    }
+
+    let hint = if dark_mode {
+        "切换到日间模式"
+    } else {
+        "切换到夜间模式"
+    };
+    response
+        .on_hover_text(hint)
+        .on_hover_cursor(egui::CursorIcon::PointingHand)
+}
+
 /// 顶部条：只保留标题、版本号与齿轮。
-fn draw_header(ui: &mut egui::Ui, open_settings: &mut bool, pinned: bool, toggle_pin: &mut bool) {
+fn draw_header(
+    ui: &mut egui::Ui,
+    open_settings: &mut bool,
+    pinned: bool,
+    toggle_pin: &mut bool,
+    dark_mode: bool,
+    toggle_theme: &mut bool,
+) {
+    // 控件全部靠左排列：无边框托盘窗口在不同 DPI 下可用宽度差异很大，
+    // 右对齐在窄窗口里容易把主题/设置按钮挤出可视区。
     ui.horizontal(|ui| {
         draw_window_drag_handle(ui);
-        // 标题本身也可以拖动窗口：边框窗口没有系统标题栏，需要给用户一个
-        // 明确、面积足够大的拖拽入口；右侧图钉/齿轮仍保持独立点击。
         let title = ui
             .add(
                 egui::Label::new(
                     egui::RichText::new("Sub2API 托盘")
                         .size(fs(13.0))
                         .strong()
-                        .color(TEXT_PRIMARY),
+                        .color(theme().text_primary),
                 )
                 .sense(egui::Sense::drag()),
             )
@@ -2593,29 +2879,29 @@ fn draw_header(ui: &mut egui::Ui, open_settings: &mut bool, pinned: bool, toggle
             ui.ctx().send_viewport_cmd(egui::ViewportCommand::StartDrag);
         }
 
-        // 版本号与齿轮靠右，弱化处理，避免抢标题的视觉重心
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            if draw_gear(ui).clicked() {
-                *open_settings = true;
-            }
-            // 图钉：切换"置顶显示"（钉住后点面板外部不会收起）
-            if draw_pin(ui, pinned).clicked() {
-                *toggle_pin = true;
-            }
-            ui.label(
-                egui::RichText::new(format!("v{}", crate::APP_VERSION))
-                    .size(fs(10.0))
-                    .color(TEXT_SECONDARY),
-            );
-        });
+        ui.add_space(8.0);
+        if draw_theme_toggle(ui, dark_mode).clicked() {
+            *toggle_theme = true;
+        }
+        if draw_pin(ui, pinned).clicked() {
+            *toggle_pin = true;
+        }
+        if draw_gear(ui).clicked() {
+            *open_settings = true;
+        }
+        ui.label(
+            egui::RichText::new(format!("v{}", crate::APP_VERSION))
+                .size(fs(9.5))
+                .color(theme().text_dim),
+        );
     });
 
-    // 标题下的品牌色细线：让面板在深色任务栏旁也能一眼认出是哪个产品
+    // 标题下的品牌色细线：让面板在深色任务栏旁也能一眼认出是哪个产品。
     ui.add_space(6.0);
     let (line_rect, _) =
         ui.allocate_exact_size(egui::vec2(ui.available_width(), 2.0), egui::Sense::hover());
     ui.painter()
-        .rect_filled(line_rect, egui::CornerRadius::same(1), ACCENT);
+        .rect_filled(line_rect, egui::CornerRadius::same(1), theme().accent);
 }
 
 /// 标题栏左侧的拖动抓手。
@@ -2637,7 +2923,11 @@ fn draw_window_drag_handle(ui: &mut egui::Ui) {
     }
 
     let painter = ui.painter();
-    let color = if active { ACCENT } else { TEXT_DIM };
+    let color = if active {
+        theme().accent
+    } else {
+        theme().text_dim
+    };
     let center = rect.center();
     for row in -1..=1 {
         for column in 0..2 {
@@ -2737,7 +3027,7 @@ fn draw_resize_ticks(ui: &mut egui::Ui) {
     let top = bounds.top();
     let bottom = bounds.bottom();
     let painter = ui.painter();
-    let stroke = egui::Stroke::new(1.2, egui::Color32::from_white_alpha(70));
+    let stroke = egui::Stroke::new(1.2, theme().resize_handle);
     for offset in [4.0, 8.0, 12.0] {
         painter.line_segment(
             [
@@ -2815,11 +3105,11 @@ fn badge_label(rgb: [u8; 3]) -> &'static str {
 /// 状态点颜色。
 fn status_color(status: AccountStatus) -> egui::Color32 {
     match status {
-        AccountStatus::Online => ACCENT,
-        AccountStatus::Refreshing => egui::Color32::from_rgb(96, 165, 250),
-        AccountStatus::CredentialsInvalid => egui::Color32::from_rgb(248, 113, 113),
-        AccountStatus::Offline => egui::Color32::from_rgb(148, 163, 184),
-        AccountStatus::Unknown => TEXT_DIM,
+        AccountStatus::Online => theme().accent,
+        AccountStatus::Refreshing => theme().info,
+        AccountStatus::CredentialsInvalid => theme().danger,
+        AccountStatus::Offline => theme().offline,
+        AccountStatus::Unknown => theme().text_dim,
     }
 }
 
@@ -2845,7 +3135,7 @@ fn draw_account_summary(
     let offline = cards.len().saturating_sub(online + invalid);
 
     egui::Frame::new()
-        .fill(CARD_BG)
+        .fill(theme().card_bg)
         .corner_radius(egui::CornerRadius::same(10))
         .inner_margin(egui::Margin::same(12))
         .show(ui, |ui| {
@@ -2855,7 +3145,7 @@ fn draw_account_summary(
                     egui::RichText::new(format!("已登录 {} 个账号", cards.len()))
                         .size(fs(13.0))
                         .strong()
-                        .color(TEXT_PRIMARY),
+                        .color(theme().text_primary),
                 );
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     if ui
@@ -2874,9 +3164,9 @@ fn draw_account_summary(
                         egui::RichText::new("＋ 登录")
                             .size(fs(10.0))
                             .strong()
-                            .color(egui::Color32::from_rgb(15, 23, 42)),
+                            .color(theme().on_accent),
                     )
-                    .fill(ACCENT);
+                    .fill(theme().accent);
                     let response = if at_limit {
                         ui.add_enabled_ui(false, |ui| ui.add_sized([64.0, 22.0], login))
                             .inner
@@ -2901,7 +3191,7 @@ fn draw_account_summary(
                     "在线 {online} · 离线 {offline} · 凭据损坏 {invalid}"
                 ))
                 .size(fs(11.0))
-                .color(TEXT_SECONDARY),
+                .color(theme().text_secondary),
             );
         });
 }
@@ -2923,7 +3213,7 @@ fn draw_chevron(ui: &mut egui::Ui, expanded: bool, hover_t: f32) -> egui::Respon
     painter.rect_filled(
         rect.shrink(1.0),
         egui::CornerRadius::same(5),
-        lerp_color(egui::Color32::from_white_alpha(8), HOVER_CARD_BG, hover_t),
+        lerp_color(theme().overlay_subtle, theme().hover_card_bg, hover_t),
     );
 
     // 折线的半宽：16px 的图标取 4.2，视觉上接近 Lucide 在 16px 下的比例
@@ -2948,7 +3238,7 @@ fn draw_chevron(ui: &mut egui::Ui, expanded: bool, hover_t: f32) -> egui::Respon
         points,
         egui::Stroke::new(
             1.7,
-            lerp_color(TEXT_SECONDARY, egui::Color32::WHITE, hover_t * 0.8),
+            lerp_color(theme().text_secondary, theme().text_hover, hover_t * 0.8),
         ),
     ));
 
@@ -2973,7 +3263,7 @@ fn draw_account_card(
     let hover_key = format!("acct:{}", card.id);
     let t = hover.t(ui.ctx(), &hover_key);
     let frame = egui::Frame::new()
-        .fill(lerp_color(CARD_BG, HOVER_CARD_BG, t))
+        .fill(lerp_color(theme().card_bg, theme().hover_card_bg, t))
         .corner_radius(egui::CornerRadius::same(10))
         .inner_margin(egui::Margin::same(12))
         .show(ui, |ui| {
@@ -2994,7 +3284,11 @@ fn draw_account_card(
                         egui::RichText::new(&card.display)
                             .size(fs(13.0))
                             .strong()
-                            .color(lerp_color(TEXT_PRIMARY, egui::Color32::WHITE, t * 0.45)),
+                            .color(lerp_color(
+                                theme().text_primary,
+                                theme().text_hover,
+                                t * 0.45,
+                            )),
                     );
                     // 展开时右侧给"退出"按钮，角色名弱化在它左边。
                     // 面板被缩窄时只隐藏角色名（退出按钮始终在），否则会挤在一起。
@@ -3015,7 +3309,7 @@ fn draw_account_card(
                                 ui.label(
                                     egui::RichText::new(card.role_label)
                                         .size(fs(10.0))
-                                        .color(TEXT_SECONDARY),
+                                        .color(theme().text_secondary),
                                 );
                             }
                         });
@@ -3032,7 +3326,7 @@ fn draw_account_card(
             ui.label(
                 egui::RichText::new(&card.base_url)
                     .size(fs(10.0))
-                    .color(TEXT_DIM),
+                    .color(theme().text_dim),
             );
 
             // 收起态只保留"账户 + 网址"；余额、订阅、刷新时间等全部收进展开态，
@@ -3045,17 +3339,21 @@ fn draw_account_card(
                 ui.label(
                     egui::RichText::new(status_line)
                         .size(fs(11.0))
-                        .color(TEXT_SECONDARY),
+                        .color(theme().text_secondary),
                 );
 
                 if let Some(summary) = &card.summary {
-                    ui.label(egui::RichText::new(summary).size(fs(10.0)).color(TEXT_DIM));
+                    ui.label(
+                        egui::RichText::new(summary)
+                            .size(fs(10.0))
+                            .color(theme().text_dim),
+                    );
                 }
 
                 ui.label(
                     egui::RichText::new(&card.refreshed)
                         .size(fs(9.0))
-                        .color(TEXT_DIM),
+                        .color(theme().text_dim),
                 );
 
                 // 失败原因只展示一行，完整信息在日志里
@@ -3064,7 +3362,7 @@ fn draw_account_card(
                     ui.label(
                         egui::RichText::new(first_line)
                             .size(fs(9.0))
-                            .color(egui::Color32::from_rgb(248, 113, 113)),
+                            .color(theme().danger),
                     );
                 }
 
@@ -3108,7 +3406,7 @@ fn draw_usage_section(ui: &mut egui::Ui, card: &AccountCard, actions: &mut Usage
                     egui::RichText::new("我的用量")
                         .size(usage_fs(11.0))
                         .strong()
-                        .color(TEXT_PRIMARY),
+                        .color(theme().text_primary),
                 )
                 .sense(egui::Sense::click()),
             )
@@ -3120,7 +3418,7 @@ fn draw_usage_section(ui: &mut egui::Ui, card: &AccountCard, actions: &mut Usage
             ui.label(
                 egui::RichText::new("已收起")
                     .size(usage_fs(8.5))
-                    .color(TEXT_DIM),
+                    .color(theme().text_dim),
             );
         }
     });
@@ -3156,7 +3454,7 @@ fn draw_usage_section(ui: &mut egui::Ui, card: &AccountCard, actions: &mut Usage
             .selected_text(
                 egui::RichText::new(selected_key_label)
                     .size(usage_fs(9.0))
-                    .color(TEXT_PRIMARY),
+                    .color(theme().text_primary),
             )
             .width(usage_fs(108.0))
             .show_ui(ui, |ui| {
@@ -3181,12 +3479,12 @@ fn draw_usage_section(ui: &mut egui::Ui, card: &AccountCard, actions: &mut Usage
                 let text = egui::RichText::new(range.label())
                     .size(usage_fs(9.0))
                     .color(if selected {
-                        egui::Color32::from_rgb(15, 23, 42)
+                        theme().on_accent
                     } else {
-                        TEXT_SECONDARY
+                        theme().text_secondary
                     });
                 let button = egui::Button::new(text).small().fill(if selected {
-                    ACCENT
+                    theme().accent
                 } else {
                     egui::Color32::TRANSPARENT
                 });
@@ -3204,12 +3502,12 @@ fn draw_usage_section(ui: &mut egui::Ui, card: &AccountCard, actions: &mut Usage
             let text = egui::RichText::new(metric.label())
                 .size(usage_fs(8.5))
                 .color(if selected {
-                    egui::Color32::from_rgb(15, 23, 42)
+                    theme().on_accent
                 } else {
-                    TEXT_SECONDARY
+                    theme().text_secondary
                 });
             let button = egui::Button::new(text).small().fill(if selected {
-                ACCENT
+                theme().accent
             } else {
                 egui::Color32::TRANSPARENT
             });
@@ -3226,7 +3524,7 @@ fn draw_usage_section(ui: &mut egui::Ui, card: &AccountCard, actions: &mut Usage
             ui.label(
                 egui::RichText::new("加载用量…")
                     .size(usage_fs(9.0))
-                    .color(TEXT_DIM),
+                    .color(theme().text_dim),
             );
         });
         return;
@@ -3236,7 +3534,7 @@ fn draw_usage_section(ui: &mut egui::Ui, card: &AccountCard, actions: &mut Usage
         ui.label(
             egui::RichText::new(error)
                 .size(usage_fs(9.0))
-                .color(egui::Color32::from_rgb(248, 113, 113)),
+                .color(theme().danger),
         );
         return;
     }
@@ -3249,7 +3547,7 @@ fn draw_usage_section(ui: &mut egui::Ui, card: &AccountCard, actions: &mut Usage
         ui.label(
             egui::RichText::new("该区间暂无用量")
                 .size(usage_fs(9.0))
-                .color(TEXT_DIM),
+                .color(theme().text_dim),
         );
         return;
     }
@@ -3272,7 +3570,7 @@ fn draw_usage_totals(ui: &mut egui::Ui, card: &AccountCard) {
         egui::RichText::new(scope)
             .size(usage_fs(8.5))
             .strong()
-            .color(TEXT_SECONDARY),
+            .color(theme().text_secondary),
     );
     ui.horizontal_wrapped(|ui| {
         usage_metric_chip(ui, "总", fmt_tokens(totals.total_tokens));
@@ -3293,14 +3591,14 @@ fn draw_usage_totals(ui: &mut egui::Ui, card: &AccountCard) {
 /// 一个紧凑的指标小标签。
 fn usage_metric_chip(ui: &mut egui::Ui, label: &str, value: String) {
     egui::Frame::new()
-        .fill(EMPTY_BG)
+        .fill(theme().empty_bg)
         .corner_radius(egui::CornerRadius::same(4))
         .inner_margin(egui::Margin::symmetric(5, 2))
         .show(ui, |ui| {
             ui.label(
                 egui::RichText::new(format!("{label} {value}"))
                     .size(usage_fs(8.5))
-                    .color(TEXT_SECONDARY),
+                    .color(theme().text_secondary),
             );
         });
 }
@@ -3327,7 +3625,7 @@ fn draw_usage_chart(ui: &mut egui::Ui, points: &[crate::api::UsagePoint], metric
         let y = plot.top() + plot.height() * step as f32 / 3.0;
         painter.line_segment(
             [egui::pos2(plot.left(), y), egui::pos2(plot.right(), y)],
-            egui::Stroke::new(1.0, egui::Color32::from_white_alpha(12)),
+            egui::Stroke::new(1.0, theme().grid_line),
         );
     }
 
@@ -3337,7 +3635,7 @@ fn draw_usage_chart(ui: &mut egui::Ui, points: &[crate::api::UsagePoint], metric
         egui::Align2::RIGHT_TOP,
         metric.format(max_value as f64),
         egui::FontId::proportional(usage_fs(7.5)),
-        TEXT_DIM,
+        theme().text_dim,
     );
     let count = points.len();
     let x_at = |index: usize| -> f32 {
@@ -3367,18 +3665,18 @@ fn draw_usage_chart(ui: &mut egui::Ui, points: &[crate::api::UsagePoint], metric
     area.push(egui::pos2(left.x, plot.bottom()));
     painter.add(egui::Shape::convex_polygon(
         area,
-        egui::Color32::from_rgba_unmultiplied(121, 244, 189, 36),
+        theme().chart_fill,
         egui::Stroke::NONE,
     ));
     painter.add(egui::Shape::line(
         line.clone(),
-        egui::Stroke::new(1.8, ACCENT),
+        egui::Stroke::new(1.8, theme().accent),
     ));
 
     // 只给非零时间桶画点，避免补零后的 0 值把曲线压成一排圆点。
     for (index, value) in values.iter().enumerate() {
         if *value > 0.0 {
-            painter.circle_filled(line[index], 2.0, ACCENT);
+            painter.circle_filled(line[index], 2.0, theme().accent);
         }
     }
 
@@ -3389,13 +3687,9 @@ fn draw_usage_chart(ui: &mut egui::Ui, points: &[crate::api::UsagePoint], metric
         let x = x_at(index);
         painter.line_segment(
             [egui::pos2(x, plot.top()), egui::pos2(x, plot.bottom())],
-            egui::Stroke::new(1.0, egui::Color32::from_white_alpha(70)),
+            egui::Stroke::new(1.0, theme().resize_handle),
         );
-        painter.circle_filled(
-            egui::pos2(x, y_at(values[index])),
-            3.2,
-            egui::Color32::WHITE,
-        );
+        painter.circle_filled(egui::pos2(x, y_at(values[index])), 3.2, theme().text_hover);
 
         let point = &points[index];
         let text = format!(
@@ -3413,7 +3707,7 @@ fn draw_usage_chart(ui: &mut egui::Ui, points: &[crate::api::UsagePoint], metric
         let galley = painter.layout(
             text,
             egui::FontId::proportional(usage_fs(8.5)),
-            TEXT_PRIMARY,
+            theme().text_primary,
             plot.width() * 0.62,
         );
         let mut pos = egui::pos2(x + 10.0, plot.top() + 4.0);
@@ -3424,12 +3718,8 @@ fn draw_usage_chart(ui: &mut egui::Ui, points: &[crate::api::UsagePoint], metric
             pos - egui::vec2(5.0, 3.0),
             galley.size() + egui::vec2(10.0, 6.0),
         );
-        painter.rect_filled(
-            background,
-            egui::CornerRadius::same(4),
-            egui::Color32::from_rgba_unmultiplied(15, 23, 42, 240),
-        );
-        painter.galley(pos, galley, TEXT_PRIMARY);
+        painter.rect_filled(background, egui::CornerRadius::same(4), theme().tooltip_bg);
+        painter.galley(pos, galley, theme().text_primary);
     }
 
     // 横轴只标首尾两个真实时间桶，空间足够时再补中间点。
@@ -3441,7 +3731,7 @@ fn draw_usage_chart(ui: &mut egui::Ui, points: &[crate::api::UsagePoint], metric
         egui::Align2::LEFT_BOTTOM,
         first,
         axis_font.clone(),
-        TEXT_DIM,
+        theme().text_dim,
     );
     if count > 1 {
         painter.text(
@@ -3449,7 +3739,7 @@ fn draw_usage_chart(ui: &mut egui::Ui, points: &[crate::api::UsagePoint], metric
             egui::Align2::RIGHT_BOTTOM,
             last,
             axis_font.clone(),
-            TEXT_DIM,
+            theme().text_dim,
         );
     }
     if count > 2 {
@@ -3459,7 +3749,7 @@ fn draw_usage_chart(ui: &mut egui::Ui, points: &[crate::api::UsagePoint], metric
             egui::Align2::CENTER_BOTTOM,
             middle,
             axis_font,
-            TEXT_DIM,
+            theme().text_dim,
         );
     }
 }
@@ -3495,7 +3785,7 @@ fn draw_account_keys(
             ui.label(
                 egui::RichText::new("正在拉取 Key…")
                     .size(fs(10.0))
-                    .color(TEXT_SECONDARY),
+                    .color(theme().text_secondary),
             );
         });
         return;
@@ -3507,7 +3797,7 @@ fn draw_account_keys(
             ui.label(
                 egui::RichText::new("正在拉取 Key…")
                     .size(fs(10.0))
-                    .color(TEXT_SECONDARY),
+                    .color(theme().text_secondary),
             );
         });
         return;
@@ -3517,14 +3807,14 @@ fn draw_account_keys(
         ui.label(
             egui::RichText::new(error)
                 .size(fs(10.0))
-                .color(egui::Color32::from_rgb(248, 113, 113)),
+                .color(theme().danger),
         );
         // 离线回退：明确告诉用户这是缓存，数据可能已经变化
         if state.cached {
             ui.label(
                 egui::RichText::new("缓存数据 · 可能已过期，联网后会刷新")
                     .size(fs(9.0))
-                    .color(TEXT_DIM),
+                    .color(theme().text_dim),
             );
         }
     }
@@ -3536,7 +3826,7 @@ fn draw_account_keys(
         ui.label(
             egui::RichText::new("该账号没有 API Key")
                 .size(fs(10.0))
-                .color(TEXT_DIM),
+                .color(theme().text_dim),
         );
         return;
     }
@@ -3548,61 +3838,73 @@ fn draw_account_keys(
         let kt = hover.t(ui.ctx(), &hover_key);
         // 底色随淡入进度插值：0 时完全透明，1 时是比卡片略亮的深蓝，
         // 文字同时提亮，保证高亮后依然清晰（不再"白底盖字"）。
-        let row_frame = egui::Frame::new()
-            .fill(lerp_color(egui::Color32::TRANSPARENT, HOVER_CARD_BG, kt))
-            .stroke(egui::Stroke::new(
-                1.0,
-                lerp_color(egui::Color32::TRANSPARENT, ACCENT, kt * 0.7),
-            ))
-            .corner_radius(egui::CornerRadius::same(6))
-            .inner_margin(egui::Margin::symmetric(7, 4))
-            .show(ui, |ui| {
-                ui.set_width(ui.available_width());
-                // 第一行：名称 + 打码值（左），订阅名（右）——订阅右置可省掉一整行
-                ui.horizontal(|ui| {
-                    ui.label(
-                        egui::RichText::new(format!("{}  {}", key.name, key.masked))
-                            .size(fs(11.0))
-                            .color(lerp_color(TEXT_PRIMARY, egui::Color32::WHITE, kt * 0.4)),
-                    );
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if let Some(group) = key.group.as_ref().or(card.subscription.as_ref()) {
-                            ui.label(egui::RichText::new(group).size(fs(9.0)).color(lerp_color(
-                                TEXT_DIM,
-                                TEXT_SECONDARY,
-                                kt,
-                            )));
+        let row_frame =
+            egui::Frame::new()
+                .fill(lerp_color(
+                    egui::Color32::TRANSPARENT,
+                    theme().hover_card_bg,
+                    kt,
+                ))
+                .stroke(egui::Stroke::new(
+                    1.0,
+                    lerp_color(egui::Color32::TRANSPARENT, theme().accent, kt * 0.7),
+                ))
+                .corner_radius(egui::CornerRadius::same(6))
+                .inner_margin(egui::Margin::symmetric(7, 4))
+                .show(ui, |ui| {
+                    ui.set_width(ui.available_width());
+                    // 第一行：名称 + 打码值（左），订阅名（右）——订阅右置可省掉一整行
+                    ui.horizontal(|ui| {
+                        ui.label(
+                            egui::RichText::new(format!("{}  {}", key.name, key.masked))
+                                .size(fs(11.0))
+                                .color(lerp_color(
+                                    theme().text_primary,
+                                    theme().text_hover,
+                                    kt * 0.4,
+                                )),
+                        );
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if let Some(group) = key.group.as_ref().or(card.subscription.as_ref()) {
+                                ui.label(egui::RichText::new(group).size(fs(9.0)).color(
+                                    lerp_color(theme().text_dim, theme().text_secondary, kt),
+                                ));
+                            }
+                        });
+                    });
+
+                    // 第二行：额度与用量
+                    let used = key.quota_used.unwrap_or(0.0);
+                    let quota_text = match key.quota {
+                        Some(quota) if quota > 0.0 => {
+                            format!("已用 ${used:.2} / 总额度 ${quota:.2}")
+                        }
+                        _ => format!("已用 ${used:.2} / 总额度 不限"),
+                    };
+                    let usage_5h = key.usage_5h.unwrap_or(0.0);
+                    ui.horizontal(|ui| {
+                        ui.label(
+                            egui::RichText::new(format!("{quota_text} · 近 5 小时 ${usage_5h:.2}"))
+                                .size(fs(10.0))
+                                .color(lerp_color(
+                                    theme().text_secondary,
+                                    theme().text_hover,
+                                    kt * 0.3,
+                                )),
+                        );
+                        // 悬浮时行内提示"点击复制"：比系统 tooltip 轻，不会盖住内容
+                        if kt > 0.05 {
+                            ui.with_layout(
+                                egui::Layout::right_to_left(egui::Align::Center),
+                                |ui| {
+                                    ui.label(egui::RichText::new("点击复制").size(fs(9.0)).color(
+                                        lerp_color(egui::Color32::TRANSPARENT, theme().accent, kt),
+                                    ));
+                                },
+                            );
                         }
                     });
                 });
-
-                // 第二行：额度与用量
-                let used = key.quota_used.unwrap_or(0.0);
-                let quota_text = match key.quota {
-                    Some(quota) if quota > 0.0 => {
-                        format!("已用 ${used:.2} / 总额度 ${quota:.2}")
-                    }
-                    _ => format!("已用 ${used:.2} / 总额度 不限"),
-                };
-                let usage_5h = key.usage_5h.unwrap_or(0.0);
-                ui.horizontal(|ui| {
-                    ui.label(
-                        egui::RichText::new(format!("{quota_text} · 近 5 小时 ${usage_5h:.2}"))
-                            .size(fs(10.0))
-                            .color(lerp_color(TEXT_SECONDARY, egui::Color32::WHITE, kt * 0.3)),
-                    );
-                    // 悬浮时行内提示"点击复制"：比系统 tooltip 轻，不会盖住内容
-                    if kt > 0.05 {
-                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            ui.label(
-                                egui::RichText::new("点击复制")
-                                    .size(fs(9.0))
-                                    .color(lerp_color(egui::Color32::TRANSPARENT, ACCENT, kt)),
-                            );
-                        });
-                    }
-                });
-            });
 
         // 整块可点：点击复制完整 Key（结果由后台线程回传，成功后盖浮窗）
         let row_response = row_frame
@@ -3621,13 +3923,13 @@ fn draw_account_keys(
                 egui::vec2(62.0, 20.0),
             );
             let painter = ui.painter();
-            painter.rect_filled(chip, egui::CornerRadius::same(10), ACCENT);
+            painter.rect_filled(chip, egui::CornerRadius::same(10), theme().accent);
             painter.text(
                 chip.center(),
                 egui::Align2::CENTER_CENTER,
                 "已复制",
                 egui::FontId::proportional(fs(10.0)),
-                egui::Color32::from_rgb(15, 23, 42),
+                theme().on_accent,
             );
         }
 
@@ -3648,13 +3950,13 @@ fn draw_account_keys(
                 egui::vec2(64.0, 20.0),
             );
             let painter = ui.painter();
-            painter.rect_filled(chip, egui::CornerRadius::same(10), ACCENT);
+            painter.rect_filled(chip, egui::CornerRadius::same(10), theme().accent);
             painter.text(
                 chip.center(),
                 egui::Align2::CENTER_CENTER,
                 "已复制",
                 egui::FontId::proportional(fs(10.0)),
-                egui::Color32::from_rgb(15, 23, 42),
+                theme().on_accent,
             );
         }
 
@@ -3667,7 +3969,7 @@ fn draw_account_keys(
 /// 目前是占位内容；实例配置与登录接入后，这里会显示实例地址与连接状态。
 fn draw_status_card(ui: &mut egui::Ui) {
     egui::Frame::new()
-        .fill(CARD_BG)
+        .fill(theme().card_bg)
         .corner_radius(egui::CornerRadius::same(10))
         .inner_margin(egui::Margin::same(12))
         .show(ui, |ui| {
@@ -3678,13 +3980,13 @@ fn draw_status_card(ui: &mut egui::Ui) {
                 ui.label(
                     egui::RichText::new("●")
                         .size(fs(12.0))
-                        .color(TEXT_SECONDARY),
+                        .color(theme().text_secondary),
                 );
                 ui.label(
                     egui::RichText::new("尚未登录任何实例")
                         .size(fs(14.0))
                         .strong()
-                        .color(TEXT_PRIMARY),
+                        .color(theme().text_primary),
                 );
             });
 
@@ -3692,7 +3994,7 @@ fn draw_status_card(ui: &mut egui::Ui) {
             ui.label(
                 egui::RichText::new("配置 Sub2API 实例地址并登录后，托盘会定时拉取账户状态。")
                     .size(fs(12.0))
-                    .color(TEXT_SECONDARY),
+                    .color(theme().text_secondary),
             );
         });
 }
@@ -3703,7 +4005,7 @@ fn draw_status_card(ui: &mut egui::Ui) {
 /// 等真实列表做好后，直接把这个函数替换成滚动列表即可。
 fn draw_empty_state(ui: &mut egui::Ui) {
     egui::Frame::new()
-        .fill(EMPTY_BG)
+        .fill(theme().empty_bg)
         .corner_radius(egui::CornerRadius::same(10))
         .inner_margin(egui::Margin::same(12))
         .show(ui, |ui| {
@@ -3713,13 +4015,13 @@ fn draw_empty_state(ui: &mut egui::Ui) {
                 ui.label(
                     egui::RichText::new("账户状态列表")
                         .size(fs(12.0))
-                        .color(TEXT_SECONDARY),
+                        .color(theme().text_secondary),
                 );
                 ui.add_space(4.0);
                 ui.label(
                     egui::RichText::new("登录后按账户展示在线状态、剩余额度与最近使用时间。")
                         .size(fs(11.0))
-                        .color(TEXT_DIM),
+                        .color(theme().text_dim),
                 );
                 ui.add_space(6.0);
             });
@@ -3737,7 +4039,7 @@ fn draw_footer(ui: &mut egui::Ui, toast: Option<&str>) {
             ui.label(
                 egui::RichText::new(format!("✓ {text}"))
                     .size(fs(11.0))
-                    .color(ACCENT),
+                    .color(theme().accent),
             );
         });
     }
@@ -3788,9 +4090,9 @@ fn save_login(store: &mut crate::data::DataStore, draft: &LoginDraft) -> Result<
 /// 需求方明确要求"报错并提示用户换目录"，避免用户以为账号已经保存成功。
 fn draw_storage_banner(ui: &mut egui::Ui, reason: &str) {
     egui::Frame::new()
-        .fill(egui::Color32::from_rgb(69, 26, 26))
+        .fill(theme().danger_bg)
         .corner_radius(egui::CornerRadius::same(10))
-        .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(153, 27, 27)))
+        .stroke(egui::Stroke::new(1.0, theme().danger_border))
         .inner_margin(egui::Margin::same(10))
         .show(ui, |ui| {
             ui.set_width(ui.available_width());
@@ -3798,20 +4100,20 @@ fn draw_storage_banner(ui: &mut egui::Ui, reason: &str) {
                 egui::RichText::new("数据目录不可写，账号无法保存")
                     .size(fs(12.0))
                     .strong()
-                    .color(egui::Color32::from_rgb(252, 165, 165)),
+                    .color(theme().danger_text),
             );
             ui.add_space(4.0);
             // 只显示首行：完整错误链可能很长，界面放不下，完整内容在日志里
             ui.label(
                 egui::RichText::new(reason.lines().next().unwrap_or_default())
                     .size(fs(10.0))
-                    .color(egui::Color32::from_rgb(254, 202, 202)),
+                    .color(theme().danger_text_soft),
             );
             ui.add_space(4.0);
             ui.label(
                 egui::RichText::new("请把程序移动到可写目录（例如桌面或 D 盘）后重启。")
                     .size(fs(10.0))
-                    .color(egui::Color32::from_rgb(254, 202, 202)),
+                    .color(theme().danger_text_soft),
             );
         });
 }
@@ -3850,7 +4152,7 @@ mod tests {
 
     #[test]
     fn 在线状态用品牌色离线用灰色() {
-        assert_eq!(status_color(AccountStatus::Online), ACCENT);
+        assert_eq!(status_color(AccountStatus::Online), theme().accent);
         assert_ne!(
             status_color(AccountStatus::Online),
             status_color(AccountStatus::Offline)
@@ -4019,6 +4321,20 @@ mod tests {
             Some(ResizeDirection::East)
         );
         assert_eq!(resize_direction_at(egui::pos2(180.0, 230.0), bounds), None);
+    }
+
+    #[test]
+    fn 日夜主题使用不同色板() {
+        set_palette(true);
+        let dark = theme();
+        set_palette(false);
+        let light = theme();
+        set_palette(true);
+
+        assert_ne!(dark.panel_bg, light.panel_bg);
+        assert_ne!(dark.text_primary, light.text_primary);
+        assert_ne!(dark.accent, light.accent);
+        assert!(light.panel_bg.r() > 200, "日间背景应当是浅色");
     }
 
     #[test]
