@@ -3572,33 +3572,66 @@ fn draw_usage_totals(ui: &mut egui::Ui, card: &AccountCard) {
             .strong()
             .color(theme().text_secondary),
     );
-    ui.horizontal_wrapped(|ui| {
-        usage_metric_chip(ui, "总", fmt_tokens(totals.total_tokens));
-        usage_metric_chip(ui, "输入", fmt_tokens(totals.input_tokens));
-        usage_metric_chip(ui, "输出", fmt_tokens(totals.output_tokens));
-        usage_metric_chip(
-            ui,
-            "命中率",
-            format!("{:.1}%", totals.cache_hit_rate_percent()),
-        );
-        usage_metric_chip(ui, "Cache 写", fmt_tokens(totals.cache_creation_tokens));
-        usage_metric_chip(ui, "Cache 读", fmt_tokens(totals.cache_read_tokens));
-        usage_metric_chip(ui, "请求", totals.requests.to_string());
-        usage_metric_chip(ui, "花费", format!("${:.3}", totals.actual_cost));
+
+    // 指标很多，不能直接 horizontal_wrapped：最后一项会被压到只剩几像素，
+    // 中文就会一字一行。先按可用宽度计算列数，再每行显式排固定宽度的标签。
+    let metrics = [
+        ("总", fmt_tokens(totals.total_tokens)),
+        ("输入", fmt_tokens(totals.input_tokens)),
+        ("输出", fmt_tokens(totals.output_tokens)),
+        ("命中率", format!("{:.1}%", totals.cache_hit_rate_percent())),
+        ("Cache 写", fmt_tokens(totals.cache_creation_tokens)),
+        ("Cache 读", fmt_tokens(totals.cache_read_tokens)),
+        ("请求", totals.requests.to_string()),
+        ("花费", format!("${:.3}", totals.actual_cost)),
+    ];
+
+    let available = ui.available_width().max(1.0);
+    let columns = usage_metric_columns(available);
+    let gap = 8.0;
+    let column_width = ((available - gap * (columns.saturating_sub(1)) as f32)
+        / columns.max(1) as f32)
+        .clamp(1.0, 220.0);
+    let rows = metrics.len().div_ceil(columns);
+
+    // 用固定的左右两列纵向堆叠，而不是 horizontal_wrapped。
+    // 这样标签宽度由列宽决定，不会因为最后一行剩余空间太小而一字一行；
+    // 父布局也会按两列中较高的一列正确累计高度。
+    ui.horizontal_top(|ui| {
+        ui.spacing_mut().item_spacing.x = gap;
+        for column_metrics in metrics.chunks(rows) {
+            ui.vertical(|ui| {
+                ui.set_width(column_width);
+                for (label, value) in column_metrics {
+                    usage_metric_chip(ui, label, value, column_width);
+                    ui.add_space(2.0);
+                }
+            });
+        }
     });
 }
 
-/// 一个紧凑的指标小标签。
-fn usage_metric_chip(ui: &mut egui::Ui, label: &str, value: String) {
+/// 指标区列数：可用宽度够时两列，极窄时退回单列。
+fn usage_metric_columns(available_width: f32) -> usize {
+    if available_width >= 250.0 { 2 } else { 1 }
+}
+
+/// 一个固定宽度的紧凑指标小标签。
+fn usage_metric_chip(ui: &mut egui::Ui, label: &str, value: &str, width: f32) {
     egui::Frame::new()
         .fill(theme().empty_bg)
         .corner_radius(egui::CornerRadius::same(4))
         .inner_margin(egui::Margin::symmetric(5, 2))
         .show(ui, |ui| {
-            ui.label(
-                egui::RichText::new(format!("{label} {value}"))
-                    .size(usage_fs(8.5))
-                    .color(theme().text_secondary),
+            // Frame 的左右内边距各 5，内容宽度要扣掉，保证总宽度固定。
+            ui.set_min_width((width - 10.0).max(0.0));
+            ui.add(
+                egui::Label::new(
+                    egui::RichText::new(format!("{label} {value}"))
+                        .size(usage_fs(8.5))
+                        .color(theme().text_secondary),
+                )
+                .truncate(),
             );
         });
 }
@@ -3637,6 +3670,24 @@ fn usage_area_mesh(line: &[egui::Pos2], baseline_y: f32, color: egui::Color32) -
         mesh.add_triangle(top_right, bottom_left, bottom_right);
     }
     mesh
+}
+
+/// 提取当前指标下真正有数据的时间点，并保留它们在完整时间轴中的原始索引。
+///
+/// 补零后的时间桶只用于横轴范围与汇总；曲线不应该把这些零值桶画出来，
+/// 否则会出现贴基线的长直线，悬浮时还会弹出全 0 的提示。
+fn usage_chart_samples(
+    points: &[crate::api::UsagePoint],
+    metric: UsageMetric,
+) -> Vec<(usize, f32)> {
+    points
+        .iter()
+        .enumerate()
+        .filter_map(|(index, point)| {
+            let value = metric.value(point) as f32;
+            (value > 0.0).then_some((index, value))
+        })
+        .collect()
 }
 
 /// 用原生绘制画 token 用量折线：网格 + 面积 + 折线 + 悬浮提示。
@@ -3684,14 +3735,21 @@ fn draw_usage_chart(ui: &mut egui::Ui, points: &[crate::api::UsagePoint], metric
     let y_at =
         |value: f32| -> f32 { plot.bottom() - plot.height() * (value / max_value).clamp(0.0, 1.0) };
 
-    let values: Vec<f32> = points
+    let samples = usage_chart_samples(points, metric);
+    if samples.is_empty() {
+        painter.text(
+            plot.center(),
+            egui::Align2::CENTER_CENTER,
+            "该指标暂无数据",
+            egui::FontId::proportional(usage_fs(9.5)),
+            theme().text_dim,
+        );
+        return;
+    }
+
+    let line: Vec<egui::Pos2> = samples
         .iter()
-        .map(|point| metric.value(point) as f32)
-        .collect();
-    let line: Vec<egui::Pos2> = values
-        .iter()
-        .enumerate()
-        .map(|(index, value)| egui::pos2(x_at(index), y_at(*value)))
+        .map(|(index, value)| egui::pos2(x_at(*index), y_at(*value)))
         .collect();
 
     painter.add(egui::Shape::mesh(usage_area_mesh(
@@ -3704,25 +3762,35 @@ fn draw_usage_chart(ui: &mut egui::Ui, points: &[crate::api::UsagePoint], metric
         egui::Stroke::new(1.8, theme().accent),
     ));
 
-    // 只给非零时间桶画点，避免补零后的 0 值把曲线压成一排圆点。
-    for (index, value) in values.iter().enumerate() {
-        if *value > 0.0 {
-            painter.circle_filled(line[index], 2.0, theme().accent);
-        }
+    // 只为真实数据点画圆点；无数据时间桶已经不在 samples 中。
+    for point in &line {
+        painter.circle_filled(*point, 2.0, theme().accent);
     }
 
-    if let Some(pointer) = response.hover_pos().filter(|pos| plot.contains(*pos)) {
-        let ratio = ((pointer.x - plot.left()) / plot.width()).clamp(0.0, 1.0);
-        let index = (ratio * (count.max(2) - 1) as f32).round() as usize;
-        let index = index.min(count.saturating_sub(1));
-        let x = x_at(index);
+    let hovered_sample = response
+        .hover_pos()
+        .filter(|pos| plot.contains(*pos))
+        .and_then(|pointer| {
+            // 只在指针足够靠近真实数据点时显示悬浮提示；空白时段不弹出全 0 数据。
+            let (point_index, value) =
+                samples.iter().min_by(|(left_index, _), (right_index, _)| {
+                    let left_distance = (x_at(*left_index) - pointer.x).abs();
+                    let right_distance = (x_at(*right_index) - pointer.x).abs();
+                    left_distance.total_cmp(&right_distance)
+                })?;
+            let x = x_at(*point_index);
+            let hover_threshold = (plot.width() / count.max(1) as f32 * 1.5).max(10.0);
+            ((x - pointer.x).abs() <= hover_threshold).then_some((*point_index, *value, x))
+        });
+
+    if let Some((point_index, value, x)) = hovered_sample {
         painter.line_segment(
             [egui::pos2(x, plot.top()), egui::pos2(x, plot.bottom())],
             egui::Stroke::new(1.0, theme().resize_handle),
         );
-        painter.circle_filled(egui::pos2(x, y_at(values[index])), 3.2, theme().text_hover);
+        painter.circle_filled(egui::pos2(x, y_at(value)), 3.2, theme().text_hover);
 
-        let point = &points[index];
+        let point = &points[point_index];
         let text = format!(
             "{}\n总 {} · 输入 {} · 输出 {}\nCache 写 {} · 读 {} · 命中率 {:.1}%\n{} 次请求 · 实际 ${:.3}",
             point.label,
@@ -4310,6 +4378,30 @@ mod tests {
     }
 
     #[test]
+    fn 曲线跳过当前指标为零的时间点() {
+        let mut empty = test_usage_point();
+        empty.label = "2026-10-18 03:00".to_owned();
+        empty.requests = 0;
+        empty.input_tokens = 0;
+        empty.output_tokens = 0;
+        empty.cache_creation_tokens = 0;
+        empty.cache_read_tokens = 0;
+        empty.total_tokens = 0;
+        empty.cost = 0.0;
+        empty.actual_cost = 0.0;
+
+        let points = vec![test_usage_point(), empty.clone(), test_usage_point()];
+        let samples = usage_chart_samples(&points, UsageMetric::Total);
+        assert_eq!(samples.len(), 2);
+        assert_eq!(samples[0].0, 0, "应保留原始时间轴索引");
+        assert_eq!(samples[1].0, 2, "零值桶不应进入曲线");
+        assert_eq!(samples[1].1, 2100.0);
+
+        let all_empty = vec![empty];
+        assert!(usage_chart_samples(&all_empty, UsageMetric::Total).is_empty());
+    }
+
+    #[test]
     fn 用量汇总包含输入输出与命中率() {
         let point = test_usage_point();
         let totals = UsageTotals::from_points(&[point]);
@@ -4385,6 +4477,12 @@ mod tests {
         let empty = usage_area_mesh(&line[..1], 100.0, egui::Color32::RED);
         assert!(empty.vertices.is_empty());
         assert!(empty.indices.is_empty());
+    }
+
+    #[test]
+    fn 用量指标窄宽度退回单列() {
+        assert_eq!(usage_metric_columns(200.0), 1);
+        assert_eq!(usage_metric_columns(300.0), 2);
     }
 
     #[test]
