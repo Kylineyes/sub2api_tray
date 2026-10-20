@@ -3392,8 +3392,20 @@ fn fmt_tokens(value: i64) -> String {
     }
 }
 
+/// 是否用加载占位替换整个用量区。
+///
+/// 已有缓存曲线时，即使后台正在刷新也要继续显示旧图；只有第一次加载
+/// 或切换到尚无缓存的 Key/区间时才显示 spinner。
+fn should_show_usage_spinner(loading: bool, has_cached_points: bool) -> bool {
+    loading && !has_cached_points
+}
+
 /// 绘制"用量"区：折叠标题、Key 选择、区间切换、指标切换、曲线与汇总。
 fn draw_usage_section(ui: &mut egui::Ui, card: &AccountCard, actions: &mut UsageUiActions) {
+    let has_usage = card
+        .usage_points
+        .iter()
+        .any(|point| point.requests != 0 || point.total_tokens != 0 || point.actual_cost != 0.0);
     let mut toggle_collapse = false;
     ui.horizontal(|ui| {
         let chevron = draw_chevron(ui, !card.usage_collapsed, 0.0);
@@ -3417,6 +3429,13 @@ fn draw_usage_section(ui: &mut egui::Ui, card: &AccountCard, actions: &mut Usage
         if card.usage_collapsed {
             ui.label(
                 egui::RichText::new("已收起")
+                    .size(usage_fs(8.5))
+                    .color(theme().text_dim),
+            );
+        } else if card.usage_loading && has_usage {
+            ui.add(egui::Spinner::new().size(usage_fs(10.0)));
+            ui.label(
+                egui::RichText::new("更新中...")
                     .size(usage_fs(8.5))
                     .color(theme().text_dim),
             );
@@ -3518,11 +3537,13 @@ fn draw_usage_section(ui: &mut egui::Ui, card: &AccountCard, actions: &mut Usage
     });
 
     ui.add_space(4.0);
-    if card.usage_loading {
+    // 只有首次加载或切换到没有缓存的区间时，才让 spinner 占据图表位置。
+    // 周期性刷新继续显示旧曲线，避免图表短暂消失再出现。
+    if should_show_usage_spinner(card.usage_loading, !card.usage_points.is_empty()) {
         ui.horizontal(|ui| {
             ui.spinner();
             ui.label(
-                egui::RichText::new("加载用量…")
+                egui::RichText::new("加载用量...")
                     .size(usage_fs(9.0))
                     .color(theme().text_dim),
             );
@@ -3536,13 +3557,16 @@ fn draw_usage_section(ui: &mut egui::Ui, card: &AccountCard, actions: &mut Usage
                 .size(usage_fs(9.0))
                 .color(theme().danger),
         );
-        return;
+        if card.usage_points.is_empty() {
+            return;
+        }
+        ui.label(
+            egui::RichText::new("以下是上次成功加载的数据")
+                .size(usage_fs(8.5))
+                .color(theme().text_dim),
+        );
     }
 
-    let has_usage = card
-        .usage_points
-        .iter()
-        .any(|point| point.requests != 0 || point.total_tokens != 0 || point.actual_cost != 0.0);
     if card.usage_points.is_empty() || !has_usage {
         ui.label(
             egui::RichText::new("该区间暂无用量")
@@ -4483,6 +4507,13 @@ mod tests {
     fn 用量指标窄宽度退回单列() {
         assert_eq!(usage_metric_columns(200.0), 1);
         assert_eq!(usage_metric_columns(300.0), 2);
+    }
+
+    #[test]
+    fn 刷新时保留已有用量曲线() {
+        assert!(should_show_usage_spinner(true, false));
+        assert!(!should_show_usage_spinner(true, true));
+        assert!(!should_show_usage_spinner(false, false));
     }
 
     #[test]
