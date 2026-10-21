@@ -343,7 +343,7 @@ pub fn install(bridge: Arc<TrayBridge>) -> Result<TrayHandle> {
         // 固定 id：后续要做“多托盘图标”或按 id 定位时，需要一个稳定标识
         .with_id("sub2api-tray")
         .with_icon(icon)
-        .with_tooltip("Sub2API 托盘 · 未登录")
+        .with_tooltip("用量统计托盘 · 未登录")
         .with_menu(Box::new(menu))
         // 左键留给面板开关，右键才弹菜单
         .with_menu_on_left_click(false)

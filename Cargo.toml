@@ -1,9 +1,9 @@
 [package]
 name = "sub2api_tray"
-version = "0.3.0"
+version = "0.4.0"
 edition = "2024"
 rust-version = "1.95"
-description = "Sub2API 托盘工具：在 Windows 通知区域 / macOS 菜单栏中查看已登录的账户状态"
+description = "用量统计托盘：在 Windows 通知区域 / macOS 菜单栏中查看已登录的账户状态"
 license = "MIT"
 repository = "https://github.com/Kylineyes/sub2api_tray"
 readme = "README.md"
