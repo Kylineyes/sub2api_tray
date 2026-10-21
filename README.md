@@ -62,7 +62,7 @@
 
 | 收起（只显示账号与地址） | 展开（Key 明细） |
 | --- | --- |
-| ![收起](docs/panel-collapsed.png) | ![展开](docs/panel-preview.png) |
+| ![收起：账号概览](docs/panel-collapsed.png) | ![展开：用量与 Key 明细](docs/panel-preview.png) |
 
 ## 构建
 
