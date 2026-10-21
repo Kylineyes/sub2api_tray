@@ -172,6 +172,8 @@ pub struct CreatedApiKey {
     pub info: ApiKeyInfo,
     /// 完整 Key 值。只允许短暂留在内存/剪贴板，绝不写入缓存或日志。
     pub full_key: String,
+    /// 客户端侧警告，例如创建成功但精确结束时间写入失败。
+    pub warning: Option<String>,
 }
 
 /// 把 Key 打码成"前 4 + … + 后 4"。
@@ -930,7 +932,11 @@ pub fn parse_created_api_key_response(status: u16, body: &str) -> Result<Created
             "创建成功但响应没有返回完整 Key，请到 Web 后台复制".to_owned(),
         ));
     }
-    Ok(CreatedApiKey { info, full_key })
+    Ok(CreatedApiKey {
+        info,
+        full_key,
+        warning: None,
+    })
 }
 
 /// 阻塞式 HTTP 客户端。
@@ -1107,6 +1113,8 @@ impl HttpClient {
         name: &str,
         group_id: i64,
         quota: f64,
+        expires_in_days: Option<u32>,
+        expires_at: Option<&str>,
     ) -> Result<CreatedApiKey, ApiError> {
         if name.trim().is_empty() {
             return Err(ApiError::InvalidInput("API Key 名称不能为空".to_owned()));
@@ -1119,13 +1127,54 @@ impl HttpClient {
                 "额度必须是大于或等于 0 的数字".to_owned(),
             ));
         }
-        let body = serde_json::json!({
+        if matches!(expires_in_days, Some(0)) {
+            return Err(ApiError::InvalidInput("有效期天数必须大于 0".to_owned()));
+        }
+
+        let mut body = serde_json::json!({
             "name": name.trim(),
             "group_id": group_id,
             "quota": quota,
         });
+        if let Some(days) = expires_in_days {
+            body["expires_in_days"] = serde_json::json!(days);
+        }
         let (status, text) = self.post_json_auth(API_KEYS_PATH, access_token, &body)?;
-        parse_created_api_key_response(status, &text)
+        let mut created = parse_created_api_key_response(status, &text)?;
+
+        // 创建接口只接受天数；需要精确到时间时，创建成功后再用 PUT 写入 expires_at。
+        // 创建时已经带了按天向上取整的兜底有效期，因此即使第二次请求失败，Key 也不会变成永久。
+        if let Some(expires_at) = expires_at {
+            match self.update_api_key_expiry(access_token, &created.info.id, expires_at) {
+                Ok(updated) => created.info = updated,
+                Err(err) => {
+                    created.warning = Some(format!(
+                        "Key 已创建，但精确结束时间设置失败：{}",
+                        err.user_message()
+                    ));
+                }
+            }
+        }
+        Ok(created)
+    }
+
+    /// 更新单个 API Key 的精确过期时间。
+    pub fn update_api_key_expiry(
+        &self,
+        access_token: &str,
+        id: &str,
+        expires_at: &str,
+    ) -> Result<ApiKeyInfo, ApiError> {
+        if id.is_empty() {
+            return Err(ApiError::InvalidInput("API Key id 不能为空".to_owned()));
+        }
+        if expires_at.is_empty() {
+            return Err(ApiError::InvalidInput("结束时间不能为空".to_owned()));
+        }
+        let path = format!("{API_KEYS_PATH}/{id}");
+        let body = serde_json::json!({ "expires_at": expires_at });
+        let (status, text) = self.put_json(&path, access_token, &body)?;
+        parse_api_key_update_response(status, &text)
     }
 
     /// 删除一个 API Key。
@@ -1719,6 +1768,7 @@ mod tests {
         assert_eq!(created.info.id, "100");
         assert_eq!(created.info.masked, "sk-f…alue");
         assert_eq!(created.full_key, "sk-full-secret-value");
+        assert!(created.warning.is_none());
     }
 
     #[test]

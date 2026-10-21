@@ -54,206 +54,8 @@ const FOCUS_GRACE: Duration = Duration::from_millis(400);
 /// 再派发一次托盘单击事件（触发“切换显示”）。若不去抖，面板会关掉又立刻弹回来。
 const TOGGLE_DEBOUNCE: Duration = Duration::from_millis(250);
 
-/// Sub2API 双主题调色板。
-///
-/// 颜色取自 Sub2API 前端 Tailwind 配置：
-/// 主色 primary-500 `#14b8a6`；浅色主题使用 gray-50 / white；
-/// 深色主题使用 dark-950 / dark-800 / dark-700。
-#[derive(Debug, Clone, Copy)]
-pub struct Palette {
-    /// 面板背景。
-    pub(crate) panel_bg: egui::Color32,
-    /// 面板和卡片边框。
-    pub(crate) panel_border: egui::Color32,
-    /// 普通卡片背景。
-    pub(crate) card_bg: egui::Color32,
-    /// 卡片悬浮背景。
-    pub(crate) hover_card_bg: egui::Color32,
-    /// 空状态/输入控件背景。
-    pub(crate) empty_bg: egui::Color32,
-    /// 主要文字。
-    pub(crate) text_primary: egui::Color32,
-    /// 次要文字。
-    pub(crate) text_secondary: egui::Color32,
-    /// 弱化文字。
-    pub(crate) text_dim: egui::Color32,
-    /// 悬浮时提亮/加深的文字。
-    pub(crate) text_hover: egui::Color32,
-    /// 品牌强调色。
-    pub(crate) accent: egui::Color32,
-    /// 强调色上的文字。
-    pub(crate) on_accent: egui::Color32,
-    /// 图表面积填充。
-    pub(crate) chart_fill: egui::Color32,
-    /// 错误主色。
-    pub(crate) danger: egui::Color32,
-    /// 错误提示标题。
-    pub(crate) danger_text: egui::Color32,
-    /// 错误提示正文。
-    pub(crate) danger_text_soft: egui::Color32,
-    /// 错误提示背景。
-    pub(crate) danger_bg: egui::Color32,
-    /// 错误提示边框。
-    pub(crate) danger_border: egui::Color32,
-    /// 危险操作按钮底色。
-    pub(crate) danger_button: egui::Color32,
-    /// 刷新中/信息色。
-    pub(crate) info: egui::Color32,
-    /// 离线状态色。
-    pub(crate) offline: egui::Color32,
-    /// 网格线/分隔细线。
-    pub(crate) grid_line: egui::Color32,
-    /// 极淡的悬浮背景。
-    pub(crate) overlay_subtle: egui::Color32,
-    /// 缩放角标。
-    pub(crate) resize_handle: egui::Color32,
-    /// 图表悬浮提示背景。
-    pub(crate) tooltip_bg: egui::Color32,
-    /// 输入框背景。
-    pub(crate) input_bg: egui::Color32,
-}
-
-/// 夜间主题：Sub2API dark-950 + dark-800 + primary-400。
-const DARK_PALETTE: Palette = Palette {
-    panel_bg: egui::Color32::from_rgb(2, 6, 23),
-    panel_border: egui::Color32::from_rgb(51, 65, 85),
-    card_bg: egui::Color32::from_rgb(30, 41, 59),
-    hover_card_bg: egui::Color32::from_rgb(51, 65, 85),
-    empty_bg: egui::Color32::from_rgb(15, 23, 42),
-    text_primary: egui::Color32::from_rgb(243, 244, 246),
-    text_secondary: egui::Color32::from_rgb(203, 213, 225),
-    text_dim: egui::Color32::from_rgb(148, 163, 184),
-    text_hover: egui::Color32::WHITE,
-    accent: egui::Color32::from_rgb(45, 212, 191),
-    on_accent: egui::Color32::from_rgb(4, 47, 46),
-    chart_fill: egui::Color32::from_rgba_unmultiplied_const(45, 212, 191, 36),
-    danger: egui::Color32::from_rgb(248, 113, 113),
-    danger_text: egui::Color32::from_rgb(252, 165, 165),
-    danger_text_soft: egui::Color32::from_rgb(254, 202, 202),
-    danger_bg: egui::Color32::from_rgb(69, 26, 26),
-    danger_border: egui::Color32::from_rgb(153, 27, 27),
-    danger_button: egui::Color32::from_rgb(185, 28, 28),
-    info: egui::Color32::from_rgb(96, 165, 250),
-    offline: egui::Color32::from_rgb(148, 163, 184),
-    grid_line: egui::Color32::from_rgba_unmultiplied_const(255, 255, 255, 12),
-    overlay_subtle: egui::Color32::from_rgba_unmultiplied_const(255, 255, 255, 8),
-    resize_handle: egui::Color32::from_rgba_unmultiplied_const(255, 255, 255, 70),
-    tooltip_bg: egui::Color32::from_rgba_unmultiplied_const(15, 23, 42, 240),
-    input_bg: egui::Color32::from_rgb(15, 23, 42),
-};
-
-/// 日间主题：Sub2API gray-50 + white + primary-600。
-const LIGHT_PALETTE: Palette = Palette {
-    panel_bg: egui::Color32::from_rgb(248, 250, 252),
-    panel_border: egui::Color32::from_rgb(226, 232, 240),
-    card_bg: egui::Color32::WHITE,
-    hover_card_bg: egui::Color32::from_rgb(241, 245, 249),
-    empty_bg: egui::Color32::from_rgb(241, 245, 249),
-    text_primary: egui::Color32::from_rgb(15, 23, 42),
-    text_secondary: egui::Color32::from_rgb(71, 85, 105),
-    text_dim: egui::Color32::from_rgb(148, 163, 184),
-    text_hover: egui::Color32::from_rgb(2, 6, 23),
-    accent: egui::Color32::from_rgb(13, 148, 136),
-    on_accent: egui::Color32::WHITE,
-    chart_fill: egui::Color32::from_rgba_unmultiplied_const(13, 148, 136, 28),
-    danger: egui::Color32::from_rgb(220, 38, 38),
-    danger_text: egui::Color32::from_rgb(185, 28, 28),
-    danger_text_soft: egui::Color32::from_rgb(153, 27, 27),
-    danger_bg: egui::Color32::from_rgb(254, 242, 242),
-    danger_border: egui::Color32::from_rgb(254, 202, 202),
-    danger_button: egui::Color32::from_rgb(220, 38, 38),
-    info: egui::Color32::from_rgb(37, 99, 235),
-    offline: egui::Color32::from_rgb(100, 116, 139),
-    grid_line: egui::Color32::from_rgba_unmultiplied_const(0, 0, 0, 12),
-    overlay_subtle: egui::Color32::from_rgba_unmultiplied_const(0, 0, 0, 8),
-    resize_handle: egui::Color32::from_rgba_unmultiplied_const(0, 0, 0, 70),
-    tooltip_bg: egui::Color32::from_rgba_unmultiplied_const(255, 255, 255, 245),
-    input_bg: egui::Color32::WHITE,
-};
-
-thread_local! {
-    /// 当前 UI 线程使用的调色板。托盘只有一个界面线程，使用线程局部状态
-    /// 可以避免把 Palette 参数穿过几十个纯绘制函数。
-    static PALETTE: std::cell::Cell<Palette> = const { std::cell::Cell::new(DARK_PALETTE) };
-}
-
-/// 当前主题调色板。
-pub(crate) fn theme() -> Palette {
-    PALETTE.with(std::cell::Cell::get)
-}
-
-/// 根据夜间/日间选择返回调色板。
-fn palette_for(dark: bool) -> Palette {
-    if dark { DARK_PALETTE } else { LIGHT_PALETTE }
-}
-
-/// 设置当前线程的调色板。
-fn set_palette(dark: bool) {
-    PALETTE.with(|palette| palette.set(palette_for(dark)));
-}
-
-/// 把主题同步到 egui 的默认控件样式（输入框、ComboBox 弹层、按钮等）。
-fn apply_egui_visuals(ctx: &egui::Context, dark: bool) {
-    let palette = palette_for(dark);
-    let mut visuals = if dark {
-        egui::Visuals::dark()
-    } else {
-        egui::Visuals::light()
-    };
-    visuals.dark_mode = dark;
-    visuals.panel_fill = palette.panel_bg;
-    visuals.window_fill = palette.panel_bg;
-    visuals.extreme_bg_color = palette.input_bg;
-    visuals.faint_bg_color = palette.empty_bg;
-    visuals.override_text_color = Some(palette.text_primary);
-    visuals.hyperlink_color = palette.accent;
-    visuals.error_fg_color = palette.danger;
-    visuals.warn_fg_color = egui::Color32::from_rgb(245, 158, 11);
-    visuals.window_stroke = egui::Stroke::new(1.0, palette.panel_border);
-    visuals.selection.bg_fill = palette.chart_fill;
-    visuals.selection.stroke = egui::Stroke::new(1.0, palette.accent);
-
-    visuals.widgets.noninteractive.bg_fill = palette.card_bg;
-    visuals.widgets.noninteractive.weak_bg_fill = palette.card_bg;
-    visuals.widgets.noninteractive.bg_stroke = egui::Stroke::new(1.0, palette.panel_border);
-    visuals.widgets.noninteractive.fg_stroke = egui::Stroke::new(1.0, palette.text_secondary);
-
-    visuals.widgets.inactive.bg_fill = palette.empty_bg;
-    visuals.widgets.inactive.weak_bg_fill = palette.empty_bg;
-    visuals.widgets.inactive.bg_stroke = egui::Stroke::new(1.0, palette.panel_border);
-    visuals.widgets.inactive.fg_stroke = egui::Stroke::new(1.0, palette.text_primary);
-
-    visuals.widgets.hovered.bg_fill = palette.hover_card_bg;
-    visuals.widgets.hovered.weak_bg_fill = palette.hover_card_bg;
-    visuals.widgets.hovered.bg_stroke = egui::Stroke::new(1.0, palette.accent);
-    visuals.widgets.hovered.fg_stroke = egui::Stroke::new(1.0, palette.text_hover);
-
-    visuals.widgets.active.bg_fill = palette.hover_card_bg;
-    visuals.widgets.active.weak_bg_fill = palette.hover_card_bg;
-    visuals.widgets.active.bg_stroke = egui::Stroke::new(1.0, palette.accent);
-    visuals.widgets.active.fg_stroke = egui::Stroke::new(1.0, palette.text_hover);
-
-    visuals.widgets.open = visuals.widgets.active;
-    ctx.all_styles_mut(|style| {
-        style.visuals = visuals.clone();
-        // 托盘是操作面板而不是阅读器：禁止鼠标拖选 Label 文本，
-        // 避免拖动标题/滑动用量区时意外出现蓝底选中文字。
-        style.interaction.selectable_labels = false;
-        style.interaction.multi_widget_text_select = false;
-    });
-}
-
-/// 线性插值两个颜色（用于悬浮淡入淡出）。
-fn lerp_color(from: egui::Color32, to: egui::Color32, t: f32) -> egui::Color32 {
-    let t = t.clamp(0.0, 1.0);
-    let mix = |a: u8, b: u8| (a as f32 + (b as f32 - a as f32) * t).round() as u8;
-    egui::Color32::from_rgba_premultiplied(
-        mix(from.r(), to.r()),
-        mix(from.g(), to.g()),
-        mix(from.b(), to.b()),
-        mix(from.a(), to.a()),
-    )
-}
+use crate::ui_style::{self, ButtonSize, ButtonTone, font, usage_font};
+pub(crate) use crate::ui_style::{apply_egui_visuals, lerp_color, set_palette, theme};
 
 /// 复制结果：(账号 id, Key id, 完整值或错误文案)。
 type CopyReply = (String, String, Result<String, String>);
@@ -531,14 +333,6 @@ const FIRST_REFRESH_DELAY: Duration = Duration::from_secs(5);
 /// 面板打开时，数据超过这个时长就补刷一次。
 const STALE_AFTER: Duration = Duration::from_secs(60);
 
-/// 全局字号增量：需求方反馈整体字体偏小，所有 .size(x) 统一加 1 码。
-const FONT_BOOST: f32 = 1.0;
-
-/// 把设计稿字号放大 [FONT_BOOST] 后返回，便于统一调大/回调。
-pub(crate) fn fs(base: f32) -> f32 {
-    base + FONT_BOOST
-}
-
 /// 把用户输入的额度字符串解析成美元金额。
 ///
 /// 单独抽成纯函数，方便在无界面环境下覆盖空值、负数与 NaN 等输入。
@@ -557,6 +351,50 @@ fn parse_quota_amount(input: &str) -> Result<f64, String> {
     Ok(value)
 }
 
+/// 解析创建 Key 时输入的有效期天数。
+///
+/// 空字符串或 0 表示永久有效；其余必须是大于 0 的整数。
+fn parse_expires_days(input: &str) -> Result<Option<u32>, String> {
+    let trimmed = input.trim();
+    if trimmed.is_empty() || trimmed == "0" {
+        return Ok(None);
+    }
+    let days = trimmed
+        .parse::<u32>()
+        .map_err(|_| "有效期必须是大于 0 的整数天".to_owned())?;
+    if days == 0 {
+        return Ok(None);
+    }
+    Ok(Some(days))
+}
+
+/// 把日期选择器与小时/分钟组合成本地时区的精确结束时间。
+fn selected_expiry_zoned(state: &CreateKeyState) -> Result<jiff::Zoned, String> {
+    let date = state.expires_date;
+    let datetime = jiff::civil::DateTime::new(
+        date.year(),
+        date.month(),
+        date.day(),
+        state.expires_hour,
+        state.expires_minute,
+        0,
+        0,
+    )
+    .map_err(|_| "结束日期或时间无效".to_owned())?;
+    jiff::tz::TimeZone::system()
+        .to_zoned(datetime)
+        .map_err(|err| format!("无法解析本地时区：{err}"))
+}
+
+/// 把选择的时间格式化成界面展示文案。
+fn selected_expiry_label(state: &CreateKeyState) -> String {
+    format!(
+        "{} {:02}:{:02}",
+        state.expires_date, state.expires_hour, state.expires_minute
+    )
+}
+
+/// 把当前额度格式化成输入框初值。
 /// 把当前额度格式化成输入框初值。
 ///
 /// 保留最多 4 位小数并裁掉末尾的 0，避免用户看到 `10.0000` 这种噪声；
@@ -578,17 +416,6 @@ fn format_quota_input(quota: f64) -> String {
 /// 新额度是否会立即耗尽：只对有限额度且未勾选清零时提示。
 fn quota_will_exceed(quota: f64, quota_used: f64, reset_quota: bool) -> bool {
     !reset_quota && quota > 0.0 && quota_used >= quota
-}
-
-/// 用量区专用字号增量。
-///
-/// 需求方反馈用量区的曲线、横轴和指标比面板其他区域更小，因此在全局 [fs]
-/// 基础上再放大 1 点；只影响用量区，不把整个面板撑得过于松散。
-const USAGE_FONT_BOOST: f32 = 1.0;
-
-/// 用量区字号。
-fn usage_fs(base: f32) -> f32 {
-    fs(base) + USAGE_FONT_BOOST
 }
 
 /// 同时允许登录的账号上限（需求方要求：同时最多 10 个）。
@@ -744,6 +571,15 @@ struct DeleteKeyState {
 /// 删除 Key 后台结果：(账号 id, Key id, 结果)。
 type DeleteKeyReply = (String, String, Result<(), String>);
 
+/// 创建 Key 时的有效期模式。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ExpiryMode {
+    /// 按天数，从创建时间起计算。
+    Days,
+    /// 指定精确结束时间（RFC3339，含时区）。
+    DateTime,
+}
+
 /// 创建 API Key 弹窗状态。
 struct CreateKeyState {
     /// 所属账号 id。
@@ -752,6 +588,16 @@ struct CreateKeyState {
     name: String,
     /// 额度输入（美元，0 表示不限额）。
     quota_input: String,
+    /// 有效期模式。
+    expiry_mode: ExpiryMode,
+    /// 有效期天数输入；空或 0 表示永久有效。
+    expires_in_days_input: String,
+    /// 精确结束日期（本地时区）。
+    expires_date: jiff::civil::Date,
+    /// 精确结束小时（本地时区，0-23）。
+    expires_hour: i8,
+    /// 精确结束分钟（本地时区，0-59）。
+    expires_minute: i8,
     /// 当前账号可绑定的分组。
     groups: Vec<crate::api::ApiKeyGroup>,
     /// 已选择的分组 id。
@@ -788,6 +634,8 @@ struct KeyUiActions {
     delete_request: Option<DeleteKeyTarget>,
     /// 请求在某个账号下创建 API Key。
     create_key_request: Option<String>,
+    /// 请求为凭据损坏的账号原地重新登录。
+    relogin_request: Option<String>,
 }
 
 /// 应用主体。
@@ -2065,6 +1913,27 @@ impl TrayApp {
         });
     }
 
+    /// 打开凭据损坏账号的原地重新登录弹窗。
+    ///
+    /// 账号 id 与 Key 缓存保持不变，只替换加密凭据；成功后立即触发一轮刷新。
+    fn open_relogin(&mut self, ctx: &egui::Context, account_id: &str) {
+        let DataLayer::Ready(store) = &self.data else {
+            self.toast = Some(("数据目录不可用，无法重新登录".to_owned(), Instant::now()));
+            return;
+        };
+        let Some(account) = store.accounts().iter().find(|item| item.id == account_id) else {
+            self.toast = Some(("账号已不存在，请刷新后重试".to_owned(), Instant::now()));
+            return;
+        };
+        self.login.open_for_relogin(
+            account.id.clone(),
+            account.base_url.clone(),
+            account.email.clone(),
+        );
+        self.show_panel(ctx);
+        ctx.request_repaint();
+    }
+
     /// 打开某个账号的「添加 API Key」弹窗，并异步加载可用分组。
     fn open_create_key_modal(&mut self, ctx: &egui::Context, account_id: &str) {
         let DataLayer::Ready(store) = &self.data else {
@@ -2080,6 +1949,11 @@ impl TrayApp {
             account_id: account_id.to_owned(),
             name: "新 API Key".to_owned(),
             quota_input: "0".to_owned(),
+            expiry_mode: ExpiryMode::Days,
+            expires_in_days_input: "0".to_owned(),
+            expires_date: jiff::Zoned::now().date(),
+            expires_hour: 23,
+            expires_minute: 59,
             groups: Vec::new(),
             selected_group_id: None,
             loading_groups: true,
@@ -2174,6 +2048,41 @@ impl TrayApp {
             }
             return;
         };
+        let (expires_in_days, expires_at) = match state.expiry_mode {
+            ExpiryMode::Days => {
+                let days = match parse_expires_days(&state.expires_in_days_input) {
+                    Ok(value) => value,
+                    Err(message) => {
+                        if let Some(state) = self.create_key.as_mut() {
+                            state.error = Some(message);
+                        }
+                        return;
+                    }
+                };
+                (days, None)
+            }
+            ExpiryMode::DateTime => {
+                let target = match selected_expiry_zoned(state) {
+                    Ok(value) => value,
+                    Err(message) => {
+                        if let Some(state) = self.create_key.as_mut() {
+                            state.error = Some(message);
+                        }
+                        return;
+                    }
+                };
+                let now = jiff::Zoned::now();
+                if target <= now {
+                    if let Some(state) = self.create_key.as_mut() {
+                        state.error = Some("结束时间必须晚于当前时间".to_owned());
+                    }
+                    return;
+                }
+                let seconds = (target.timestamp().as_second() - now.timestamp().as_second()).max(1);
+                let days = u32::try_from((seconds + 86_399) / 86_400).unwrap_or(u32::MAX);
+                (Some(days.max(1)), Some(target.timestamp().to_string()))
+            }
+        };
         let account_id = state.account_id.clone();
 
         let DataLayer::Ready(store) = &self.data else {
@@ -2211,7 +2120,14 @@ impl TrayApp {
             ) {
                 Ok(credentials) => match crate::api::HttpClient::new(&base_url, timeout) {
                     Ok(client) => client
-                        .create_api_key(&credentials.access_token, &name, group_id, quota)
+                        .create_api_key(
+                            &credentials.access_token,
+                            &name,
+                            group_id,
+                            quota,
+                            expires_in_days,
+                            expires_at.as_deref(),
+                        )
                         .map_err(|err| err.user_message()),
                     Err(err) => Err(err.user_message()),
                 },
@@ -2497,30 +2413,30 @@ impl TrayApp {
         let mut preview_dark_mode: Option<bool> = None;
 
         let modal = egui::Modal::new(egui::Id::unique("settings-dialog"))
-            .backdrop_color(egui::Color32::from_black_alpha(150))
+            .backdrop_color(ui_style::modal_backdrop())
             .frame(
                 egui::Frame::new()
                     .fill(theme().panel_bg)
-                    .corner_radius(egui::CornerRadius::same(12))
+                    .corner_radius(egui::CornerRadius::same(ui_style::size::RADIUS_XL))
                     .stroke(egui::Stroke::new(1.0, theme().panel_border))
-                    .inner_margin(egui::Margin::same(16)),
+                    .inner_margin(egui::Margin::same(ui_style::size::MARGIN_LG)),
             )
             .show(ctx, |ui| {
-                ui.set_width(280.0);
+                ui.set_width(ui_style::size::SETTINGS_WIDTH);
                 ui.horizontal(|ui| {
                     ui.label(
                         egui::RichText::new("设置")
-                            .size(fs(14.0))
+                            .size(font::HEADING)
                             .strong()
                             .color(theme().text_primary),
                     );
                 });
-                ui.add_space(10.0);
+                ui.add_space(ui_style::space::LG);
 
                 ui.horizontal(|ui| {
                     ui.label(
                         egui::RichText::new("主题")
-                            .size(fs(12.0))
+                            .size(font::BODY_LARGE)
                             .color(theme().text_secondary),
                     );
                     if ui.selectable_label(!draft.dark_mode, "日间").clicked() {
@@ -2533,17 +2449,17 @@ impl TrayApp {
                     }
                 });
 
-                ui.add_space(8.0);
+                ui.add_space(ui_style::space::MD);
                 ui.checkbox(
                     &mut draft.mask_accounts,
-                    egui::RichText::new("账号名打码显示（只影响界面）").size(fs(12.0)),
+                    egui::RichText::new("账号名打码显示（只影响界面）").size(font::BODY_LARGE),
                 );
 
-                ui.add_space(8.0);
+                ui.add_space(ui_style::space::MD);
                 ui.horizontal(|ui| {
                     ui.label(
                         egui::RichText::new("状态刷新间隔")
-                            .size(fs(12.0))
+                            .size(font::BODY_LARGE)
                             .color(theme().text_secondary),
                     );
                     ui.add(
@@ -2553,52 +2469,48 @@ impl TrayApp {
                     );
                     ui.label(
                         egui::RichText::new("秒")
-                            .size(fs(11.0))
+                            .size(font::BODY)
                             .color(theme().text_dim),
                     );
                 });
 
-                ui.add_space(4.0);
+                ui.add_space(ui_style::space::XS);
                 ui.horizontal(|ui| {
                     ui.label(
                         egui::RichText::new("请求超时")
-                            .size(fs(12.0))
+                            .size(font::BODY_LARGE)
                             .color(theme().text_secondary),
                     );
                     ui.add(egui::DragValue::new(&mut draft.request_timeout_seconds).range(1..=120));
                     ui.label(
                         egui::RichText::new("秒")
-                            .size(fs(11.0))
+                            .size(font::BODY)
                             .color(theme().text_dim),
                     );
                 });
 
-                ui.add_space(6.0);
+                ui.add_space(ui_style::space::SM);
                 if autostart_known {
                     ui.checkbox(
                         &mut draft.autostart,
-                        egui::RichText::new("开机自动启动（登录时运行）").size(fs(12.0)),
+                        egui::RichText::new("开机自动启动（登录时运行）").size(font::BODY_LARGE),
                     );
                 } else {
                     ui.horizontal(|ui| {
                         ui.spinner();
                         ui.label(
                             egui::RichText::new("正在读取开机自启状态…")
-                                .size(fs(11.0))
+                                .size(font::BODY)
                                 .color(theme().text_dim),
                         );
                     });
                 }
 
-                ui.add_space(10.0);
+                ui.add_space(ui_style::space::LG);
                 ui.separator();
-                ui.add_space(6.0);
+                ui.add_space(ui_style::space::SM);
                 ui.horizontal(|ui| {
-                    if ui
-                        .add_sized(
-                            [92.0, 24.0],
-                            egui::Button::new(egui::RichText::new("检查更新").size(fs(11.0))),
-                        )
+                    if ui_style::add_button(ui, "检查更新", ButtonTone::Neutral, ButtonSize::Header)
                         .clicked()
                     {
                         check_update = true;
@@ -2607,7 +2519,7 @@ impl TrayApp {
                         ui.spinner();
                         ui.label(
                             egui::RichText::new("检查中…")
-                                .size(fs(10.0))
+                                .size(font::BODY_SMALL)
                                 .color(theme().text_dim),
                         );
                     }
@@ -2615,7 +2527,7 @@ impl TrayApp {
                 if let Some(message) = update_result.as_deref() {
                     ui.label(
                         egui::RichText::new(message)
-                            .size(fs(10.0))
+                            .size(font::BODY_SMALL)
                             .color(theme().text_secondary),
                     );
                 }
@@ -2624,57 +2536,47 @@ impl TrayApp {
                     // 交给 eframe，由系统默认浏览器打开，不在托盘内嵌网页。
                     ui.add(
                         egui::Hyperlink::from_label_and_url(
-                            egui::RichText::new("点击进入下载最新版本").size(fs(11.0)),
+                            egui::RichText::new("点击进入下载最新版本").size(font::BODY),
                             url,
                         )
                         .open_in_new_tab(true),
                     );
                     ui.label(
                         egui::RichText::new(url)
-                            .size(fs(9.0))
+                            .size(font::SMALL)
                             .color(theme().text_dim),
                     );
-                    if ui
-                        .add_sized(
-                            [120.0, 22.0],
-                            egui::Button::new(egui::RichText::new("复制下载链接").size(fs(10.0))),
-                        )
-                        .clicked()
+                    if ui_style::add_button(
+                        ui,
+                        "复制下载链接",
+                        ButtonTone::Neutral,
+                        ButtonSize::Wide,
+                    )
+                    .clicked()
                     {
                         copy_update_url = Some(url.to_owned());
                     }
                 }
 
-                ui.add_space(8.0);
+                ui.add_space(ui_style::space::MD);
                 ui.label(
                     egui::RichText::new("保存后立即生效并写入 app.json。")
-                        .size(fs(10.0))
+                        .size(font::BODY_SMALL)
                         .color(theme().text_dim),
                 );
-                ui.add_space(10.0);
+                ui.add_space(ui_style::space::LG);
 
                 ui.horizontal(|ui| {
-                    let save_button = egui::Button::new(
-                        egui::RichText::new("保存")
-                            .size(fs(12.0))
-                            .strong()
-                            .color(theme().on_accent),
-                    )
-                    .fill(theme().accent);
                     if ui
                         .add_enabled_ui(autostart_known, |ui| {
-                            ui.add_sized([80.0, 26.0], save_button)
+                            ui_style::add_button(ui, "保存", ButtonTone::Primary, ButtonSize::Form)
                         })
                         .inner
                         .clicked()
                     {
                         save = true;
                     }
-                    if ui
-                        .add_sized(
-                            [80.0, 26.0],
-                            egui::Button::new(egui::RichText::new("取消").size(fs(12.0))),
-                        )
+                    if ui_style::add_button(ui, "取消", ButtonTone::Neutral, ButtonSize::Form)
                         .clicked()
                     {
                         close = true;
@@ -3030,6 +2932,8 @@ impl TrayApp {
         let Some(draft) = self.login.poll() else {
             return;
         };
+        let relogin_id = draft.relogin_account_id.clone();
+        let mut should_refresh = false;
 
         match &mut self.data {
             DataLayer::Unavailable(reason) => {
@@ -3037,23 +2941,44 @@ impl TrayApp {
                     .set_error(format!("数据目录不可用，无法保存账号：{reason}"));
             }
             DataLayer::Ready(store) => {
-                if let Err(message) = save_login(store, &draft) {
-                    self.login.set_error(message);
-                    return;
-                }
+                if let Some(account_id) = relogin_id {
+                    if let Err(message) = save_relogin(store, &draft, &account_id) {
+                        self.login.set_error(message);
+                        return;
+                    }
+                    let display = store.display_email(&draft.email);
+                    log::info!("账号凭据已原地更新：{display}");
+                    self.toast = Some((format!("已重新登录 {display}"), Instant::now()));
+                    self.login.close();
+                    self.runtime.remove(&account_id);
+                    self.last_round = None;
+                    self.rebuild_menu();
+                    self.update_badge();
+                    should_refresh = true;
+                } else {
+                    if let Err(message) = save_login(store, &draft) {
+                        self.login.set_error(message);
+                        return;
+                    }
 
-                // 日志只留打码后的账号，避免明文邮箱长期堆积在日志里
-                let display = store.display_email(&draft.email);
-                log::info!("账号已保存：{display}");
-                self.toast = Some((format!("已登录 {display}"), Instant::now()));
-                self.login.close();
-                // 新账号要立刻出现在托盘菜单里，并尽快刷新一次状态
-                self.rebuild_menu();
-                self.update_badge();
-                self.last_round = None;
-                ctx.request_repaint();
+                    // 日志只留打码后的账号，避免明文邮箱长期堆积在日志里
+                    let display = store.display_email(&draft.email);
+                    log::info!("账号已保存：{display}");
+                    self.toast = Some((format!("已登录 {display}"), Instant::now()));
+                    self.login.close();
+                    // 新账号要立刻出现在托盘菜单里，并尽快刷新一次状态
+                    self.rebuild_menu();
+                    self.update_badge();
+                    self.last_round = None;
+                }
             }
         }
+
+        if should_refresh {
+            // 重新登录成功后立即验证新凭据，不必等下一轮定时刷新。
+            self.try_start_refresh(ctx, true);
+        }
+        ctx.request_repaint();
     }
 
     /// 维护成功提示的过期。
@@ -3188,9 +3113,9 @@ impl TrayApp {
                 egui::Frame::new()
                     // 圆角 + 深色填充 + 细边框，构成气泡本体
                     .fill(theme().panel_bg)
-                    .corner_radius(egui::CornerRadius::same(12))
+                    .corner_radius(egui::CornerRadius::same(ui_style::size::RADIUS_XL))
                     .stroke(egui::Stroke::new(1.0, theme().panel_border))
-                    .inner_margin(egui::Margin::same(16)),
+                    .inner_margin(egui::Margin::same(ui_style::size::MARGIN_LG)),
             )
             .show(ui, |ui| {
                 // 顶部固定，其余内容滚动；操作反馈改为底部悬浮 Toast，
@@ -3208,7 +3133,7 @@ impl TrayApp {
                         );
 
                         if let Some(reason) = storage_error.as_deref() {
-                            ui.add_space(12.0);
+                            ui.add_space(ui_style::space::XL);
                             draw_storage_banner(ui, reason);
                         }
                     });
@@ -3216,7 +3141,7 @@ impl TrayApp {
                 egui::ScrollArea::vertical()
                     .auto_shrink([false, false])
                     .show(ui, |ui| {
-                        ui.add_space(12.0);
+                        ui.add_space(ui_style::space::XL);
 
                         // 总览卡片始终显示（没有账号时也能从这里登录）
                         draw_account_summary(
@@ -3226,11 +3151,11 @@ impl TrayApp {
                             &mut refresh_clicked,
                             at_limit,
                         );
-                        ui.add_space(12.0);
+                        ui.add_space(ui_style::space::XL);
 
                         if cards.is_empty() {
                             draw_status_card(ui);
-                            ui.add_space(16.0);
+                            ui.add_space(ui_style::space::XXXL);
                             draw_empty_state(ui);
                         } else {
                             for card in &cards {
@@ -3243,12 +3168,12 @@ impl TrayApp {
                                     &mut usage_actions,
                                     &mut delete_request,
                                 );
-                                ui.add_space(10.0);
+                                ui.add_space(ui_style::space::LG);
                             }
                         }
 
                         // 给滚动区底部留一点空隙，避免最后一张卡片贴着页脚
-                        ui.add_space(6.0);
+                        ui.add_space(ui_style::space::SM);
                     });
             });
 
@@ -3296,6 +3221,10 @@ impl TrayApp {
 
         if let Some(account_id) = key_actions.create_key_request.take() {
             self.open_create_key_modal(ctx, &account_id);
+        }
+
+        if let Some(account_id) = key_actions.relogin_request.take() {
+            self.open_relogin(ctx, &account_id);
         }
 
         if let Some(account_id) = delete_request {
@@ -3381,48 +3310,48 @@ impl TrayApp {
             .unwrap_or(false);
 
         let modal = egui::Modal::new(egui::Id::unique("quota-edit"))
-            .backdrop_color(egui::Color32::from_black_alpha(150))
+            .backdrop_color(ui_style::modal_backdrop())
             .frame(
                 egui::Frame::new()
                     .fill(theme().panel_bg)
-                    .corner_radius(egui::CornerRadius::same(12))
+                    .corner_radius(egui::CornerRadius::same(ui_style::size::RADIUS_XL))
                     .stroke(egui::Stroke::new(1.0, theme().panel_border))
-                    .inner_margin(egui::Margin::same(16)),
+                    .inner_margin(egui::Margin::same(ui_style::size::MARGIN_LG)),
             )
             .show(ctx, |ui| {
-                ui.set_width(320.0);
+                ui.set_width(ui_style::size::MODAL_MAX_WIDTH);
                 ui.label(
                     egui::RichText::new("调整 API Key 额度")
-                        .size(fs(14.0))
+                        .size(font::HEADING)
                         .strong()
                         .color(theme().text_primary),
                 );
-                ui.add_space(4.0);
+                ui.add_space(ui_style::space::XS);
                 ui.label(
                     egui::RichText::new(format!("{}  {}", edit.key_name, edit.key_masked))
-                        .size(fs(10.0))
+                        .size(font::BODY_SMALL)
                         .color(theme().text_secondary),
                 );
-                ui.add_space(10.0);
+                ui.add_space(ui_style::space::LG);
                 ui.label(
                     egui::RichText::new(format!(
                         "已用 ${:.2} · 当前额度 {current_text}",
                         edit.quota_used
                     ))
-                    .size(fs(10.0))
+                    .size(font::BODY_SMALL)
                     .color(theme().text_dim),
                 );
-                ui.add_space(8.0);
+                ui.add_space(ui_style::space::MD);
 
                 ui.label(
                     egui::RichText::new("新额度（美元）")
-                        .size(fs(10.0))
+                        .size(font::BODY_SMALL)
                         .color(theme().text_secondary),
                 );
                 ui.horizontal(|ui| {
                     ui.label(
                         egui::RichText::new("$")
-                            .size(fs(11.0))
+                            .size(font::BODY)
                             .color(theme().text_dim),
                     );
                     ui.add(
@@ -3433,51 +3362,53 @@ impl TrayApp {
                 });
                 ui.label(
                     egui::RichText::new("输入 0 表示不限额；修改额度不会自动清零已用额度。")
-                        .size(fs(9.0))
+                        .size(font::SMALL)
                         .color(theme().text_dim),
                 );
 
                 if edit.quota_used > 0.0 {
-                    ui.add_space(8.0);
+                    ui.add_space(ui_style::space::MD);
                     ui.checkbox(
                         &mut edit.reset_quota,
-                        egui::RichText::new("同时清零已用额度").size(fs(10.0)),
+                        egui::RichText::new("同时清零已用额度").size(font::BODY_SMALL),
                     );
                     ui.label(
                         egui::RichText::new("适合额度已耗尽、但想继续使用这个 Key 的情况。")
-                            .size(fs(9.0))
+                            .size(font::SMALL)
                             .color(theme().text_dim),
                     );
                 }
 
                 if will_exceed {
-                    ui.add_space(8.0);
+                    ui.add_space(ui_style::space::MD);
                     ui.label(
                         egui::RichText::new(
                             "新额度低于已用额度，保存后该 Key 会立即达到上限；可勾选清零已用额度。",
                         )
-                        .size(fs(9.5))
+                        .size(font::SMALL_PLUS)
                         .color(theme().danger),
                     );
                 }
 
                 if let Some(error) = &edit.error {
-                    ui.add_space(8.0);
+                    ui.add_space(ui_style::space::MD);
                     ui.label(
                         egui::RichText::new(error)
-                            .size(fs(9.5))
+                            .size(font::SMALL_PLUS)
                             .color(theme().danger),
                     );
                 }
 
-                ui.add_space(14.0);
+                ui.add_space(ui_style::space::XXL);
                 ui.horizontal(|ui| {
-                    if ui
-                        .add_enabled(
-                            !edit.submitting,
-                            egui::Button::new(egui::RichText::new("取消").size(fs(10.0))),
-                        )
-                        .clicked()
+                    if ui_style::add_enabled_button(
+                        ui,
+                        !edit.submitting,
+                        "取消",
+                        ButtonTone::Neutral,
+                        ButtonSize::Auto,
+                    )
+                    .clicked()
                     {
                         close = true;
                     }
@@ -3487,13 +3418,14 @@ impl TrayApp {
                         } else {
                             "保存额度"
                         };
-                        if ui
-                            .add_enabled(
-                                !edit.submitting,
-                                egui::Button::new(egui::RichText::new(label).size(fs(10.0)))
-                                    .fill(theme().accent),
-                            )
-                            .clicked()
+                        if ui_style::add_enabled_button(
+                            ui,
+                            !edit.submitting,
+                            label,
+                            ButtonTone::Primary,
+                            ButtonSize::Auto,
+                        )
+                        .clicked()
                         {
                             submit = true;
                         }
@@ -3541,66 +3473,99 @@ impl TrayApp {
         let mut copy_created: Option<String> = None;
 
         if let Some(created) = state.created.clone() {
+            let validity = match state.expiry_mode {
+                ExpiryMode::Days => match parse_expires_days(&state.expires_in_days_input) {
+                    Ok(Some(days)) => format!("有效期：{days} 天"),
+                    _ => "有效期：永久".to_owned(),
+                },
+                ExpiryMode::DateTime => format!("结束时间：{}", selected_expiry_label(&state)),
+            };
             let modal = egui::Modal::new(egui::Id::unique("create-key-success"))
-                .backdrop_color(egui::Color32::from_black_alpha(150))
-                .frame(
-                    egui::Frame::new()
-                        .fill(theme().panel_bg)
-                        .corner_radius(egui::CornerRadius::same(12))
-                        .stroke(egui::Stroke::new(1.0, theme().accent))
-                        .inner_margin(egui::Margin::same(16)),
-                )
+                .backdrop_color(ui_style::modal_backdrop())
+                .frame(ui_style::modal_frame().stroke(egui::Stroke::new(1.0, theme().accent)))
                 .show(ctx, |ui| {
-                    ui.set_width(320.0);
-                    ui.label(
-                        egui::RichText::new("API Key 已创建")
-                            .size(fs(14.0))
-                            .strong()
-                            .color(theme().text_primary),
-                    );
-                    ui.add_space(6.0);
-                    ui.label(
-                        egui::RichText::new(format!("名称：{}", created.info.name))
-                            .size(fs(11.0))
-                            .color(theme().text_secondary),
-                    );
-                    ui.add_space(8.0);
-                    egui::Frame::new()
-                        .fill(theme().empty_bg)
-                        .corner_radius(egui::CornerRadius::same(6))
-                        .inner_margin(egui::Margin::symmetric(8, 6))
-                        .show(ui, |ui| {
+                    ui.set_width(ui_style::size::MODAL_MAX_WIDTH);
+
+                    ui.horizontal(|ui| {
+                        ui.label(
+                            egui::RichText::new("✓")
+                                .size(font::TITLE)
+                                .strong()
+                                .color(theme().accent),
+                        );
+                        ui.vertical(|ui| {
                             ui.label(
-                                egui::RichText::new(&created.full_key)
-                                    .monospace()
-                                    .size(fs(10.0))
+                                egui::RichText::new("API Key 已创建")
+                                    .size(font::HEADING)
+                                    .strong()
                                     .color(theme().text_primary),
                             );
+                            ui.label(
+                                egui::RichText::new("完整 Key 只展示这一次")
+                                    .size(font::SMALL)
+                                    .color(theme().text_dim),
+                            );
                         });
-                    ui.add_space(6.0);
-                    ui.label(
-                        egui::RichText::new("完整 Key 只展示这一次，已自动复制到剪贴板。")
-                            .size(fs(9.5))
-                            .color(theme().text_dim),
-                    );
-                    ui.add_space(12.0);
+                    });
+                    ui.add_space(ui_style::space::LG);
+
+                    ui_style::section_frame().show(ui, |ui| {
+                        ui.set_width(ui.available_width());
+                        ui_style::field_label(ui, "名称");
+                        ui.label(
+                            egui::RichText::new(&created.info.name)
+                                .size(font::BODY)
+                                .strong()
+                                .color(theme().text_primary),
+                        );
+                        ui.add_space(ui_style::space::SM);
+                        ui_style::field_label(ui, "有效期");
+                        ui.label(
+                            egui::RichText::new(&validity)
+                                .size(font::BODY_SMALL)
+                                .color(theme().text_secondary),
+                        );
+                    });
+
+                    if let Some(warning) = &created.warning {
+                        ui.add_space(ui_style::space::MD);
+                        ui_style::error_banner(ui, warning);
+                    }
+
+                    ui.add_space(ui_style::space::MD);
+                    ui_style::field_label(ui, "完整 Key");
+                    ui_style::section_frame().show(ui, |ui| {
+                        ui.set_width(ui.available_width());
+                        ui.label(
+                            egui::RichText::new(&created.full_key)
+                                .monospace()
+                                .size(font::BODY_SMALL)
+                                .color(theme().text_primary),
+                        );
+                    });
+                    ui.add_space(ui_style::space::SM);
+                    ui_style::hint_label(ui, "已自动复制到剪贴板，关闭后无法再次查看。");
+
+                    ui.add_space(ui_style::space::XL);
                     ui.horizontal(|ui| {
-                        if ui
-                            .add_sized(
-                                [100.0, 26.0],
-                                egui::Button::new(egui::RichText::new("复制 Key").size(fs(10.5))),
-                            )
-                            .clicked()
+                        if ui_style::add_button(
+                            ui,
+                            "复制 Key",
+                            ButtonTone::Neutral,
+                            ButtonSize::FormMd,
+                        )
+                        .clicked()
                         {
                             copy_created = Some(created.full_key.clone());
                         }
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            if ui
-                                .add_sized(
-                                    [80.0, 26.0],
-                                    egui::Button::new(egui::RichText::new("完成").size(fs(10.5))),
-                                )
-                                .clicked()
+                            if ui_style::add_button(
+                                ui,
+                                "完成",
+                                ButtonTone::Primary,
+                                ButtonSize::Form,
+                            )
+                            .clicked()
                             {
                                 close = true;
                             }
@@ -3620,118 +3585,204 @@ impl TrayApp {
             let can_submit = !state.loading_groups && !state.submitting && !groups.is_empty();
 
             let modal = egui::Modal::new(egui::Id::unique("create-key-form"))
-                .backdrop_color(egui::Color32::from_black_alpha(150))
-                .frame(
-                    egui::Frame::new()
-                        .fill(theme().panel_bg)
-                        .corner_radius(egui::CornerRadius::same(12))
-                        .stroke(egui::Stroke::new(1.0, theme().panel_border))
-                        .inner_margin(egui::Margin::same(16)),
-                )
+                .backdrop_color(ui_style::modal_backdrop())
+                .frame(ui_style::modal_frame())
                 .show(ctx, |ui| {
-                    ui.set_width(320.0);
-                    ui.label(
-                        egui::RichText::new("添加 API Key")
-                            .size(fs(14.0))
-                            .strong()
-                            .color(theme().text_primary),
-                    );
-                    ui.add_space(10.0);
+                    ui.set_width(ui_style::size::MODAL_MAX_WIDTH);
 
-                    ui.label(
-                        egui::RichText::new("名称")
-                            .size(fs(10.0))
-                            .color(theme().text_secondary),
-                    );
-                    ui.add(
-                        egui::TextEdit::singleline(&mut state.name)
-                            .hint_text("给这个 Key 起个名字")
-                            .desired_width(220.0),
-                    );
-
-                    ui.add_space(8.0);
-                    ui.label(
-                        egui::RichText::new("分组")
-                            .size(fs(10.0))
-                            .color(theme().text_secondary),
-                    );
-                    if state.loading_groups {
-                        ui.horizontal(|ui| {
-                            ui.spinner();
+                    // 标题区：左侧品牌色竖条 + 标题/说明，和设置页、登录弹窗保持同一层级关系。
+                    ui.horizontal(|ui| {
+                        let (bar_rect, _) = ui.allocate_exact_size(
+                            egui::vec2(
+                                ui_style::size::ACCENT_BAR_WIDTH,
+                                ui_style::size::ACCENT_BAR_HEIGHT,
+                            ),
+                            egui::Sense::hover(),
+                        );
+                        ui.painter().rect_filled(
+                            bar_rect,
+                            egui::CornerRadius::same(ui_style::size::RADIUS_HAIRLINE),
+                            theme().accent,
+                        );
+                        ui.vertical(|ui| {
                             ui.label(
-                                egui::RichText::new("正在加载可用分组…")
-                                    .size(fs(10.0))
+                                egui::RichText::new("新增 API Key")
+                                    .size(font::HEADING)
+                                    .strong()
+                                    .color(theme().text_primary),
+                            );
+                            ui.label(
+                                egui::RichText::new("为当前账号创建独立凭据")
+                                    .size(font::SMALL)
                                     .color(theme().text_dim),
                             );
                         });
-                    } else if groups.is_empty() {
-                        ui.horizontal(|ui| {
-                            ui.label(
-                                egui::RichText::new("没有可绑定分组")
-                                    .size(fs(10.0))
-                                    .color(theme().danger),
-                            );
-                            if ui
-                                .add(
-                                    egui::Button::new(egui::RichText::new("重试").size(fs(10.0)))
-                                        .small(),
+                    });
+                    ui.add_space(ui_style::space::LG);
+
+                    ui_style::section_frame().show(ui, |ui| {
+                        ui.set_width(ui.available_width());
+
+                        ui_style::field_label(ui, "名称");
+                        ui_style::singleline_input(ui, &mut state.name, "给这个 Key 起个名字");
+
+                        ui.add_space(ui_style::space::MD);
+                        ui_style::field_label(ui, "分组");
+                        if state.loading_groups {
+                            ui.horizontal(|ui| {
+                                ui.spinner();
+                                ui_style::hint_label(ui, "正在加载可用分组…");
+                            });
+                        } else if groups.is_empty() {
+                            ui.horizontal(|ui| {
+                                ui.label(
+                                    egui::RichText::new("没有可绑定分组")
+                                        .size(font::BODY_SMALL)
+                                        .color(theme().danger),
+                                );
+                                if ui_style::add_button(
+                                    ui,
+                                    "重试",
+                                    ButtonTone::Neutral,
+                                    ButtonSize::Auto,
                                 )
                                 .clicked()
-                            {
-                                retry_groups = true;
-                            }
-                        });
-                    } else {
-                        egui::ComboBox::from_id_salt("create-key-group")
-                            .selected_text(egui::RichText::new(selected_group_label).size(fs(10.5)))
-                            .width(220.0)
-                            .show_ui(ui, |ui| {
-                                for group in &groups {
-                                    ui.selectable_value(
-                                        &mut state.selected_group_id,
-                                        Some(group.id),
-                                        &group.name,
-                                    );
+                                {
+                                    retry_groups = true;
                                 }
                             });
-                    }
+                        } else {
+                            egui::ComboBox::from_id_salt("create-key-group")
+                                .selected_text(
+                                    egui::RichText::new(selected_group_label)
+                                        .size(font::SUBHEADING)
+                                        .color(theme().text_primary),
+                                )
+                                .width(ui.available_width())
+                                .show_ui(ui, |ui| {
+                                    for group in &groups {
+                                        ui.selectable_value(
+                                            &mut state.selected_group_id,
+                                            Some(group.id),
+                                            egui::RichText::new(&group.name)
+                                                .size(font::SUBHEADING)
+                                                .color(theme().text_primary),
+                                        );
+                                    }
+                                });
+                        }
 
-                    ui.add_space(8.0);
-                    ui.label(
-                        egui::RichText::new("额度（美元，0 表示不限额）")
-                            .size(fs(10.0))
-                            .color(theme().text_secondary),
-                    );
-                    ui.horizontal(|ui| {
-                        ui.label(
-                            egui::RichText::new("$")
-                                .size(fs(11.0))
-                                .color(theme().text_dim),
-                        );
-                        ui.add(
-                            egui::TextEdit::singleline(&mut state.quota_input)
-                                .hint_text("0")
-                                .desired_width(160.0),
-                        );
+                        ui.add_space(ui_style::space::MD);
+                        ui_style::field_label(ui, "额度（美元）");
+                        ui_style::currency_input(ui, &mut state.quota_input, "$", "0 表示不限额");
+                        ui_style::hint_label(ui, "0 表示不限额，修改额度不会自动清零已用额度。");
+
+                        ui.add_space(ui_style::space::MD);
+                        ui_style::field_label(ui, "有效期");
+                        ui.horizontal(|ui| {
+                            let days_selected = state.expiry_mode == ExpiryMode::Days;
+                            let days_text = egui::RichText::new("按天数")
+                                .size(font::BODY_SMALL)
+                                .color(if days_selected {
+                                    theme().on_accent
+                                } else {
+                                    theme().text_secondary
+                                });
+                            if ui
+                                .add(ui_style::rich_button(
+                                    days_text,
+                                    if days_selected {
+                                        ButtonTone::Primary
+                                    } else {
+                                        ButtonTone::Ghost
+                                    },
+                                    ButtonSize::Auto,
+                                ))
+                                .clicked()
+                            {
+                                state.expiry_mode = ExpiryMode::Days;
+                            }
+
+                            let datetime_selected = state.expiry_mode == ExpiryMode::DateTime;
+                            let datetime_text = egui::RichText::new("指定时间")
+                                .size(font::BODY_SMALL)
+                                .color(if datetime_selected {
+                                    theme().on_accent
+                                } else {
+                                    theme().text_secondary
+                                });
+                            if ui
+                                .add(ui_style::rich_button(
+                                    datetime_text,
+                                    if datetime_selected {
+                                        ButtonTone::Primary
+                                    } else {
+                                        ButtonTone::Ghost
+                                    },
+                                    ButtonSize::Auto,
+                                ))
+                                .clicked()
+                            {
+                                state.expiry_mode = ExpiryMode::DateTime;
+                            }
+                        });
+
+                        match state.expiry_mode {
+                            ExpiryMode::Days => {
+                                ui_style::singleline_input(
+                                    ui,
+                                    &mut state.expires_in_days_input,
+                                    "例如 30；0 表示永久",
+                                );
+                                ui_style::hint_label(
+                                    ui,
+                                    "从创建时间起计算，0 或留空表示永久有效。",
+                                );
+                            }
+                            ExpiryMode::DateTime => {
+                                ui.horizontal(|ui| {
+                                    ui.set_height(ui_style::size::INPUT_HEIGHT);
+                                    ui_style::date_picker(
+                                        ui,
+                                        &mut state.expires_date,
+                                        "create-key-expiry-date",
+                                    );
+                                    ui_style::number_input(
+                                        ui,
+                                        &mut state.expires_hour,
+                                        0..=23,
+                                        " 时",
+                                    );
+                                    ui_style::number_input(
+                                        ui,
+                                        &mut state.expires_minute,
+                                        0..=59,
+                                        " 分",
+                                    );
+                                });
+                                ui_style::hint_label(
+                                    ui,
+                                    "按本地时区选择结束日期与时间，必须晚于当前时间。",
+                                );
+                            }
+                        }
                     });
 
                     if let Some(error) = &state.error {
-                        ui.add_space(8.0);
-                        ui.label(
-                            egui::RichText::new(error)
-                                .size(fs(9.5))
-                                .color(theme().danger),
-                        );
+                        ui.add_space(ui_style::space::MD);
+                        ui_style::error_banner(ui, error);
                     }
 
-                    ui.add_space(14.0);
+                    ui.add_space(ui_style::space::XXL);
                     ui.horizontal(|ui| {
-                        if ui
-                            .add_enabled(
-                                !state.submitting,
-                                egui::Button::new(egui::RichText::new("取消").size(fs(10.0))),
-                            )
-                            .clicked()
+                        if ui_style::add_enabled_button(
+                            ui,
+                            !state.submitting,
+                            "取消",
+                            ButtonTone::Neutral,
+                            ButtonSize::Form,
+                        )
+                        .clicked()
                         {
                             close = true;
                         }
@@ -3741,13 +3792,14 @@ impl TrayApp {
                             } else {
                                 "创建 Key"
                             };
-                            if ui
-                                .add_enabled(
-                                    can_submit,
-                                    egui::Button::new(egui::RichText::new(label).size(fs(10.5)))
-                                        .fill(theme().accent),
-                                )
-                                .clicked()
+                            if ui_style::add_enabled_button(
+                                ui,
+                                can_submit,
+                                label,
+                                ButtonTone::Primary,
+                                ButtonSize::Form,
+                            )
+                            .clicked()
                             {
                                 submit = true;
                             }
@@ -3793,52 +3845,54 @@ impl TrayApp {
         let mut close = false;
         let mut submit = false;
         let modal = egui::Modal::new(egui::Id::unique("delete-key-confirm"))
-            .backdrop_color(egui::Color32::from_black_alpha(150))
+            .backdrop_color(ui_style::modal_backdrop())
             .frame(
                 egui::Frame::new()
                     .fill(theme().panel_bg)
-                    .corner_radius(egui::CornerRadius::same(12))
+                    .corner_radius(egui::CornerRadius::same(ui_style::size::RADIUS_XL))
                     .stroke(egui::Stroke::new(1.0, theme().panel_border))
-                    .inner_margin(egui::Margin::same(16)),
+                    .inner_margin(egui::Margin::same(ui_style::size::MARGIN_LG)),
             )
             .show(ctx, |ui| {
-                ui.set_width(320.0);
+                ui.set_width(ui_style::size::MODAL_MAX_WIDTH);
                 ui.label(
                     egui::RichText::new("删除 API Key")
-                        .size(fs(14.0))
+                        .size(font::HEADING)
                         .strong()
                         .color(theme().text_primary),
                 );
-                ui.add_space(6.0);
+                ui.add_space(ui_style::space::SM);
                 ui.label(
                     egui::RichText::new(format!("{}  {}", state.key_name, state.key_masked))
-                        .size(fs(10.0))
+                        .size(font::BODY_SMALL)
                         .color(theme().text_secondary),
                 );
-                ui.add_space(10.0);
+                ui.add_space(ui_style::space::LG);
                 ui.label(
                     egui::RichText::new("删除后无法恢复，正在使用这个 Key 的客户端会立即失效。")
-                        .size(fs(10.0))
+                        .size(font::BODY_SMALL)
                         .color(theme().danger_text_soft),
                 );
 
                 if let Some(error) = &state.error {
-                    ui.add_space(8.0);
+                    ui.add_space(ui_style::space::MD);
                     ui.label(
                         egui::RichText::new(error)
-                            .size(fs(9.5))
+                            .size(font::SMALL_PLUS)
                             .color(theme().danger),
                     );
                 }
 
-                ui.add_space(14.0);
+                ui.add_space(ui_style::space::XXL);
                 ui.horizontal(|ui| {
-                    if ui
-                        .add_enabled(
-                            !state.submitting,
-                            egui::Button::new(egui::RichText::new("取消").size(fs(10.0))),
-                        )
-                        .clicked()
+                    if ui_style::add_enabled_button(
+                        ui,
+                        !state.submitting,
+                        "取消",
+                        ButtonTone::Neutral,
+                        ButtonSize::Auto,
+                    )
+                    .clicked()
                     {
                         close = true;
                     }
@@ -3848,17 +3902,14 @@ impl TrayApp {
                         } else {
                             "确认删除"
                         };
-                        if ui
-                            .add_enabled(
-                                !state.submitting,
-                                egui::Button::new(
-                                    egui::RichText::new(label)
-                                        .size(fs(10.0))
-                                        .color(theme().danger_text_soft),
-                                )
-                                .fill(theme().danger_button),
-                            )
-                            .clicked()
+                        if ui_style::add_enabled_button(
+                            ui,
+                            !state.submitting,
+                            label,
+                            ButtonTone::Danger,
+                            ButtonSize::Auto,
+                        )
+                        .clicked()
                         {
                             submit = true;
                         }
@@ -3906,41 +3957,41 @@ impl TrayApp {
         let mut cancel = false;
 
         let modal = egui::Modal::new(egui::Id::unique("delete-confirm"))
-            .backdrop_color(egui::Color32::from_black_alpha(150))
+            .backdrop_color(ui_style::modal_backdrop())
             .frame(
                 egui::Frame::new()
                     .fill(theme().panel_bg)
-                    .corner_radius(egui::CornerRadius::same(12))
+                    .corner_radius(egui::CornerRadius::same(ui_style::size::RADIUS_XL))
                     .stroke(egui::Stroke::new(1.0, theme().panel_border))
-                    .inner_margin(egui::Margin::same(16)),
+                    .inner_margin(egui::Margin::same(ui_style::size::MARGIN_LG)),
             )
             .show(ctx, |ui| {
-                ui.set_width(280.0);
+                ui.set_width(ui_style::size::SETTINGS_WIDTH);
                 ui.label(
                     egui::RichText::new("退出账号并删除记录")
-                        .size(fs(14.0))
+                        .size(font::HEADING)
                         .strong()
                         .color(theme().text_primary),
                 );
-                ui.add_space(8.0);
+                ui.add_space(ui_style::space::MD);
                 ui.label(
                     egui::RichText::new(format!(
                         "确定退出 {display} 并删除记录？删除后需要重新登录才能恢复。"
                     ))
-                    .size(fs(11.0))
+                    .size(font::BODY)
                     .color(theme().text_secondary),
                 );
-                ui.add_space(14.0);
+                ui.add_space(ui_style::space::XXL);
                 ui.horizontal(|ui| {
-                    if ui
-                        .add_sized([88.0, 28.0], egui::Button::new("取消"))
+                    if ui_style::add_button(ui, "取消", ButtonTone::Neutral, ButtonSize::Sm)
                         .clicked()
                     {
                         cancel = true;
                     }
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        let delete_button = egui::Button::new("删除").fill(theme().danger_button);
-                        if ui.add_sized([96.0, 28.0], delete_button).clicked() {
+                        if ui_style::add_button(ui, "删除", ButtonTone::Danger, ButtonSize::Md)
+                            .clicked()
+                        {
                             confirm = true;
                         }
                     });
@@ -4163,7 +4214,7 @@ fn fallback_position(monitor: egui::Vec2, size: egui::Vec2) -> (f32, f32) {
 /// 同样是矢量绘制：`📌` 这类 emoji 在中文字体里可能缺字形（变豆腐块），
 /// 自己画"圆头 + 斜针 + 底座"在任何字体环境下都可靠。
 fn draw_pin(ui: &mut egui::Ui, pinned: bool) -> egui::Response {
-    let size = fs(16.0);
+    let size = ui_style::size::ICON_MD;
     let (rect, response) = ui.allocate_exact_size(egui::vec2(size, size), egui::Sense::click());
     let hovered = response.hovered();
     let color = if pinned {
@@ -4207,7 +4258,7 @@ fn draw_pin(ui: &mut egui::Ui, pinned: bool) -> egui::Response {
 /// 与 chevron 同理：egui 不能渲染 SVG，而齿轮用两三个圆 + 8 根短线就能画得很干净，
 /// 比字体符号 `⚙` 在不同系统下大小/粗细不一要稳。
 fn draw_gear(ui: &mut egui::Ui) -> egui::Response {
-    let size = fs(16.0);
+    let size = ui_style::size::ICON_MD;
     let (rect, response) = ui.allocate_exact_size(egui::vec2(size, size), egui::Sense::click());
     let hovered = response.hovered();
     let color = if hovered {
@@ -4243,7 +4294,7 @@ fn draw_gear(ui: &mut egui::Ui) -> egui::Response {
 ///
 /// 当前是夜间时显示太阳，表示点击切到日间；当前是日间时显示月亮。
 fn draw_theme_toggle(ui: &mut egui::Ui, dark_mode: bool) -> egui::Response {
-    let size = fs(16.0);
+    let size = ui_style::size::ICON_MD;
     let (rect, response) = ui.allocate_exact_size(egui::vec2(size, size), egui::Sense::click());
     let hovered = response.hovered();
     let color = if hovered {
@@ -4301,9 +4352,11 @@ fn draw_header(
     // 这样 right_to_left 有明确的裁剪区，按钮不会因为父 horizontal 的
     // 剩余宽度/裁剪计算而被隐藏。
     let available = ui.available_rect_before_wrap();
-    let row_rect =
-        egui::Rect::from_min_size(available.min, egui::vec2(available.width(), fs(20.0)));
-    let controls_width = fs(120.0).min(row_rect.width() * 0.5);
+    let row_rect = egui::Rect::from_min_size(
+        available.min,
+        egui::vec2(available.width(), ui_style::size::HEADER_ROW_HEIGHT),
+    );
+    let controls_width = ui_style::size::HEADER_CONTROLS_WIDTH.min(row_rect.width() * 0.5);
     let left_rect = egui::Rect::from_min_max(
         row_rect.min,
         egui::pos2(row_rect.right() - controls_width, row_rect.bottom()),
@@ -4323,7 +4376,7 @@ fn draw_header(
                 .add(
                     egui::Label::new(
                         egui::RichText::new("用量统计托盘")
-                            .size(fs(13.0))
+                            .size(font::SUBHEADING)
                             .strong()
                             .color(theme().text_primary),
                     )
@@ -4352,7 +4405,7 @@ fn draw_header(
             }
             ui.label(
                 egui::RichText::new(format!("v{}", crate::APP_VERSION))
-                    .size(fs(10.0))
+                    .size(font::BODY_SMALL)
                     .color(theme().text_secondary),
             );
         },
@@ -4360,18 +4413,24 @@ fn draw_header(
     ui.advance_cursor_after_rect(row_rect);
 
     // 标题下的品牌色细线：让面板在深色任务栏旁也能一眼认出是哪个产品。
-    ui.add_space(6.0);
+    ui.add_space(ui_style::space::SM);
     let (line_rect, _) =
         ui.allocate_exact_size(egui::vec2(ui.available_width(), 2.0), egui::Sense::hover());
-    ui.painter()
-        .rect_filled(line_rect, egui::CornerRadius::same(1), theme().accent);
+    ui.painter().rect_filled(
+        line_rect,
+        egui::CornerRadius::same(ui_style::size::RADIUS_HAIRLINE),
+        theme().accent,
+    );
 }
 
 /// 标题栏左侧的拖动抓手。
 ///
 /// 画六个小圆点而不是用字符：不同中文字体下 `⠿` / `⋮⋮` 的字形宽度差异很大。
 fn draw_window_drag_handle(ui: &mut egui::Ui) {
-    let size = egui::vec2(fs(12.0), fs(18.0));
+    let size = egui::vec2(
+        ui_style::size::DRAG_HANDLE_WIDTH,
+        ui_style::size::DRAG_HANDLE_HEIGHT,
+    );
     let (rect, response) = ui.allocate_exact_size(size, egui::Sense::drag());
     let active = response.hovered() || response.dragged();
     if active {
@@ -4599,23 +4658,19 @@ fn draw_account_summary(
 
     egui::Frame::new()
         .fill(theme().card_bg)
-        .corner_radius(egui::CornerRadius::same(10))
-        .inner_margin(egui::Margin::same(12))
+        .corner_radius(egui::CornerRadius::same(ui_style::size::RADIUS_LG))
+        .inner_margin(egui::Margin::same(ui_style::size::MARGIN_MD))
         .show(ui, |ui| {
             ui.set_width(ui.available_width());
             ui.horizontal(|ui| {
                 ui.label(
                     egui::RichText::new(format!("已登录 {} 个账号", cards.len()))
-                        .size(fs(13.0))
+                        .size(font::SUBHEADING)
                         .strong()
                         .color(theme().text_primary),
                 );
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if ui
-                        .add_sized(
-                            [76.0, 22.0],
-                            egui::Button::new(egui::RichText::new("立即刷新").size(fs(10.0))),
-                        )
+                    if ui_style::add_button(ui, "立即刷新", ButtonTone::Neutral, ButtonSize::Xs)
                         .on_hover_text("立刻拉取一次状态，不必等定时刷新")
                         .clicked()
                     {
@@ -4623,18 +4678,18 @@ fn draw_account_summary(
                     }
 
                     // 登录入口：品牌色高亮，放进总览卡片，省掉独立一整行
-                    let login = egui::Button::new(
-                        egui::RichText::new("＋ 登录")
-                            .size(fs(10.0))
-                            .strong()
-                            .color(theme().on_accent),
-                    )
-                    .fill(theme().accent);
                     let response = if at_limit {
-                        ui.add_enabled_ui(false, |ui| ui.add_sized([64.0, 22.0], login))
-                            .inner
+                        ui.add_enabled_ui(false, |ui| {
+                            ui_style::add_button(
+                                ui,
+                                "＋ 登录",
+                                ButtonTone::Primary,
+                                ButtonSize::Tiny,
+                            )
+                        })
+                        .inner
                     } else {
-                        ui.add_sized([64.0, 22.0], login)
+                        ui_style::add_button(ui, "＋ 登录", ButtonTone::Primary, ButtonSize::Tiny)
                     };
                     if response
                         .on_hover_text(if at_limit {
@@ -4648,12 +4703,12 @@ fn draw_account_summary(
                     }
                 });
             });
-            ui.add_space(4.0);
+            ui.add_space(ui_style::space::XS);
             ui.label(
                 egui::RichText::new(format!(
                     "在线 {online} · 离线 {offline} · 凭据损坏 {invalid}"
                 ))
-                .size(fs(11.0))
+                .size(font::BODY)
                 .color(theme().text_secondary),
             );
         });
@@ -4667,7 +4722,7 @@ fn draw_account_summary(
 /// 24×24 网格上的折线 `(6,9) → (12,15) → (18,9)`，线宽 2，圆头圆角。
 /// 展开/收起只换折线朝向：收起时朝右，展开时朝下。
 fn draw_chevron(ui: &mut egui::Ui, expanded: bool, hover_t: f32) -> egui::Response {
-    let size = fs(16.0);
+    let size = ui_style::size::ICON_MD;
     let (rect, response) = ui.allocate_exact_size(egui::vec2(size, size), egui::Sense::click());
     let center = rect.center();
 
@@ -4675,7 +4730,7 @@ fn draw_chevron(ui: &mut egui::Ui, expanded: bool, hover_t: f32) -> egui::Respon
     // 圆角底片：平时几乎透明，悬浮时随动画淡入，让箭头本身也像一颗"按钮"
     painter.rect_filled(
         rect.shrink(1.0),
-        egui::CornerRadius::same(5),
+        egui::CornerRadius::same(ui_style::size::RADIUS_XS),
         lerp_color(theme().overlay_subtle, theme().hover_card_bg, hover_t),
     );
 
@@ -4727,8 +4782,8 @@ fn draw_account_card(
     let t = hover.t(ui.ctx(), &hover_key);
     let frame = egui::Frame::new()
         .fill(lerp_color(theme().card_bg, theme().hover_card_bg, t))
-        .corner_radius(egui::CornerRadius::same(10))
-        .inner_margin(egui::Margin::same(12))
+        .corner_radius(egui::CornerRadius::same(ui_style::size::RADIUS_LG))
+        .inner_margin(egui::Margin::same(ui_style::size::MARGIN_MD))
         .show(ui, |ui| {
             ui.set_width(ui.available_width());
 
@@ -4764,7 +4819,7 @@ fn draw_account_card(
                     }
                     ui.label(
                         egui::RichText::new("●")
-                            .size(fs(10.0))
+                            .size(font::BODY_SMALL)
                             .color(status_color(card.status)),
                     );
                     // 邮箱与实例地址上下排布，正好填满右侧两个操作按钮形成的
@@ -4774,7 +4829,7 @@ fn draw_account_card(
                             .add(
                                 egui::Label::new(
                                     egui::RichText::new(&card.display)
-                                        .size(fs(13.0))
+                                        .size(font::SUBHEADING)
                                         .strong()
                                         .color(lerp_color(
                                             theme().text_primary,
@@ -4792,7 +4847,7 @@ fn draw_account_card(
                         ui.add(
                             egui::Label::new(
                                 egui::RichText::new(&card.base_url)
-                                    .size(fs(10.0))
+                                    .size(font::BODY_SMALL)
                                     .color(theme().text_dim),
                             )
                             .truncate(),
@@ -4809,11 +4864,11 @@ fn draw_account_card(
                     |ui| {
                         let add_clicked = ui
                             .add_enabled_ui(can_create_key, |ui| {
-                                ui.add_sized(
-                                    [action_width, 24.0],
-                                    egui::Button::new(
-                                        egui::RichText::new("新增key").size(fs(10.5)),
-                                    ),
+                                ui_style::add_button(
+                                    ui,
+                                    "新增key",
+                                    ButtonTone::Neutral,
+                                    ButtonSize::Header,
                                 )
                             })
                             .inner
@@ -4822,13 +4877,14 @@ fn draw_account_card(
                         if add_clicked {
                             key_actions.create_key_request = Some(card.id.clone());
                         }
-                        if ui
-                            .add_sized(
-                                [action_width, 24.0],
-                                egui::Button::new(egui::RichText::new("登出账户").size(fs(11.0))),
-                            )
-                            .on_hover_text("退出这个账号并删除本地记录")
-                            .clicked()
+                        if ui_style::add_button(
+                            ui,
+                            "登出账户",
+                            ButtonTone::Neutral,
+                            ButtonSize::Header,
+                        )
+                        .on_hover_text("退出这个账号并删除本地记录")
+                        .clicked()
                         {
                             *delete_request = Some(card.id.clone());
                         }
@@ -4852,21 +4908,21 @@ fn draw_account_card(
                 }
                 ui.label(
                     egui::RichText::new(status_line)
-                        .size(fs(11.0))
+                        .size(font::BODY)
                         .color(theme().text_secondary),
                 );
 
                 if let Some(summary) = &card.summary {
                     ui.label(
                         egui::RichText::new(summary)
-                            .size(fs(10.0))
+                            .size(font::BODY_SMALL)
                             .color(theme().text_dim),
                     );
                 }
 
                 ui.label(
                     egui::RichText::new(&card.refreshed)
-                        .size(fs(9.0))
+                        .size(font::SMALL)
                         .color(theme().text_dim),
                 );
 
@@ -4875,17 +4931,27 @@ fn draw_account_card(
                     let first_line = error.lines().next().unwrap_or_default();
                     ui.label(
                         egui::RichText::new(first_line)
-                            .size(fs(9.0))
+                            .size(font::SMALL)
                             .color(theme().danger),
                     );
                 }
 
-                ui.add_space(6.0);
+                if card.status == AccountStatus::CredentialsInvalid {
+                    ui.add_space(ui_style::space::XS);
+                    if ui_style::add_button(ui, "重新登录", ButtonTone::Primary, ButtonSize::Lg)
+                        .on_hover_text("保留账号和 Key 缓存，只更新本地登录凭据")
+                        .clicked()
+                    {
+                        key_actions.relogin_request = Some(card.id.clone());
+                    }
+                }
+
+                ui.add_space(ui_style::space::SM);
                 ui.separator();
 
                 // 用量曲线：走用户态接口，看到的是本账号自己的数据
                 draw_usage_section(ui, card, usage_actions);
-                ui.add_space(6.0);
+                ui.add_space(ui_style::space::SM);
                 ui.separator();
 
                 draw_account_keys(ui, card, hover, key_actions);
@@ -4930,7 +4996,7 @@ fn draw_usage_section(ui: &mut egui::Ui, card: &AccountCard, actions: &mut Usage
             .add(
                 egui::Label::new(
                     egui::RichText::new("我的用量")
-                        .size(usage_fs(11.0))
+                        .size(usage_font::BODY)
                         .strong()
                         .color(theme().text_primary),
                 )
@@ -4943,14 +5009,14 @@ fn draw_usage_section(ui: &mut egui::Ui, card: &AccountCard, actions: &mut Usage
         if card.usage_collapsed {
             ui.label(
                 egui::RichText::new("已收起")
-                    .size(usage_fs(8.5))
+                    .size(usage_font::CAPTION)
                     .color(theme().text_dim),
             );
         } else if card.usage_loading && has_usage {
-            ui.add(egui::Spinner::new().size(usage_fs(10.0)));
+            ui.add(egui::Spinner::new().size(usage_font::BODY_SMALL));
             ui.label(
                 egui::RichText::new("更新中...")
-                    .size(usage_fs(8.5))
+                    .size(usage_font::CAPTION)
                     .color(theme().text_dim),
             );
         }
@@ -4980,16 +5046,16 @@ fn draw_usage_section(ui: &mut egui::Ui, card: &AccountCard, actions: &mut Usage
             }
         });
 
-    ui.add_space(3.0);
+    ui.add_space(ui_style::space::XXS);
     ui.horizontal(|ui| {
         // 「全部 Key」是默认项；Key 列表加载完成后再出现具体选项。
         egui::ComboBox::from_id_salt(("usage-key", card.id.as_str()))
             .selected_text(
                 egui::RichText::new(selected_key_label)
-                    .size(usage_fs(9.0))
+                    .size(usage_font::SMALL)
                     .color(theme().text_primary),
             )
-            .width(usage_fs(108.0))
+            .width(ui_style::size::USAGE_SELECT_WIDTH)
             .show_ui(ui, |ui| {
                 if ui
                     .selectable_label(card.usage_api_key_id.is_none(), "全部 Key")
@@ -5010,17 +5076,18 @@ fn draw_usage_section(ui: &mut egui::Ui, card: &AccountCard, actions: &mut Usage
             for range in UsageRange::ALL.iter().rev() {
                 let selected = *range == card.usage_range;
                 let text = egui::RichText::new(range.label())
-                    .size(usage_fs(9.0))
+                    .size(usage_font::SMALL)
                     .color(if selected {
                         theme().on_accent
                     } else {
                         theme().text_secondary
                     });
-                let button = egui::Button::new(text).small().fill(if selected {
-                    theme().accent
+                let tone = if selected {
+                    ButtonTone::Primary
                 } else {
-                    egui::Color32::TRANSPARENT
-                });
+                    ButtonTone::Ghost
+                };
+                let button = ui_style::rich_button(text, tone, ButtonSize::Auto);
                 if ui.add(button).clicked() && !selected {
                     actions.range = Some((card.id.clone(), *range));
                 }
@@ -5028,29 +5095,30 @@ fn draw_usage_section(ui: &mut egui::Ui, card: &AccountCard, actions: &mut Usage
         });
     });
 
-    ui.add_space(2.0);
+    ui.add_space(ui_style::space::HAIRLINE);
     ui.horizontal_wrapped(|ui| {
         for metric in UsageMetric::ALL {
             let selected = metric == card.usage_metric;
             let text = egui::RichText::new(metric.label())
-                .size(usage_fs(8.5))
+                .size(usage_font::CAPTION)
                 .color(if selected {
                     theme().on_accent
                 } else {
                     theme().text_secondary
                 });
-            let button = egui::Button::new(text).small().fill(if selected {
-                theme().accent
+            let tone = if selected {
+                ButtonTone::Primary
             } else {
-                egui::Color32::TRANSPARENT
-            });
+                ButtonTone::Ghost
+            };
+            let button = ui_style::rich_button(text, tone, ButtonSize::Auto);
             if ui.add(button).clicked() && !selected {
                 actions.metric = Some((card.id.clone(), metric));
             }
         }
     });
 
-    ui.add_space(4.0);
+    ui.add_space(ui_style::space::XS);
     // 只有首次加载或切换到没有缓存的区间时，才让 spinner 占据图表位置。
     // 周期性刷新继续显示旧曲线，避免图表短暂消失再出现。
     if should_show_usage_spinner(card.usage_loading, !card.usage_points.is_empty()) {
@@ -5058,7 +5126,7 @@ fn draw_usage_section(ui: &mut egui::Ui, card: &AccountCard, actions: &mut Usage
             ui.spinner();
             ui.label(
                 egui::RichText::new("加载用量...")
-                    .size(usage_fs(9.0))
+                    .size(usage_font::SMALL)
                     .color(theme().text_dim),
             );
         });
@@ -5068,7 +5136,7 @@ fn draw_usage_section(ui: &mut egui::Ui, card: &AccountCard, actions: &mut Usage
     if let Some(error) = &card.usage_error {
         ui.label(
             egui::RichText::new(error)
-                .size(usage_fs(9.0))
+                .size(usage_font::SMALL)
                 .color(theme().danger),
         );
         if card.usage_points.is_empty() {
@@ -5076,7 +5144,7 @@ fn draw_usage_section(ui: &mut egui::Ui, card: &AccountCard, actions: &mut Usage
         }
         ui.label(
             egui::RichText::new("以下是上次成功加载的数据")
-                .size(usage_fs(8.5))
+                .size(usage_font::CAPTION)
                 .color(theme().text_dim),
         );
     }
@@ -5084,7 +5152,7 @@ fn draw_usage_section(ui: &mut egui::Ui, card: &AccountCard, actions: &mut Usage
     if card.usage_points.is_empty() || !has_usage {
         ui.label(
             egui::RichText::new("该区间暂无用量")
-                .size(usage_fs(9.0))
+                .size(usage_font::SMALL)
                 .color(theme().text_dim),
         );
         return;
@@ -5112,10 +5180,10 @@ fn draw_usage_totals(ui: &mut egui::Ui, card: &AccountCard) {
         "全部 Key 合计"
     };
 
-    ui.add_space(2.0);
+    ui.add_space(ui_style::space::HAIRLINE);
     ui.label(
         egui::RichText::new(scope)
-            .size(usage_fs(8.5))
+            .size(usage_font::CAPTION)
             .strong()
             .color(theme().text_secondary),
     );
@@ -5136,7 +5204,7 @@ fn draw_usage_totals(ui: &mut egui::Ui, card: &AccountCard) {
     let per_row = usage_metrics_per_row(ui.available_width());
     for (row_index, row) in metrics.chunks(per_row).enumerate() {
         if row_index > 0 {
-            ui.add_space(2.0);
+            ui.add_space(ui_style::space::HAIRLINE);
         }
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = USAGE_METRIC_CHIP_GAP;
@@ -5163,7 +5231,7 @@ fn usage_metric_chip(ui: &mut egui::Ui, label: &str, value: &str, width: f32) {
     let text = format!("{label} {value}");
     egui::Frame::new()
         .fill(theme().empty_bg)
-        .corner_radius(egui::CornerRadius::same(4))
+        .corner_radius(egui::CornerRadius::same(ui_style::size::RADIUS_SM))
         .inner_margin(egui::Margin::symmetric(5, 2))
         .show(ui, |ui| {
             // Frame 的左右内边距各 5，内容宽度要扣掉，保证总宽度固定。
@@ -5171,7 +5239,7 @@ fn usage_metric_chip(ui: &mut egui::Ui, label: &str, value: &str, width: f32) {
             ui.add(
                 egui::Label::new(
                     egui::RichText::new(&text)
-                        .size(usage_fs(8.5))
+                        .size(usage_font::CAPTION)
                         .color(theme().text_secondary),
                 )
                 .truncate(),
@@ -5240,8 +5308,8 @@ fn usage_chart_samples(
 /// 不引入图表库，也不做逐帧分配（`line` 是每帧临时 Vec，但只有几十个点）。
 fn draw_usage_chart(ui: &mut egui::Ui, points: &[crate::api::UsagePoint], metric: UsageMetric) {
     let width = ui.available_width().max(80.0);
-    let axis_height = usage_fs(14.0);
-    let plot_height = usage_fs(84.0);
+    let axis_height = ui_style::size::USAGE_AXIS_HEIGHT;
+    let plot_height = ui_style::size::USAGE_PLOT_HEIGHT;
     let (rect, response) = ui.allocate_exact_size(
         egui::vec2(width, plot_height + axis_height),
         egui::Sense::hover(),
@@ -5265,7 +5333,7 @@ fn draw_usage_chart(ui: &mut egui::Ui, points: &[crate::api::UsagePoint], metric
         egui::pos2(plot.right(), plot.top() + 2.0),
         egui::Align2::RIGHT_TOP,
         metric.format(max_value as f64),
-        egui::FontId::proportional(usage_fs(7.5)),
+        egui::FontId::proportional(usage_font::MICRO),
         theme().text_dim,
     );
     let count = points.len();
@@ -5285,7 +5353,7 @@ fn draw_usage_chart(ui: &mut egui::Ui, points: &[crate::api::UsagePoint], metric
             plot.center(),
             egui::Align2::CENTER_CENTER,
             "该指标暂无数据",
-            egui::FontId::proportional(usage_fs(9.5)),
+            egui::FontId::proportional(usage_font::CAPTION),
             theme().text_dim,
         );
         return;
@@ -5349,7 +5417,7 @@ fn draw_usage_chart(ui: &mut egui::Ui, points: &[crate::api::UsagePoint], metric
         );
         let galley = painter.layout(
             text,
-            egui::FontId::proportional(usage_fs(8.5)),
+            egui::FontId::proportional(usage_font::CAPTION),
             theme().text_primary,
             plot.width() * 0.62,
         );
@@ -5361,12 +5429,16 @@ fn draw_usage_chart(ui: &mut egui::Ui, points: &[crate::api::UsagePoint], metric
             pos - egui::vec2(5.0, 3.0),
             galley.size() + egui::vec2(10.0, 6.0),
         );
-        painter.rect_filled(background, egui::CornerRadius::same(4), theme().tooltip_bg);
+        painter.rect_filled(
+            background,
+            egui::CornerRadius::same(ui_style::size::RADIUS_SM),
+            theme().tooltip_bg,
+        );
         painter.galley(pos, galley, theme().text_primary);
     }
 
     // 横轴只标首尾两个真实时间桶，空间足够时再补中间点。
-    let axis_font = egui::FontId::proportional(usage_fs(8.0));
+    let axis_font = egui::FontId::proportional(usage_font::TINY);
     let first = short_usage_label(&points[0].label);
     let last = short_usage_label(&points[count.saturating_sub(1)].label);
     painter.text(
@@ -5427,7 +5499,7 @@ fn draw_account_keys(
             ui.spinner();
             ui.label(
                 egui::RichText::new("正在拉取 Key…")
-                    .size(fs(10.0))
+                    .size(font::BODY_SMALL)
                     .color(theme().text_secondary),
             );
         });
@@ -5439,7 +5511,7 @@ fn draw_account_keys(
             ui.spinner();
             ui.label(
                 egui::RichText::new("正在拉取 Key…")
-                    .size(fs(10.0))
+                    .size(font::BODY_SMALL)
                     .color(theme().text_secondary),
             );
         });
@@ -5449,14 +5521,14 @@ fn draw_account_keys(
     if let Some(error) = &state.error {
         ui.label(
             egui::RichText::new(error)
-                .size(fs(10.0))
+                .size(font::BODY_SMALL)
                 .color(theme().danger),
         );
         // 离线回退：明确告诉用户这是缓存，数据可能已经变化
         if state.cached {
             ui.label(
                 egui::RichText::new("缓存数据 · 可能已过期，联网后会刷新")
-                    .size(fs(9.0))
+                    .size(font::SMALL)
                     .color(theme().text_dim),
             );
         }
@@ -5468,14 +5540,14 @@ fn draw_account_keys(
     if state.keys.is_empty() {
         ui.label(
             egui::RichText::new("该账号没有 API Key")
-                .size(fs(10.0))
+                .size(font::BODY_SMALL)
                 .color(theme().text_dim),
         );
         return;
     }
 
     for key in &state.keys {
-        ui.add_space(3.0);
+        ui.add_space(ui_style::space::XXS);
 
         let hover_key = format!("key:{}:{}", card.id, key.id);
         let kt = hover.t(ui.ctx(), &hover_key);
@@ -5499,7 +5571,7 @@ fn draw_account_keys(
                     1.0,
                     lerp_color(egui::Color32::TRANSPARENT, theme().accent, kt * 0.7),
                 ))
-                .corner_radius(egui::CornerRadius::same(6))
+                .corner_radius(egui::CornerRadius::same(ui_style::size::RADIUS_MD))
                 .inner_margin(egui::Margin::symmetric(7, 4))
                 .show(ui, |ui| {
                     ui.set_width(ui.available_width());
@@ -5508,7 +5580,7 @@ fn draw_account_keys(
                     ui.horizontal(|ui| {
                         ui.label(
                             egui::RichText::new(format!("{}  {}", key.name, key.masked))
-                                .size(fs(11.0))
+                                .size(font::BODY)
                                 .color(lerp_color(
                                     theme().text_primary,
                                     theme().text_hover,
@@ -5517,7 +5589,7 @@ fn draw_account_keys(
                         );
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                             if let Some(group) = key.group.as_ref().or(card.subscription.as_ref()) {
-                                ui.label(egui::RichText::new(group).size(fs(9.0)).color(
+                                ui.label(egui::RichText::new(group).size(font::SMALL).color(
                                     lerp_color(theme().text_dim, theme().text_secondary, kt),
                                 ));
                             }
@@ -5527,9 +5599,15 @@ fn draw_account_keys(
                     // 第二行：Key 自身额度。限速统计只在对应窗口启用时单独展示；
                     // 三个窗口都没配置时不显示任何限速描述。
                     ui.horizontal(|ui| {
-                        ui.label(egui::RichText::new(&quota_text).size(fs(10.0)).color(
-                            lerp_color(theme().text_secondary, theme().text_hover, kt * 0.3),
-                        ));
+                        ui.label(
+                            egui::RichText::new(&quota_text)
+                                .size(font::BODY_SMALL)
+                                .color(lerp_color(
+                                    theme().text_secondary,
+                                    theme().text_hover,
+                                    kt * 0.3,
+                                )),
+                        );
                     });
 
                     let rate_windows = [
@@ -5557,7 +5635,7 @@ fn draw_account_keys(
                     if !rate_stat_texts.is_empty() {
                         ui.horizontal_wrapped(|ui| {
                             for text in &rate_stat_texts {
-                                ui.label(egui::RichText::new(text).size(fs(9.5)).color(
+                                ui.label(egui::RichText::new(text).size(font::SMALL_PLUS).color(
                                     lerp_color(theme().text_dim, theme().text_secondary, kt * 0.3),
                                 ));
                             }
@@ -5571,24 +5649,25 @@ fn draw_account_keys(
                         if kt > 0.05 {
                             // 固定最小尺寸 + 更大字号，避免按钮在托盘里显得又小又难点；
                             // 三个按钮宽度一致，悬浮出现时整体更整齐。
-                            let button_size = egui::vec2(64.0, 26.0);
-                            if ui
-                                .add(
-                                    egui::Button::new(egui::RichText::new("复制").size(fs(10.5)))
-                                        .min_size(button_size),
-                                )
-                                .on_hover_text("复制完整 Key 到剪贴板")
-                                .clicked()
+                            if ui_style::add_button(
+                                ui,
+                                "复制",
+                                ButtonTone::Neutral,
+                                ButtonSize::KeyAction,
+                            )
+                            .on_hover_text("复制完整 Key 到剪贴板")
+                            .clicked()
                             {
                                 key_actions.copy_request = Some((card.id.clone(), key.id.clone()));
                             }
-                            if ui
-                                .add(
-                                    egui::Button::new(egui::RichText::new("调额度").size(fs(10.5)))
-                                        .min_size(button_size),
-                                )
-                                .on_hover_text("调整这个 Key 的额度")
-                                .clicked()
+                            if ui_style::add_button(
+                                ui,
+                                "调额度",
+                                ButtonTone::Neutral,
+                                ButtonSize::KeyAction,
+                            )
+                            .on_hover_text("调整这个 Key 的额度")
+                            .clicked()
                             {
                                 key_actions.quota_request = Some(QuotaEditTarget {
                                     account_id: card.id.clone(),
@@ -5599,17 +5678,14 @@ fn draw_account_keys(
                                     quota_used: used,
                                 });
                             }
-                            if ui
-                                .add(
-                                    egui::Button::new(
-                                        egui::RichText::new("删除")
-                                            .size(fs(10.5))
-                                            .color(theme().danger_text_soft),
-                                    )
-                                    .min_size(button_size),
-                                )
-                                .on_hover_text("删除这个 API Key（不可恢复）")
-                                .clicked()
+                            if ui_style::add_button(
+                                ui,
+                                "删除",
+                                ButtonTone::Danger,
+                                ButtonSize::KeyAction,
+                            )
+                            .on_hover_text("删除这个 API Key（不可恢复）")
+                            .clicked()
                             {
                                 key_actions.delete_request = Some(DeleteKeyTarget {
                                     account_id: card.id.clone(),
@@ -5630,12 +5706,16 @@ fn draw_account_keys(
                 egui::vec2(62.0, 20.0),
             );
             let painter = ui.painter();
-            painter.rect_filled(chip, egui::CornerRadius::same(10), theme().accent);
+            painter.rect_filled(
+                chip,
+                egui::CornerRadius::same(ui_style::size::RADIUS_LG),
+                theme().accent,
+            );
             painter.text(
                 chip.center(),
                 egui::Align2::CENTER_CENTER,
                 "已复制",
-                egui::FontId::proportional(fs(10.0)),
+                egui::FontId::proportional(font::BODY_SMALL),
                 theme().on_accent,
             );
         }
@@ -5650,8 +5730,8 @@ fn draw_account_keys(
 fn draw_status_card(ui: &mut egui::Ui) {
     egui::Frame::new()
         .fill(theme().card_bg)
-        .corner_radius(egui::CornerRadius::same(10))
-        .inner_margin(egui::Margin::same(12))
+        .corner_radius(egui::CornerRadius::same(ui_style::size::RADIUS_LG))
+        .inner_margin(egui::Margin::same(ui_style::size::MARGIN_MD))
         .show(ui, |ui| {
             // 撑满宽度，否则卡片会按内容收缩，看起来像个小方块
             ui.set_width(ui.available_width());
@@ -5659,21 +5739,21 @@ fn draw_status_card(ui: &mut egui::Ui) {
             ui.horizontal(|ui| {
                 ui.label(
                     egui::RichText::new("●")
-                        .size(fs(12.0))
+                        .size(font::BODY_LARGE)
                         .color(theme().text_secondary),
                 );
                 ui.label(
                     egui::RichText::new("尚未登录任何实例")
-                        .size(fs(14.0))
+                        .size(font::HEADING)
                         .strong()
                         .color(theme().text_primary),
                 );
             });
 
-            ui.add_space(6.0);
+            ui.add_space(ui_style::space::SM);
             ui.label(
                 egui::RichText::new("配置 Sub2API 实例地址并登录后，托盘会定时拉取账户状态。")
-                    .size(fs(12.0))
+                    .size(font::BODY_LARGE)
                     .color(theme().text_secondary),
             );
         });
@@ -5686,24 +5766,24 @@ fn draw_status_card(ui: &mut egui::Ui) {
 fn draw_empty_state(ui: &mut egui::Ui) {
     egui::Frame::new()
         .fill(theme().empty_bg)
-        .corner_radius(egui::CornerRadius::same(10))
-        .inner_margin(egui::Margin::same(12))
+        .corner_radius(egui::CornerRadius::same(ui_style::size::RADIUS_LG))
+        .inner_margin(egui::Margin::same(ui_style::size::MARGIN_MD))
         .show(ui, |ui| {
             ui.set_width(ui.available_width());
             ui.vertical_centered(|ui| {
-                ui.add_space(6.0);
+                ui.add_space(ui_style::space::SM);
                 ui.label(
                     egui::RichText::new("账户状态列表")
-                        .size(fs(12.0))
+                        .size(font::BODY_LARGE)
                         .color(theme().text_secondary),
                 );
-                ui.add_space(4.0);
+                ui.add_space(ui_style::space::XS);
                 ui.label(
                     egui::RichText::new("登录后按账户展示在线状态、剩余额度与最近使用时间。")
-                        .size(fs(11.0))
+                        .size(font::BODY)
                         .color(theme().text_dim),
                 );
-                ui.add_space(6.0);
+                ui.add_space(ui_style::space::SM);
             });
         });
 }
@@ -5713,8 +5793,7 @@ fn draw_empty_state(ui: &mut egui::Ui) {
 /// 使用 `Area` 而不是布局里的 `Panel`：浮层不会占用滚动区高度，出现/消失时
 /// 不会把账号卡片上下推挤；`Order::Foreground` 保证它盖在内容和滚动条之上。
 fn draw_toast_overlay(ctx: &egui::Context, text: &str) {
-    let card = theme().card_bg;
-    let background = egui::Color32::from_rgba_unmultiplied(card.r(), card.g(), card.b(), 220);
+    let background = ui_style::toast_background();
 
     egui::Area::new(egui::Id::unique("toast-overlay"))
         .order(egui::Order::Foreground)
@@ -5723,13 +5802,13 @@ fn draw_toast_overlay(ctx: &egui::Context, text: &str) {
             ui.set_max_width(320.0);
             egui::Frame::new()
                 .fill(background)
-                .corner_radius(egui::CornerRadius::same(10))
+                .corner_radius(egui::CornerRadius::same(ui_style::size::RADIUS_LG))
                 .stroke(egui::Stroke::new(1.0, theme().accent))
                 .inner_margin(egui::Margin::symmetric(12, 7))
                 .show(ui, |ui| {
                     ui.label(
                         egui::RichText::new(text)
-                            .size(fs(10.5))
+                            .size(font::BODY_SMALL_PLUS)
                             .color(theme().text_primary),
                     );
                 });
@@ -5743,6 +5822,32 @@ fn draw_toast_overlay(ctx: &egui::Context, text: &str) {
 ///
 /// 这里刻意先加密再 `add`：
 /// `add` 内部会做唯一性校验并原子写盘，任何一步失败都不会留下半条记录。
+fn save_relogin(
+    store: &mut crate::data::DataStore,
+    draft: &LoginDraft,
+    account_id: &str,
+) -> Result<(), String> {
+    let sealed = crate::secrets::seal_credentials(store.secrets(), account_id, &draft.credentials)
+        .map_err(|err| {
+            log::warn!("重新登录后凭据加密失败：{err:#}");
+            "凭据加密失败，无法更新账号".to_owned()
+        })?;
+
+    let updated = store
+        .accounts_mut()
+        .update_credentials(
+            account_id,
+            sealed,
+            draft.expires_at.clone(),
+            Some(accounts::now_rfc3339()),
+        )
+        .map_err(|err| format!("更新账号失败：{err:#}"))?;
+    if !updated {
+        return Err("账号已不存在，无法原地重新登录".to_owned());
+    }
+    Ok(())
+}
+
 fn save_login(store: &mut crate::data::DataStore, draft: &LoginDraft) -> Result<(), String> {
     // 需求方要求：同时最多 10 个账号。在落库前拦下，避免登录成功却保存失败。
     if store.accounts().len() >= MAX_ACCOUNTS {
@@ -5782,28 +5887,28 @@ fn save_login(store: &mut crate::data::DataStore, draft: &LoginDraft) -> Result<
 fn draw_storage_banner(ui: &mut egui::Ui, reason: &str) {
     egui::Frame::new()
         .fill(theme().danger_bg)
-        .corner_radius(egui::CornerRadius::same(10))
+        .corner_radius(egui::CornerRadius::same(ui_style::size::RADIUS_LG))
         .stroke(egui::Stroke::new(1.0, theme().danger_border))
-        .inner_margin(egui::Margin::same(10))
+        .inner_margin(egui::Margin::same(ui_style::size::MARGIN_SM))
         .show(ui, |ui| {
             ui.set_width(ui.available_width());
             ui.label(
                 egui::RichText::new("数据目录不可写，账号无法保存")
-                    .size(fs(12.0))
+                    .size(font::BODY_LARGE)
                     .strong()
                     .color(theme().danger_text),
             );
-            ui.add_space(4.0);
+            ui.add_space(ui_style::space::XS);
             // 只显示首行：完整错误链可能很长，界面放不下，完整内容在日志里
             ui.label(
                 egui::RichText::new(reason.lines().next().unwrap_or_default())
-                    .size(fs(10.0))
+                    .size(font::BODY_SMALL)
                     .color(theme().danger_text_soft),
             );
-            ui.add_space(4.0);
+            ui.add_space(ui_style::space::XS);
             ui.label(
                 egui::RichText::new("请把程序移动到可写目录（例如桌面或 D 盘）后重启。")
-                    .size(fs(10.0))
+                    .size(font::BODY_SMALL)
                     .color(theme().danger_text_soft),
             );
         });
@@ -5829,6 +5934,38 @@ mod tests {
         assert!(parse_quota_amount("-1").is_err());
         assert!(parse_quota_amount("NaN").is_err());
         assert!(parse_quota_amount("inf").is_err());
+    }
+
+    #[test]
+    fn 有效期天数只接受正整数() {
+        assert_eq!(parse_expires_days("").unwrap(), None);
+        assert_eq!(parse_expires_days("0").unwrap(), None);
+        assert_eq!(parse_expires_days("30").unwrap(), Some(30));
+        assert!(parse_expires_days("-1").is_err());
+        assert!(parse_expires_days("abc").is_err());
+        assert!(parse_expires_days("1.5").is_err());
+    }
+
+    #[test]
+    fn 日期选择器能格式化为本地结束时间() {
+        let state = CreateKeyState {
+            account_id: String::new(),
+            name: String::new(),
+            quota_input: String::new(),
+            expiry_mode: ExpiryMode::DateTime,
+            expires_in_days_input: String::new(),
+            expires_date: jiff::civil::date(2026, 12, 31),
+            expires_hour: 23,
+            expires_minute: 59,
+            groups: Vec::new(),
+            selected_group_id: None,
+            loading_groups: false,
+            submitting: false,
+            error: None,
+            created: None,
+        };
+        assert_eq!(selected_expiry_label(&state), "2026-12-31 23:59");
+        assert!(selected_expiry_zoned(&state).is_ok());
     }
 
     #[test]

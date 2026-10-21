@@ -404,7 +404,11 @@ mod tests {
         cipher[middle] ^= 0xFF;
         let tampered = format!("{PREFIX_DPAPI}{}", STANDARD.encode(&cipher));
 
-        assert!(open_credentials(store.as_ref(), "account-1", &tampered).is_err());
+        let err = open_credentials(store.as_ref(), "account-1", &tampered).unwrap_err();
+        assert!(
+            format!("{err:#}").contains("错误码"),
+            "DPAPI 错误应带 Windows 错误码，实际：{err:#}"
+        );
     }
 
     #[cfg(windows)]
