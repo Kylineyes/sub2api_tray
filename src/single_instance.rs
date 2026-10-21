@@ -47,7 +47,7 @@ fn bind_lock(port: u16) -> anyhow::Result<InstanceGuard> {
             })
         }
         Err(err) if err.kind() == std::io::ErrorKind::AddrInUse => Err(anyhow::anyhow!(
-            "已有一个 Sub2API 托盘实例在运行（本机端口 {port} 已被占用）"
+            "已有一个用量统计托盘实例在运行（本机端口 {port} 已被占用）"
         )),
         Err(err) => Err(anyhow::anyhow!(
             "无法建立单实例锁（127.0.0.1:{port}）：{err}"

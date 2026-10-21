@@ -76,6 +76,17 @@ pub struct ApiKeyInfo {
     pub usage_5h: Option<f64>,
     /// 近 1 天用量（美元）。
     pub usage_1d: Option<f64>,
+    /// 近 7 天用量（美元）。
+    pub usage_7d: Option<f64>,
+    /// 5 小时限速额度（美元，0 表示未启用该窗口）。
+    ///
+    /// 服务端只有在 Key 配置了限速窗口时才累计 `usage_5h` 等用量；
+    /// 界面需要靠该字段区分近期真的没有请求和根本没有启用该统计。
+    pub rate_limit_5h: Option<f64>,
+    /// 1 天限速额度（美元，0 表示未启用该窗口）。
+    pub rate_limit_1d: Option<f64>,
+    /// 7 天限速额度（美元，0 表示未启用该窗口）。
+    pub rate_limit_7d: Option<f64>,
 }
 
 impl ApiKeyInfo {
@@ -114,6 +125,10 @@ impl ApiKeyInfo {
             quota_used: value.get("quotaUsed").and_then(|item| item.as_f64()),
             usage_5h: value.get("usage5h").and_then(|item| item.as_f64()),
             usage_1d: value.get("usage1d").and_then(|item| item.as_f64()),
+            usage_7d: value.get("usage7d").and_then(|item| item.as_f64()),
+            rate_limit_5h: value.get("rateLimit5h").and_then(|item| item.as_f64()),
+            rate_limit_1d: value.get("rateLimit1d").and_then(|item| item.as_f64()),
+            rate_limit_7d: value.get("rateLimit7d").and_then(|item| item.as_f64()),
         })
     }
 
@@ -130,9 +145,33 @@ impl ApiKeyInfo {
             "quotaUsed": self.quota_used,
             "usage5h": self.usage_5h,
             "usage1d": self.usage_1d,
+            "usage7d": self.usage_7d,
+            "rateLimit5h": self.rate_limit_5h,
+            "rateLimit1d": self.rate_limit_1d,
+            "rateLimit7d": self.rate_limit_7d,
             "fetchedAt": crate::accounts::now_rfc3339(),
         })
     }
+}
+
+/// 用户可绑定的 API Key 分组。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ApiKeyGroup {
+    /// 分组 id，创建 Key 时作为 `group_id` 提交。
+    pub id: i64,
+    /// 分组名称。
+    pub name: String,
+    /// 所属平台（可能为空，仅用于辅助展示）。
+    pub platform: Option<String>,
+}
+
+/// 创建 API Key 成功后的结果。
+#[derive(Debug, Clone, PartialEq)]
+pub struct CreatedApiKey {
+    /// 打码后的列表摘要。
+    pub info: ApiKeyInfo,
+    /// 完整 Key 值。只允许短暂留在内存/剪贴板，绝不写入缓存或日志。
+    pub full_key: String,
 }
 
 /// 把 Key 打码成"前 4 + … + 后 4"。
@@ -770,36 +809,128 @@ pub fn parse_api_keys(status: u16, body: &str) -> Result<Vec<ApiKeyInfo>, ApiErr
         .cloned()
         .unwrap_or_default();
 
+    Ok(items.iter().map(parse_api_key_item).collect())
+}
+
+/// 纯函数：把单个 Key 的 JSON 对象解析成展示摘要。
+///
+/// 列表接口与额度更新接口返回的 Key 字段基本相同，因此抽成一个函数，
+/// 避免两处字段兼容逻辑逐渐分叉。拿不到完整 `key` 时会按打码规则现算；
+/// 服务端已经返回打码值时则原样保留，避免二次打码。
+fn parse_api_key_item(item: &serde_json::Value) -> ApiKeyInfo {
+    let raw_key = first_string(item, &["masked_key", "maskedKey", "key"]).unwrap_or_default();
+    let masked = if raw_key.contains('…') || raw_key.contains('*') {
+        raw_key
+    } else {
+        mask_api_key(&raw_key)
+    };
+
+    ApiKeyInfo {
+        id: first_string(item, &["id"]).unwrap_or_default(),
+        name: first_string(item, &["name"]).unwrap_or_else(|| "未命名".to_owned()),
+        masked,
+        status: first_string(item, &["status"]).unwrap_or_else(|| "unknown".to_owned()),
+        group: first_string(item, &["group_name", "groupName"]).or_else(|| {
+            item.get("group")
+                .and_then(|group| group.get("name"))
+                .and_then(|value| value.as_str())
+                .map(ToOwned::to_owned)
+        }),
+        last_used_at: first_string(item, &["last_used_at", "lastUsedAt"]),
+        quota: first_f64(item, &["quota"]),
+        quota_used: first_f64(item, &["quota_used", "quotaUsed"]),
+        usage_5h: first_f64(item, &["usage_5h", "usage5h"]),
+        usage_1d: first_f64(item, &["usage_1d", "usage1d"]),
+        usage_7d: first_f64(item, &["usage_7d", "usage7d"]),
+        rate_limit_5h: first_f64(item, &["rate_limit_5h", "rateLimit5h"]),
+        rate_limit_1d: first_f64(item, &["rate_limit_1d", "rateLimit1d"]),
+        rate_limit_7d: first_f64(item, &["rate_limit_7d", "rateLimit7d"]),
+    }
+}
+
+/// 纯函数：解析 `PUT /api/v1/keys/{id}` 的响应。
+///
+/// 用户态额度更新接口返回更新后的 Key 对象；兼容少数版本把它包在
+/// `data.api_key` 里的情况。缺少 id 或 data 不是对象时按协议异常处理，
+/// 避免把错误响应当成更新成功写进本地缓存。
+pub fn parse_api_key_update_response(status: u16, body: &str) -> Result<ApiKeyInfo, ApiError> {
+    let data = read_data(status, body, RequestKind::Me)?;
+    let item = data.get("api_key").unwrap_or(&data);
+    if !item.is_object() {
+        return Err(ApiError::NotSub2Api);
+    }
+    let key = parse_api_key_item(item);
+    if key.id.is_empty() {
+        return Err(ApiError::NotSub2Api);
+    }
+    Ok(key)
+}
+
+/// 纯函数：解析 `DELETE /api/v1/keys/{id}` 的响应。
+///
+/// 删除成功的响应体不承载业务数据，只要求信封 `code == 0`；少数反向代理
+/// 可能把成功改写成 204 No Content，因此 204 直接算成功，不强行解析 JSON。
+pub fn parse_delete_api_key_response(status: u16, body: &str) -> Result<(), ApiError> {
+    if status == 204 {
+        return Ok(());
+    }
+    read_data(status, body, RequestKind::Me).map(|_| ())
+}
+
+/// 纯函数：解析 `GET /api/v1/groups/available`。
+///
+/// 新版本返回 `data: [ ... ]`，部分旧版本可能包一层 `{items:[...]}`，两者都兼容。
+pub fn parse_available_groups(status: u16, body: &str) -> Result<Vec<ApiKeyGroup>, ApiError> {
+    let data = read_data(status, body, RequestKind::Me)?;
+    let items = data
+        .as_array()
+        .cloned()
+        .or_else(|| {
+            data.get("items")
+                .and_then(|value| value.as_array())
+                .cloned()
+        })
+        .unwrap_or_default();
+
     Ok(items
         .iter()
-        .map(|item| {
-            let raw_key =
-                first_string(item, &["masked_key", "maskedKey", "key"]).unwrap_or_default();
-            let masked = if raw_key.contains('…') || raw_key.contains('*') {
-                raw_key
-            } else {
-                mask_api_key(&raw_key)
-            };
-
-            ApiKeyInfo {
-                id: first_string(item, &["id"]).unwrap_or_default(),
-                name: first_string(item, &["name"]).unwrap_or_else(|| "未命名".to_owned()),
-                masked,
-                status: first_string(item, &["status"]).unwrap_or_else(|| "unknown".to_owned()),
-                group: first_string(item, &["group_name", "groupName"]).or_else(|| {
-                    item.get("group")
-                        .and_then(|group| group.get("name"))
-                        .and_then(|value| value.as_str())
-                        .map(ToOwned::to_owned)
-                }),
-                last_used_at: first_string(item, &["last_used_at", "lastUsedAt"]),
-                quota: first_f64(item, &["quota"]),
-                quota_used: first_f64(item, &["quota_used", "quotaUsed"]),
-                usage_5h: first_f64(item, &["usage_5h", "usage5h"]),
-                usage_1d: first_f64(item, &["usage_1d", "usage1d"]),
-            }
+        .filter_map(|item| {
+            let id = item.get("id").and_then(|value| value.as_i64())?;
+            let name = first_string(item, &["name"]).unwrap_or_else(|| format!("分组 {id}"));
+            Some(ApiKeyGroup {
+                id,
+                name,
+                platform: first_string(item, &["platform"]),
+            })
         })
         .collect())
+}
+
+/// 纯函数：解析创建 API Key 的响应，同时保留完整 Key。
+///
+/// 完整值只在创建成功后返回一次，调用方必须复制到剪贴板/展示一次后丢弃，
+/// 不能写进 `accounts.json`。若服务端只返回打码值，则按协议异常处理。
+pub fn parse_created_api_key_response(status: u16, body: &str) -> Result<CreatedApiKey, ApiError> {
+    let data = read_data(status, body, RequestKind::Me)?;
+    let item = data.get("api_key").unwrap_or(&data);
+    if !item.is_object() {
+        return Err(ApiError::NotSub2Api);
+    }
+    let info = parse_api_key_item(item);
+    if info.id.is_empty() {
+        return Err(ApiError::NotSub2Api);
+    }
+    let full_key = item
+        .get("key")
+        .and_then(|value| value.as_str())
+        .unwrap_or_default()
+        .to_owned();
+    if full_key.is_empty() || full_key.contains('…') || full_key.contains('*') {
+        return Err(ApiError::Server(
+            "创建成功但响应没有返回完整 Key，请到 Web 后台复制".to_owned(),
+        ));
+    }
+    Ok(CreatedApiKey { info, full_key })
 }
 
 /// 阻塞式 HTTP 客户端。
@@ -959,6 +1090,87 @@ impl HttpClient {
         parse_usage_trend(status, &text)
     }
 
+    /// 列出当前用户可绑定的 API Key 分组。
+    pub fn list_available_groups(&self, access_token: &str) -> Result<Vec<ApiKeyGroup>, ApiError> {
+        let url = format!("{}/api/v1/groups/available", self.base_url);
+        let (status, text) = self.get_json(&url, access_token)?;
+        parse_available_groups(status, &text)
+    }
+
+    /// 创建 API Key。
+    ///
+    /// `quota = 0` 表示不限额；`group_id` 必须是当前用户可绑定的分组。
+    /// 成功后返回完整 Key，只用于一次性展示/复制。
+    pub fn create_api_key(
+        &self,
+        access_token: &str,
+        name: &str,
+        group_id: i64,
+        quota: f64,
+    ) -> Result<CreatedApiKey, ApiError> {
+        if name.trim().is_empty() {
+            return Err(ApiError::InvalidInput("API Key 名称不能为空".to_owned()));
+        }
+        if group_id <= 0 {
+            return Err(ApiError::InvalidInput("请选择有效的分组".to_owned()));
+        }
+        if !quota.is_finite() || quota < 0.0 {
+            return Err(ApiError::InvalidInput(
+                "额度必须是大于或等于 0 的数字".to_owned(),
+            ));
+        }
+        let body = serde_json::json!({
+            "name": name.trim(),
+            "group_id": group_id,
+            "quota": quota,
+        });
+        let (status, text) = self.post_json_auth(API_KEYS_PATH, access_token, &body)?;
+        parse_created_api_key_response(status, &text)
+    }
+
+    /// 删除一个 API Key。
+    ///
+    /// 这是不可恢复操作，调用方必须先做二次确认。接口只允许删除当前登录
+    /// 账号自己的 Key；成功响应通常没有业务数据，失败仍按统一信封分类。
+    pub fn delete_api_key(&self, access_token: &str, id: &str) -> Result<(), ApiError> {
+        if id.is_empty() {
+            return Err(ApiError::InvalidInput("API Key id 不能为空".to_owned()));
+        }
+        let path = format!("{API_KEYS_PATH}/{id}");
+        let (status, text) = self.delete_json(&path, access_token)?;
+        parse_delete_api_key_response(status, &text)
+    }
+
+    /// 调整一个 API Key 的额度，并可选地把已用额度清零。
+    ///
+    /// 这是用户态接口：只能修改当前 access token 所属账号自己的 Key。
+    /// 传 `quota = 0` 表示不限额；`reset_quota = true` 会同时把 `quota_used`
+    /// 归零，用于额度已耗尽但还想继续使用这个 Key 的场景。
+    pub fn update_api_key_quota(
+        &self,
+        access_token: &str,
+        id: &str,
+        quota: f64,
+        reset_quota: bool,
+    ) -> Result<ApiKeyInfo, ApiError> {
+        if id.is_empty() {
+            return Err(ApiError::InvalidInput("API Key id 不能为空".to_owned()));
+        }
+        if !quota.is_finite() || quota < 0.0 {
+            return Err(ApiError::InvalidInput(
+                "额度必须是大于或等于 0 的数字".to_owned(),
+            ));
+        }
+
+        let path = format!("{API_KEYS_PATH}/{id}");
+        let body = serde_json::json!({
+            "quota": quota,
+            "reset_quota": reset_quota,
+        });
+        let (status, text) = self.put_json(&path, access_token, &body)?;
+        parse_api_key_update_response(status, &text)
+    }
+
     /// 取某个 Key 的完整值（只用于复制到剪贴板，绝不落盘）。
     ///
     /// 服务端若只返回打码值，这里按"不支持查看完整值"处理，不猜测。
@@ -978,6 +1190,86 @@ impl HttpClient {
             ));
         }
         Ok(key.to_owned())
+    }
+
+    /// 发一个带 Bearer 的 DELETE，返回 `(状态码, 响应体文本)`。
+    ///
+    /// DELETE 没有请求正文，但仍要带 Authorization；保留独立函数让删除
+    /// 路径的错误处理和认证头一眼可见，便于后续安全审查。
+    fn delete_json(&self, path: &str, access_token: &str) -> Result<(u16, String), ApiError> {
+        let url = format!("{}{path}", self.base_url);
+        let mut response = self
+            .agent
+            .delete(&url)
+            .header("accept", "application/json")
+            .header("authorization", &format!("Bearer {access_token}"))
+            .call()
+            .map_err(map_transport_error)?;
+        let status = response.status().as_u16();
+        let text = response
+            .body_mut()
+            .read_to_string()
+            .map_err(map_transport_error)?;
+        Ok((status, text))
+    }
+
+    /// 发一个带 Bearer 的 JSON POST，返回 `(状态码, 响应体文本)`。
+    fn post_json_auth(
+        &self,
+        path: &str,
+        access_token: &str,
+        body: &serde_json::Value,
+    ) -> Result<(u16, String), ApiError> {
+        let url = format!("{}{path}", self.base_url);
+        let payload = serde_json::to_string(body)
+            .map_err(|err| ApiError::InvalidInput(format!("序列化请求失败：{err}")))?;
+
+        let mut response = self
+            .agent
+            .post(&url)
+            .header("content-type", "application/json")
+            .header("accept", "application/json")
+            .header("authorization", &format!("Bearer {access_token}"))
+            .send(payload.as_str())
+            .map_err(map_transport_error)?;
+
+        let status = response.status().as_u16();
+        let text = response
+            .body_mut()
+            .read_to_string()
+            .map_err(map_transport_error)?;
+        Ok((status, text))
+    }
+
+    /// 发一个带 Bearer 的 JSON PUT，返回 `(状态码, 响应体文本)`。
+    ///
+    /// 单独保留 PUT 而不是把 GET/POST 揉成通用请求构造器，是因为这个项目目前
+    /// 只有额度更新需要带 JSON 正文的 PUT，简单直接的实现更容易审查。
+    fn put_json(
+        &self,
+        path: &str,
+        access_token: &str,
+        body: &serde_json::Value,
+    ) -> Result<(u16, String), ApiError> {
+        let url = format!("{}{path}", self.base_url);
+        let payload = serde_json::to_string(body)
+            .map_err(|err| ApiError::InvalidInput(format!("序列化请求失败：{err}")))?;
+
+        let mut response = self
+            .agent
+            .put(&url)
+            .header("content-type", "application/json")
+            .header("accept", "application/json")
+            .header("authorization", &format!("Bearer {access_token}"))
+            .send(payload.as_str())
+            .map_err(map_transport_error)?;
+
+        let status = response.status().as_u16();
+        let text = response
+            .body_mut()
+            .read_to_string()
+            .map_err(map_transport_error)?;
+        Ok((status, text))
     }
 
     /// 发一个带 Bearer 的 GET，返回 `(状态码, 响应体文本)`。
@@ -1221,6 +1513,224 @@ mod tests {
     }
 
     #[test]
+    fn 解析额度更新响应() {
+        let body = r#"{"code":0,"message":"success","data":{
+            "id":12,"name":"默认 Key","key":"sk-1234567890abcdef","status":"active",
+            "group":{"name":"默认分组"},"quota":20.5,"quota_used":3.25,
+            "usage_5h":1.5,"usage_1d":2.0
+        }}"#;
+        let key = parse_api_key_update_response(200, body).expect("解析成功");
+        assert_eq!(key.id, "12");
+        assert_eq!(key.masked, "sk-1…cdef");
+        assert_eq!(key.group.as_deref(), Some("默认分组"));
+        assert_eq!(key.quota, Some(20.5));
+        assert_eq!(key.quota_used, Some(3.25));
+    }
+
+    #[test]
+    fn 额度更新响应兼容_api_key_包裹() {
+        let body = r#"{"code":0,"message":"success","data":{
+            "api_key":{"id":"9","name":"备用","masked_key":"sk-a…9f2c","quota":0}
+        }}"#;
+        let key = parse_api_key_update_response(200, body).expect("解析成功");
+        assert_eq!(key.id, "9");
+        assert_eq!(key.quota, Some(0.0));
+    }
+
+    #[test]
+    fn 额度更新响应缺_id_视为协议异常() {
+        let body = r#"{"code":0,"message":"success","data":{"name":"没有 id"}}"#;
+        let err = parse_api_key_update_response(200, body).unwrap_err();
+        assert_eq!(err, ApiError::NotSub2Api);
+    }
+
+    #[test]
+    fn 额度更新接口错误沿用信封分类() {
+        let body = r#"{"code":400,"message":"invalid quota"}"#;
+        let err = parse_api_key_update_response(400, body).unwrap_err();
+        assert!(matches!(err, ApiError::Server(detail) if detail.contains("invalid quota")));
+    }
+
+    /// 端到端验证额度更新的真实请求方法与 JSON 正文。
+    ///
+    /// 该用例依赖 loopback，按项目约定标记为 ignored，验收时显式运行。
+    #[test]
+    #[ignore = "loopback 端到端用例：
+需在验收时显式运行 cargo test -- --ignored（本机安全软件会偶发中止 loopback 连接）"]
+    fn 本地假实例收到额度更新请求() {
+        let _network_guard = crate::test_support::lock_network();
+        use std::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").expect("绑定本地端口");
+        let addr = listener.local_addr().expect("取得端口");
+        listener.set_nonblocking(true).expect("切换为非阻塞监听");
+        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let stop_in_server = std::sync::Arc::clone(&stop);
+        let requests = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let requests_in_server = std::sync::Arc::clone(&requests);
+
+        let server = std::thread::spawn(move || {
+            while !stop_in_server.load(std::sync::atomic::Ordering::Relaxed) {
+                match listener.accept() {
+                    Ok((mut stream, _)) => {
+                        let request = crate::test_support::read_request(&mut stream);
+                        if let Ok(mut log) = requests_in_server.lock() {
+                            log.push(request);
+                        }
+                        let body = r#"{"code":0,"message":"success","data":{
+                            "id":12,"name":"默认 Key","masked_key":"sk-a…9f2c",
+                            "status":"active","quota":12.5,"quota_used":0
+                        }}"#;
+                        crate::test_support::write_json(&mut stream, "200 OK", body);
+                    }
+                    Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
+                        std::thread::sleep(Duration::from_millis(5));
+                    }
+                    Err(_) => break,
+                }
+            }
+        });
+
+        let base_url = format!("http://{addr}");
+        let client = HttpClient::new(&base_url, Duration::from_secs(5)).expect("构造客户端");
+        let updated = retry_network(|| client.update_api_key_quota("tok-1", "12", 12.5, true))
+            .expect("更新额度成功");
+        assert_eq!(updated.id, "12");
+        assert_eq!(updated.quota, Some(12.5));
+        assert_eq!(updated.quota_used, Some(0.0));
+
+        stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        server.join().expect("假实例线程正常结束");
+
+        let log = requests.lock().expect("请求日志锁");
+        assert!(
+            log.iter().any(|request| request
+                .to_ascii_lowercase()
+                .starts_with("put /api/v1/keys/12 ")),
+            "应当使用 PUT 并带上 Key id，实际：{log:?}"
+        );
+        assert!(
+            log.iter().any(|request| request
+                .to_ascii_lowercase()
+                .contains("authorization: bearer tok-1")),
+            "额度更新应当携带 Bearer，实际：{log:?}"
+        );
+        assert!(
+            log.iter().any(|request| request.contains(r#""quota":12.5"#)
+                && request.contains(r#""reset_quota":true"#)),
+            "请求正文应当包含额度与清零标记，实际：{log:?}"
+        );
+    }
+
+    #[test]
+    fn 删除额度接口成功返回空数据() {
+        let body =
+            r#"{"code":0,"message":"success","data":{"message":"API key deleted successfully"}}"#;
+        assert!(parse_delete_api_key_response(200, body).is_ok());
+        assert!(parse_delete_api_key_response(204, "").is_ok());
+    }
+
+    #[test]
+    fn 删除额度接口错误沿用信封分类() {
+        let body = r#"{"code":404,"message":"api key not found"}"#;
+        let err = parse_delete_api_key_response(404, body).unwrap_err();
+        assert_eq!(err, ApiError::NotSub2Api);
+    }
+
+    /// 端到端验证删除 Key 的真实 HTTP 方法与认证头。
+    ///
+    /// 该用例只连本地假实例，不会删除真实 Key；依赖 loopback，按约定标记 ignored。
+    #[test]
+    #[ignore = "loopback 端到端用例：
+需在验收时显式运行 cargo test -- --ignored（本机安全软件会偶发中止 loopback 连接）"]
+    fn 本地假实例收到删除key请求() {
+        let _network_guard = crate::test_support::lock_network();
+        use std::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").expect("绑定本地端口");
+        let addr = listener.local_addr().expect("取得端口");
+        listener.set_nonblocking(true).expect("切换为非阻塞监听");
+        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let stop_in_server = std::sync::Arc::clone(&stop);
+        let requests = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let requests_in_server = std::sync::Arc::clone(&requests);
+
+        let server = std::thread::spawn(move || {
+            while !stop_in_server.load(std::sync::atomic::Ordering::Relaxed) {
+                match listener.accept() {
+                    Ok((mut stream, _)) => {
+                        let request = crate::test_support::read_request(&mut stream);
+                        if let Ok(mut log) = requests_in_server.lock() {
+                            log.push(request);
+                        }
+                        let body = r#"{"code":0,"message":"success","data":{"message":"deleted"}}"#;
+                        crate::test_support::write_json(&mut stream, "200 OK", body);
+                    }
+                    Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
+                        std::thread::sleep(Duration::from_millis(5));
+                    }
+                    Err(_) => break,
+                }
+            }
+        });
+
+        let base_url = format!("http://{addr}");
+        let client = HttpClient::new(&base_url, Duration::from_secs(5)).expect("构造客户端");
+        retry_network(|| client.delete_api_key("tok-1", "77")).expect("删除成功");
+
+        stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        server.join().expect("假实例线程正常结束");
+
+        let log = requests.lock().expect("请求日志锁");
+        assert!(
+            log.iter().any(|request| request
+                .to_ascii_lowercase()
+                .starts_with("delete /api/v1/keys/77 ")),
+            "应当使用 DELETE 并带上 Key id，实际：{log:?}"
+        );
+        assert!(
+            log.iter().any(|request| request
+                .to_ascii_lowercase()
+                .contains("authorization: bearer tok-1")),
+            "删除请求应当携带 Bearer，实际：{log:?}"
+        );
+    }
+
+    #[test]
+    fn 解析可用分组() {
+        let body = r#"{"code":0,"message":"success","data":[
+            {"id":1,"name":"默认分组","platform":"openai"},
+            {"id":"2","name":"备用分组","platform":"anthropic"}
+        ]}"#;
+        let groups = parse_available_groups(200, body).expect("解析成功");
+        assert_eq!(groups.len(), 1, "缺少数值 id 的异常项应被忽略");
+        assert_eq!(groups[0].id, 1);
+        assert_eq!(groups[0].name, "默认分组");
+        assert_eq!(groups[0].platform.as_deref(), Some("openai"));
+    }
+
+    #[test]
+    fn 解析创建key响应并保留完整值() {
+        let body = r#"{"code":0,"message":"success","data":{
+            "id":100,"name":"新 Key","key":"sk-full-secret-value","status":"active",
+            "group":{"name":"默认分组"},"quota":20,"quota_used":0
+        }}"#;
+        let created = parse_created_api_key_response(200, body).expect("解析成功");
+        assert_eq!(created.info.id, "100");
+        assert_eq!(created.info.masked, "sk-f…alue");
+        assert_eq!(created.full_key, "sk-full-secret-value");
+    }
+
+    #[test]
+    fn 创建key响应缺少完整值视为异常() {
+        let body = r#"{"code":0,"message":"success","data":{
+            "id":100,"name":"新 Key","masked_key":"sk-f…alue","status":"active"
+        }}"#;
+        let err = parse_created_api_key_response(200, body).unwrap_err();
+        assert!(matches!(err, ApiError::Server(message) if message.contains("Web 后台")));
+    }
+
+    #[test]
     fn 角色映射() {
         assert_eq!(role_from_str("admin"), AccountRole::Admin);
         assert_eq!(role_from_str("USER"), AccountRole::User);
@@ -1310,6 +1820,10 @@ mod tests {
             quota_used: Some(2.5),
             usage_5h: Some(0.4),
             usage_1d: Some(1.2),
+            usage_7d: Some(2.3),
+            rate_limit_5h: Some(5.0),
+            rate_limit_1d: None,
+            rate_limit_7d: None,
         };
         let value = info.to_cache_value();
         assert_eq!(value["maskedKey"], "sk-a…9f2c");
