@@ -4732,8 +4732,9 @@ fn draw_account_card(
         .show(ui, |ui| {
             ui.set_width(ui.available_width());
 
-            // 标题行右侧按钮被点时，不应再触发整行的展开/收起
-            let mut header_action_clicked = false;
+            // 标题行只有左侧账号信息可点击展开/收起；右侧按钮使用独立
+            // 控件自己的点击响应，不能再叠加整行手势。
+            let mut header_clicked = false;
             let can_create_key = card.keys.as_ref().is_some_and(|state| !state.loading);
 
             // 手动画出整行矩形，左右各自拥有明确的最大矩形，避免 horizontal
@@ -4757,25 +4758,46 @@ fn draw_account_card(
                     .max_rect(left_rect)
                     .layout(egui::Layout::left_to_right(egui::Align::Center)),
                 |ui| {
-                    draw_chevron(ui, card.expanded, t);
+                    let chevron = draw_chevron(ui, card.expanded, t);
+                    if chevron.clicked() {
+                        header_clicked = true;
+                    }
                     ui.label(
                         egui::RichText::new("●")
                             .size(fs(10.0))
                             .color(status_color(card.status)),
                     );
-                    ui.add(
-                        egui::Label::new(
-                            egui::RichText::new(&card.display)
-                                .size(fs(13.0))
-                                .strong()
-                                .color(lerp_color(
-                                    theme().text_primary,
-                                    theme().text_hover,
-                                    t * 0.45,
-                                )),
-                        )
-                        .truncate(),
-                    );
+                    // 邮箱与实例地址上下排布，正好填满右侧两个操作按钮形成的
+                    // 纵向空间，不再在标题行下方单独留一条网址占位。
+                    ui.vertical(|ui| {
+                        let email = ui
+                            .add(
+                                egui::Label::new(
+                                    egui::RichText::new(&card.display)
+                                        .size(fs(13.0))
+                                        .strong()
+                                        .color(lerp_color(
+                                            theme().text_primary,
+                                            theme().text_hover,
+                                            t * 0.45,
+                                        )),
+                                )
+                                .truncate()
+                                .sense(egui::Sense::click()),
+                            )
+                            .on_hover_cursor(egui::CursorIcon::PointingHand);
+                        if email.clicked() {
+                            header_clicked = true;
+                        }
+                        ui.add(
+                            egui::Label::new(
+                                egui::RichText::new(&card.base_url)
+                                    .size(fs(10.0))
+                                    .color(theme().text_dim),
+                            )
+                            .truncate(),
+                        );
+                    });
                 },
             );
 
@@ -4798,7 +4820,6 @@ fn draw_account_card(
                             .on_hover_text("在当前账号下创建一个新的 API Key")
                             .clicked();
                         if add_clicked {
-                            header_action_clicked = true;
                             key_actions.create_key_request = Some(card.id.clone());
                         }
                         if ui
@@ -4809,7 +4830,6 @@ fn draw_account_card(
                             .on_hover_text("退出这个账号并删除本地记录")
                             .clicked()
                         {
-                            header_action_clicked = true;
                             *delete_request = Some(card.id.clone());
                         }
                     },
@@ -4817,22 +4837,11 @@ fn draw_account_card(
             }
             ui.advance_cursor_after_rect(row_rect);
 
-            let header = ui
-                .interact(
-                    row_rect,
-                    ui.scope_id().with(("account-header", card.id.as_str())),
-                    egui::Sense::click(),
-                )
-                .on_hover_cursor(egui::CursorIcon::PointingHand);
-            if header.clicked() && !header_action_clicked {
+            // 只把左侧账号信息区作为展开/收起热区；右侧按钮区不能覆盖，
+            // 否则父级整行手势会抢走「新增key」「登出账户」的点击。
+            if header_clicked {
                 *toggle = Some(card.id.clone());
             }
-
-            ui.label(
-                egui::RichText::new(&card.base_url)
-                    .size(fs(10.0))
-                    .color(theme().text_dim),
-            );
 
             // 收起态只保留"账户 + 网址"；余额、订阅、刷新时间等全部收进展开态，
             // 这样一屏能看更多账号（需求方要求）。
