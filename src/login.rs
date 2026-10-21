@@ -33,12 +33,13 @@ use std::time::Duration;
 use crate::accounts::{self, AccountRole};
 use crate::api::{HttpClient, LoginOutcome};
 use crate::secrets::Credentials;
+use crate::ui_style::{self, ButtonSize, ButtonTone, font, theme};
 
 /// 弹窗宽度（egui 点）。面板总宽 360，留出边距后 300 比较合适。
-const DIALOG_WIDTH: f32 = 300.0;
+const DIALOG_WIDTH: f32 = ui_style::size::MODAL_WIDTH;
 
 /// 面板里的输入框统一用这个高度，视觉上更整齐。
-const INPUT_HEIGHT: f32 = 26.0;
+const INPUT_HEIGHT: f32 = ui_style::size::INPUT_HEIGHT;
 
 /// 弹窗当前阶段。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -80,6 +81,8 @@ pub struct LoginDraft {
     pub credentials: Credentials,
     /// access token 过期时间（RFC3339），后端没给则为 `None`。
     pub expires_at: Option<String>,
+    /// 非空表示这是对已有账号的原地重新登录，值为账号 id。
+    pub relogin_account_id: Option<String>,
 }
 
 /// 后台线程回传的结果。
@@ -113,6 +116,8 @@ pub struct LoginDialog {
     receiver: Option<Receiver<WorkerReply>>,
     /// egui 上下文，用于后台线程唤醒界面。
     ctx: egui::Context,
+    /// 非空表示当前弹窗用于已有账号原地重新登录。
+    relogin_account_id: Option<String>,
 }
 
 impl LoginDialog {
@@ -127,6 +132,7 @@ impl LoginDialog {
             masked_email: None,
             receiver: None,
             ctx,
+            relogin_account_id: None,
         }
     }
 
@@ -141,10 +147,29 @@ impl LoginDialog {
     /// 但**清空密码与验证码**：密码不该在弹窗关闭后继续留在内存里。
     pub fn open(&mut self) {
         self.open = true;
+        self.relogin_account_id = None;
         self.stage = Stage::Editing;
         self.error = None;
         self.temp_token = None;
         self.masked_email = None;
+        self.form.password.clear();
+        self.form.totp_code.clear();
+        self.ctx.request_repaint();
+    }
+
+    /// 打开已有账号的原地重新登录弹窗。
+    ///
+    /// 地址与邮箱来自本地账号，不再允许修改，避免用户误把新凭据写到另一账号；
+    /// 用户只需要重新输入密码并完成可能的两步验证。
+    pub fn open_for_relogin(&mut self, account_id: String, base_url: String, email: String) {
+        self.open = true;
+        self.relogin_account_id = Some(account_id);
+        self.stage = Stage::Editing;
+        self.error = None;
+        self.temp_token = None;
+        self.masked_email = None;
+        self.form.base_url = base_url;
+        self.form.email = email;
         self.form.password.clear();
         self.form.totp_code.clear();
         self.ctx.request_repaint();
@@ -159,6 +184,7 @@ impl LoginDialog {
         self.error = None;
         self.temp_token = None;
         self.masked_email = None;
+        self.relogin_account_id = None;
         // 丢弃接收端：后台线程即使跑完也只会往一个已关闭的通道里发，不会 panic
         self.receiver = None;
         self.ctx.request_repaint();
@@ -186,6 +212,8 @@ impl LoginDialog {
                 // 密码已经进了 draft 的凭据里，这里把界面上的副本清掉
                 self.form.password.clear();
                 self.form.totp_code.clear();
+                let mut draft = draft;
+                draft.relogin_account_id = self.relogin_account_id.clone();
                 Some(draft)
             }
             Ok(WorkerReply::NeedsTotp {
@@ -241,50 +269,53 @@ impl LoginDialog {
         let mut cancel_requested = false;
 
         let modal = egui::Modal::new(egui::Id::unique("login-dialog"))
-            .backdrop_color(egui::Color32::from_black_alpha(150))
-            .frame(
-                egui::Frame::new()
-                    .fill(crate::app::theme().panel_bg)
-                    .corner_radius(egui::CornerRadius::same(12))
-                    .stroke(egui::Stroke::new(1.0, crate::app::theme().panel_border))
-                    .inner_margin(egui::Margin::same(16)),
-            )
+            .backdrop_color(ui_style::modal_backdrop())
+            .frame(ui_style::modal_frame())
             .show(ctx, |ui| {
                 ui.set_width(DIALOG_WIDTH);
 
+                let relogin = self.relogin_account_id.is_some();
                 ui.label(
-                    egui::RichText::new("登陆新用户")
-                        .size(crate::app::fs(15.0))
-                        .strong()
-                        .color(crate::app::theme().text_primary),
+                    egui::RichText::new(if relogin {
+                        "重新登录账号"
+                    } else {
+                        "登陆新用户"
+                    })
+                    .size(font::TITLE)
+                    .strong()
+                    .color(theme().text_primary),
                 );
-                ui.add_space(2.0);
+                ui.add_space(ui_style::space::HAIRLINE);
                 ui.label(
-                    egui::RichText::new("填写 Sub2API 实例地址与登录信息")
-                        .size(crate::app::fs(10.0))
-                        .color(crate::app::theme().text_secondary),
+                    egui::RichText::new(if relogin {
+                        "为当前账号重新获取并更新本地登录凭据"
+                    } else {
+                        "填写 Sub2API 实例地址与登录信息"
+                    })
+                    .size(font::BODY_SMALL)
+                    .color(theme().text_secondary),
                 );
-                ui.add_space(12.0);
+                ui.add_space(ui_style::space::XL);
 
                 // ---- 链接 ----
                 field_label(ui, "链接");
                 let url_edit = egui::TextEdit::singleline(&mut self.form.base_url)
                     .hint_text("https://your-sub2api-host:8080")
                     .desired_width(f32::INFINITY)
-                    .interactive(!submitting && !need_totp);
+                    .interactive(!submitting && !need_totp && self.relogin_account_id.is_none());
                 ui.add_sized([DIALOG_WIDTH, INPUT_HEIGHT], url_edit);
 
                 // ---- 账户名 ----
-                ui.add_space(8.0);
+                ui.add_space(ui_style::space::MD);
                 field_label(ui, "账户名（邮箱）");
                 let email_edit = egui::TextEdit::singleline(&mut self.form.email)
                     .hint_text("you@example.com")
                     .desired_width(f32::INFINITY)
-                    .interactive(!submitting && !need_totp);
+                    .interactive(!submitting && !need_totp && self.relogin_account_id.is_none());
                 ui.add_sized([DIALOG_WIDTH, INPUT_HEIGHT], email_edit);
 
                 // ---- 密码 ----
-                ui.add_space(8.0);
+                ui.add_space(ui_style::space::MD);
                 field_label(ui, "密码");
                 let password_edit = egui::TextEdit::singleline(&mut self.form.password)
                     .hint_text("登录密码")
@@ -296,7 +327,7 @@ impl LoginDialog {
 
                 // ---- 验证码（仅 2FA 阶段） ----
                 if need_totp {
-                    ui.add_space(8.0);
+                    ui.add_space(ui_style::space::MD);
                     field_label(ui, "两步验证码");
                     let totp_edit = egui::TextEdit::singleline(&mut self.form.totp_code)
                         .hint_text("6 位数字")
@@ -304,29 +335,29 @@ impl LoginDialog {
                         .char_limit(6)
                         .interactive(!submitting);
                     ui.add_sized([DIALOG_WIDTH, INPUT_HEIGHT], totp_edit);
-                    ui.add_space(4.0);
+                    ui.add_space(ui_style::space::XS);
                     let hint = match &self.masked_email {
                         Some(masked) => format!("该账号已开启两步验证：{masked}"),
                         None => "该账号已开启两步验证，请输入验证器中的 6 位数字".to_owned(),
                     };
                     ui.label(
                         egui::RichText::new(hint)
-                            .size(crate::app::fs(10.0))
-                            .color(crate::app::theme().text_secondary),
+                            .size(font::BODY_SMALL)
+                            .color(theme().text_secondary),
                     );
                 }
 
                 // ---- 错误提示 ----
                 if let Some(error) = self.error.as_deref() {
-                    ui.add_space(8.0);
+                    ui.add_space(ui_style::space::MD);
                     ui.label(
                         egui::RichText::new(error)
-                            .size(crate::app::fs(11.0))
-                            .color(crate::app::theme().danger),
+                            .size(font::BODY)
+                            .color(theme().danger),
                     );
                 }
 
-                ui.add_space(14.0);
+                ui.add_space(ui_style::space::XXL);
 
                 // ---- 按钮 ----
                 // 回车等价于点"确认"：表单填完后不用去找按钮
@@ -335,8 +366,7 @@ impl LoginDialog {
                 }
 
                 ui.horizontal(|ui| {
-                    if ui
-                        .add_sized([96.0, 28.0], egui::Button::new("取消"))
+                    if ui_style::add_button(ui, "取消", ButtonTone::Neutral, ButtonSize::Md)
                         .clicked()
                     {
                         cancel_requested = true;
@@ -347,8 +377,8 @@ impl LoginDialog {
                             ui.spinner();
                             ui.label(
                                 egui::RichText::new("登录中…")
-                                    .size(crate::app::fs(11.0))
-                                    .color(crate::app::theme().text_secondary),
+                                    .size(font::BODY)
+                                    .color(theme().text_secondary),
                             );
                         } else {
                             let label = if need_totp {
@@ -356,8 +386,7 @@ impl LoginDialog {
                             } else {
                                 "确认"
                             };
-                            if ui
-                                .add_sized([96.0, 28.0], egui::Button::new(label))
+                            if ui_style::add_button(ui, label, ButtonTone::Primary, ButtonSize::Md)
                                 .clicked()
                             {
                                 submit_requested = true;
@@ -452,8 +481,8 @@ impl LoginDialog {
 fn field_label(ui: &mut egui::Ui, text: &str) {
     ui.label(
         egui::RichText::new(text)
-            .size(crate::app::fs(10.0))
-            .color(crate::app::theme().text_secondary),
+            .size(font::BODY_SMALL)
+            .color(theme().text_secondary),
     );
 }
 
@@ -515,6 +544,7 @@ fn run_login(
                     refresh_token: tokens.refresh_token,
                 },
                 expires_at: tokens.expires_at,
+                relogin_account_id: None,
             })
         }
     }
@@ -555,6 +585,22 @@ mod tests {
         assert!(dlg.form.password.is_empty(), "打开时不应复用上次密码");
         assert!(dlg.form.totp_code.is_empty());
         assert_eq!(dlg.stage, Stage::Editing);
+    }
+
+    #[test]
+    fn 原地重新登录保留地址邮箱并标记账号() {
+        let mut dlg = dialog();
+        dlg.open_for_relogin(
+            "account-1".to_owned(),
+            "https://example.com".to_owned(),
+            "user@example.com".to_owned(),
+        );
+
+        assert!(dlg.is_open());
+        assert_eq!(dlg.form.base_url, "https://example.com");
+        assert_eq!(dlg.form.email, "user@example.com");
+        assert!(dlg.form.password.is_empty());
+        assert_eq!(dlg.relogin_account_id.as_deref(), Some("account-1"));
     }
 
     #[test]
