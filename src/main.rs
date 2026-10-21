@@ -1,4 +1,4 @@
-//! Sub2API 托盘应用的入口。
+//! 用量统计托盘应用的入口。
 //!
 //! 这个文件有意保持“薄”：只做三件事，其余细节都交给下面的模块。
 //!
@@ -44,7 +44,7 @@ mod tray;
 mod update;
 
 /// 应用显示名称：同时用作窗口标题和托盘提示文字的前缀。
-pub const APP_NAME: &str = "Sub2API 托盘";
+pub const APP_NAME: &str = "用量统计托盘";
 
 /// 编译期写入的版本号，来源是 `Cargo.toml` 里的 `package.version`。
 ///

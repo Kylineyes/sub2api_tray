@@ -1,4 +1,4 @@
-//! 账号状态刷新：串行请求 + token 失效恢复链。
+//! 账号状态刷新：有界并行请求 + token 失效恢复链。
 //!
 //! # 为什么要有恢复链
 //!
@@ -18,12 +18,14 @@
 //! 每次续期/重登成功后都会把新凭据回传给主线程落库（`rotated`），
 //! 所以重启后不需要再走一遍恢复链。
 //!
-//! # 为什么串行
+//! # 为什么有界并行
 //!
-//! 一轮刷新会打 2N 个请求（每个账号 me + summary）。并行虽然快，但小实例很容易被
-//! 打成 429，反而把状态弄成"离线"。这里串行执行，账号之间留 200ms 间隔。
+//! 一轮刷新会打 2N 个请求（每个账号 me + summary）。账号多时串行会让最后一户等待
+//! 很久，因此改为并行；但小实例仍可能被瞬间打满，所以并发上限固定为
+//! [`MAX_CONCURRENT_ACCOUNT_REFRESHES`]，不按账号数量无限开线程。
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc::{self, Receiver};
 use std::time::{Duration, Instant};
 
@@ -31,8 +33,11 @@ use crate::accounts::Account;
 use crate::api::{ApiError, HttpClient, LoginOutcome, MeInfo, SubscriptionSummary};
 use crate::secrets::{self, Credentials, SecretStore};
 
-/// 相邻账号之间的等待，避免一轮刷新把实例打满。
-const ACCOUNT_GAP: Duration = Duration::from_millis(200);
+/// 同一轮刷新最多同时处理的账号数。
+///
+/// 这是网络 I/O 型任务，并发过高不会更快，却更容易触发实例限流；4 个账号
+/// 能在多账号刷新速度和小实例承受能力之间取得平衡。
+const MAX_CONCURRENT_ACCOUNT_REFRESHES: usize = 4;
 
 /// 一次刷新的结果。
 #[derive(Debug)]
@@ -124,8 +129,9 @@ pub fn should_start_round(now: Instant, last_round: Option<Instant>, interval: D
 
 /// 起一个后台线程跑一轮刷新，返回结果通道。
 ///
-/// 线程按顺序处理账号，全部结束后一次性回传结果；调用方在界面线程里
-/// 用 `try_recv` 取（`Ok` 即整轮完成，`Empty` 表示还在跑）。
+/// 账号之间使用有界并行：最多同时处理 [`MAX_CONCURRENT_ACCOUNT_REFRESHES`]
+/// 个账号，结果仍按传入账号顺序回传，调用方无需额外排序。线程全部结束后
+/// 一次性发送结果；界面线程用 `try_recv` 取（`Ok` 即整轮完成）。
 pub fn spawn_round(
     targets: Vec<RefreshTarget>,
     store: Arc<dyn SecretStore>,
@@ -134,18 +140,58 @@ pub fn spawn_round(
     let (sender, receiver) = mpsc::channel();
 
     std::thread::spawn(move || {
-        let mut results = Vec::with_capacity(targets.len());
-        for (index, target) in targets.iter().enumerate() {
-            if index > 0 {
-                std::thread::sleep(ACCOUNT_GAP);
-            }
-            results.push(refresh_one(target, store.as_ref(), timeout));
+        let total = targets.len();
+        if total == 0 {
+            let _ = sender.send(Vec::new());
+            return;
         }
-        // 通道关闭说明应用已退出：忽略发送错误
+
+        let next_index = AtomicUsize::new(0);
+        let (result_tx, result_rx) = mpsc::channel::<(usize, RoundResult)>();
+        let worker_count = refresh_worker_count(total);
+
+        // 用 scoped thread 借 target 与 secret store，避免为每个账号克隆大量凭据。
+        std::thread::scope(|scope| {
+            for _ in 0..worker_count {
+                let result_tx = result_tx.clone();
+                let next_index = &next_index;
+                let targets = &targets;
+                let store = &store;
+                scope.spawn(move || {
+                    loop {
+                        let index = next_index.fetch_add(1, Ordering::Relaxed);
+                        if index >= targets.len() {
+                            break;
+                        }
+                        let result = refresh_one(&targets[index], store.as_ref(), timeout);
+                        if result_tx.send((index, result)).is_err() {
+                            break;
+                        }
+                    }
+                });
+            }
+        });
+        drop(result_tx);
+
+        // 按原账号顺序放回结果，避免并行完成顺序影响界面展示。
+        let mut slots: Vec<Option<RoundResult>> = (0..total).map(|_| None).collect();
+        for (index, result) in result_rx {
+            if let Some(slot) = slots.get_mut(index) {
+                *slot = Some(result);
+            }
+        }
+        let results = slots.into_iter().flatten().collect();
         let _ = sender.send(results);
     });
 
     receiver
+}
+
+/// 计算本轮实际启动的刷新线程数。
+///
+/// 空列表不会走到这里；非空时至少 1 个，最多不超过并发上限。
+fn refresh_worker_count(total: usize) -> usize {
+    total.clamp(1, MAX_CONCURRENT_ACCOUNT_REFRESHES)
 }
 
 /// 刷新单个账号（在后台线程里执行）。
@@ -271,6 +317,17 @@ fn refresh_one(target: &RefreshTarget, store: &dyn SecretStore, timeout: Duratio
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn 多账号刷新线程数受并发上限约束() {
+        assert_eq!(refresh_worker_count(1), 1);
+        assert_eq!(refresh_worker_count(3), 3);
+        assert_eq!(
+            refresh_worker_count(10),
+            MAX_CONCURRENT_ACCOUNT_REFRESHES,
+            "账号再多也不能无限开线程"
+        );
+    }
 
     #[test]
     fn 恢复链顺序为续期再重登最后判死() {
