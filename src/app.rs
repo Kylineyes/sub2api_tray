@@ -1071,7 +1071,7 @@ impl TrayApp {
                         store.display_email(&account.email)
                     },
                     base_url: if account.provider == AccountProvider::DeepSeekPlatform {
-                        "DeepSeek 官方 · platform.deepseek.com".to_owned()
+                        "DeepSeek 官方 API Key".to_owned()
                     } else {
                         account.base_url.clone()
                     },
@@ -5015,14 +5015,25 @@ fn draw_account_card(
                         if email.clicked() {
                             header_clicked = true;
                         }
+                        let link_hint = if card.provider == AccountProvider::DeepSeekPlatform {
+                            "DeepSeek 官方网站，使用 API Key 读取余额，不提供用量曲线。"
+                        } else {
+                            "Sub2API 中转站"
+                        };
+                        let link_color = if card.provider == AccountProvider::DeepSeekPlatform {
+                            theme().text_secondary
+                        } else {
+                            theme().text_dim
+                        };
                         ui.add(
                             egui::Label::new(
                                 egui::RichText::new(&card.base_url)
                                     .size(font::BODY_SMALL)
-                                    .color(theme().text_dim),
+                                    .color(link_color),
                             )
                             .truncate(),
-                        );
+                        )
+                        .on_hover_text(link_hint);
                     });
                 },
             );
