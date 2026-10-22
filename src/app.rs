@@ -281,6 +281,15 @@ struct SettingsDraft {
     dark_mode: bool,
 }
 
+/// 后台保存设置的结果：配置写盘成功后由 UI 线程应用并关闭弹窗。
+#[derive(Debug)]
+struct SettingsSaveResult {
+    /// 已保存的配置。
+    config: crate::config::AppConfig,
+    /// 保存后的开机自启状态。
+    autostart: bool,
+}
+
 /// 悬浮动画状态：按 key 记录"当前淡入进度"与"上一帧的命中矩形"。
 ///
 /// 为什么不用 egui 自带的 `animate_bool`：它要求稳定的 `Id`，而这里的行是按
@@ -765,6 +774,9 @@ pub struct TrayApp {
     /// 打开设置页前的主题，用于取消/关闭时回滚实时预览。
     settings_original_dark_mode: Option<bool>,
 
+    /// 设置保存后台通道；Some 时界面显示「正在保存设置」遮罩。
+    settings_save_rx: Option<Receiver<Result<SettingsSaveResult, String>>>,
+
     /// 最近一次读取到的开机自启状态；`None` 表示后台读取尚未完成。
     ///
     /// 打开设置页时不能再同步执行 `reg query`，否则会被注册表/杀软拖慢整个 UI 线程。
@@ -896,6 +908,7 @@ impl TrayApp {
             restored_expansion: false,
             settings: None,
             settings_original_dark_mode: None,
+            settings_save_rx: None,
             autostart_enabled: None,
             autostart_rx: None,
             copying_key: None,
@@ -2355,16 +2368,24 @@ impl TrayApp {
         }
     }
 
-    /// 把设置草稿写盘并立即生效（打码会影响菜单与卡片，需要重建）。
-    fn save_settings(&mut self) -> Result<(), String> {
+    /// 在后台保存设置：写 app.json 与开机自启，避免阻塞 UI 线程。
+    fn start_save_settings(&mut self, ctx: &egui::Context) {
+        if self.settings_save_rx.is_some() {
+            return;
+        }
         let Some(draft) = self.settings.clone() else {
-            return Ok(());
+            return;
         };
         let Some(autostart_enabled) = self.autostart_enabled else {
-            return Err("正在读取开机自启状态，请稍后再保存".to_owned());
+            self.toast = Some((
+                "正在读取开机自启状态，请稍后再保存".to_owned(),
+                Instant::now(),
+            ));
+            return;
         };
-        let DataLayer::Ready(store) = &mut self.data else {
-            return Err("数据目录不可用".to_owned());
+        let DataLayer::Ready(store) = &self.data else {
+            self.toast = Some(("数据目录不可用".to_owned(), Instant::now()));
+            return;
         };
 
         let mut config = store.config().clone();
@@ -2372,30 +2393,110 @@ impl TrayApp {
         config.refresh_interval_seconds = draft.refresh_interval_seconds.clamp(30, 86400);
         config.request_timeout_seconds = draft.request_timeout_seconds.clamp(1, 120);
         config.theme = if draft.dark_mode { "dark" } else { "light" }.to_owned();
+        let dir = store.dir().to_path_buf();
 
-        crate::config::save(store.dir(), &config)
-            .map_err(|err| format!("保存 app.json 失败：{err:#}"))?;
-        *store.config_mut() = config;
+        let needs_autostart_write = draft.autostart != autostart_enabled;
+        let executable = if needs_autostart_write {
+            match std::env::current_exe() {
+                Ok(path) => Some(path),
+                Err(err) => {
+                    self.toast = Some((format!("无法定位当前程序路径：{err}"), Instant::now()));
+                    return;
+                }
+            }
+        } else {
+            None
+        };
 
-        // 开机自启：与缓存的当前系统状态不同才写，避免每次保存都动注册表
-        if draft.autostart != autostart_enabled {
-            let executable =
-                std::env::current_exe().map_err(|err| format!("无法定位当前程序路径：{err}"))?;
-            crate::autostart::set_enabled(draft.autostart, &executable)
-                .map_err(|err| format!("设置开机自启失败：{err:#}"))?;
+        let desired_autostart = draft.autostart;
+        let (sender, receiver) = std::sync::mpsc::channel();
+        self.settings_save_rx = Some(receiver);
+
+        let ctx = ctx.clone();
+        std::thread::spawn(move || {
+            let result = (|| -> Result<SettingsSaveResult, String> {
+                crate::config::save(&dir, &config)
+                    .map_err(|err| format!("保存 app.json 失败：{err:#}"))?;
+                if let Some(executable) = executable {
+                    crate::autostart::set_enabled(desired_autostart, &executable)
+                        .map_err(|err| format!("设置开机自启失败：{err:#}"))?;
+                }
+                Ok(SettingsSaveResult {
+                    config,
+                    autostart: desired_autostart,
+                })
+            })();
+            let _ = sender.send(result);
+            ctx.request_repaint();
+        });
+    }
+
+    /// 收取后台保存结果；成功后才更新内存配置并关闭设置页。
+    fn poll_settings_save(&mut self, ctx: &egui::Context) {
+        let reply = match self.settings_save_rx.as_ref() {
+            Some(receiver) => receiver.try_recv(),
+            None => return,
+        };
+        match reply {
+            Ok(Ok(result)) => {
+                self.settings_save_rx = None;
+                if let DataLayer::Ready(store) = &mut self.data {
+                    *store.config_mut() = result.config;
+                }
+                self.autostart_enabled = Some(result.autostart);
+                if let Some(draft) = self.settings.as_ref() {
+                    self.dark_mode = draft.dark_mode;
+                }
+                self.settings_original_dark_mode = None;
+                self.settings = None;
+                self.rebuild_menu();
+                self.update_badge();
+                self.toast = Some(("设置已保存".to_owned(), Instant::now()));
+                ctx.request_repaint();
+            }
+            Ok(Err(message)) => {
+                self.settings_save_rx = None;
+                self.toast = Some((message, Instant::now()));
+                ctx.request_repaint();
+            }
+            Err(TryRecvError::Empty) => {}
+            Err(TryRecvError::Disconnected) => {
+                self.settings_save_rx = None;
+                self.toast = Some(("保存设置的线程意外退出，请重试".to_owned(), Instant::now()));
+                ctx.request_repaint();
+            }
         }
-        self.autostart_enabled = Some(draft.autostart);
+    }
 
-        // 打码开关会影响菜单标题与卡片，立即重建
-        self.dark_mode = draft.dark_mode;
-        self.settings_original_dark_mode = None;
-        self.rebuild_menu();
-        self.toast = Some(("设置已保存".to_owned(), Instant::now()));
-        Ok(())
+    /// 保存期间显示的阻塞式进度弹窗。
+    fn draw_settings_saving(&mut self, ctx: &egui::Context) {
+        egui::Modal::new(egui::Id::unique("settings-saving"))
+            .backdrop_color(ui_style::modal_backdrop())
+            .frame(ui_style::modal_frame())
+            .show(ctx, |ui| {
+                ui.set_width(ui_style::size::SETTINGS_WIDTH);
+                ui.horizontal(|ui| {
+                    ui.spinner();
+                    ui.vertical(|ui| {
+                        ui.label(
+                            egui::RichText::new("正在保存设置")
+                                .size(font::HEADING)
+                                .strong()
+                                .color(theme().text_primary),
+                        );
+                        ui_style::hint_label(ui, "正在写入 app.json 并更新系统设置，请稍候…");
+                    });
+                });
+            });
     }
 
     /// 绘制设置页（打码开关、刷新间隔、请求超时）。
     fn draw_settings(&mut self, ctx: &egui::Context) {
+        if self.settings_save_rx.is_some() {
+            self.draw_settings_saving(ctx);
+            return;
+        }
+
         // 先拷贝出与更新检查相关的只读状态，避免与 settings 的可变借用冲突
         let update_checking = self.update_checking;
         let update_result = self.update_result.clone();
@@ -2414,173 +2515,217 @@ impl TrayApp {
 
         let modal = egui::Modal::new(egui::Id::unique("settings-dialog"))
             .backdrop_color(ui_style::modal_backdrop())
-            .frame(
-                egui::Frame::new()
-                    .fill(theme().panel_bg)
-                    .corner_radius(egui::CornerRadius::same(ui_style::size::RADIUS_XL))
-                    .stroke(egui::Stroke::new(1.0, theme().panel_border))
-                    .inner_margin(egui::Margin::same(ui_style::size::MARGIN_LG)),
-            )
+            .frame(ui_style::modal_frame())
             .show(ctx, |ui| {
-                ui.set_width(ui_style::size::SETTINGS_WIDTH);
+                ui.set_width(ui_style::size::MODAL_MAX_WIDTH);
+
+                // 标题区与新增 Key、登录弹窗保持同一层级：品牌竖条 + 标题 + 说明。
                 ui.horizontal(|ui| {
-                    ui.label(
-                        egui::RichText::new("设置")
-                            .size(font::HEADING)
-                            .strong()
-                            .color(theme().text_primary),
+                    let (bar_rect, _) = ui.allocate_exact_size(
+                        egui::vec2(
+                            ui_style::size::ACCENT_BAR_WIDTH,
+                            ui_style::size::ACCENT_BAR_HEIGHT,
+                        ),
+                        egui::Sense::hover(),
                     );
-                });
-                ui.add_space(ui_style::space::LG);
-
-                ui.horizontal(|ui| {
-                    ui.label(
-                        egui::RichText::new("主题")
-                            .size(font::BODY_LARGE)
-                            .color(theme().text_secondary),
+                    ui.painter().rect_filled(
+                        bar_rect,
+                        egui::CornerRadius::same(ui_style::size::RADIUS_HAIRLINE),
+                        theme().accent,
                     );
-                    if ui.selectable_label(!draft.dark_mode, "日间").clicked() {
-                        draft.dark_mode = false;
-                        preview_dark_mode = Some(false);
-                    }
-                    if ui.selectable_label(draft.dark_mode, "夜间").clicked() {
-                        draft.dark_mode = true;
-                        preview_dark_mode = Some(true);
-                    }
-                });
-
-                ui.add_space(ui_style::space::MD);
-                ui.checkbox(
-                    &mut draft.mask_accounts,
-                    egui::RichText::new("账号名打码显示（只影响界面）").size(font::BODY_LARGE),
-                );
-
-                ui.add_space(ui_style::space::MD);
-                ui.horizontal(|ui| {
-                    ui.label(
-                        egui::RichText::new("状态刷新间隔")
-                            .size(font::BODY_LARGE)
-                            .color(theme().text_secondary),
-                    );
-                    ui.add(
-                        egui::DragValue::new(&mut draft.refresh_interval_seconds)
-                            .range(30..=86400)
-                            .speed(10.0),
-                    );
-                    ui.label(
-                        egui::RichText::new("秒")
-                            .size(font::BODY)
-                            .color(theme().text_dim),
-                    );
-                });
-
-                ui.add_space(ui_style::space::XS);
-                ui.horizontal(|ui| {
-                    ui.label(
-                        egui::RichText::new("请求超时")
-                            .size(font::BODY_LARGE)
-                            .color(theme().text_secondary),
-                    );
-                    ui.add(egui::DragValue::new(&mut draft.request_timeout_seconds).range(1..=120));
-                    ui.label(
-                        egui::RichText::new("秒")
-                            .size(font::BODY)
-                            .color(theme().text_dim),
-                    );
-                });
-
-                ui.add_space(ui_style::space::SM);
-                if autostart_known {
-                    ui.checkbox(
-                        &mut draft.autostart,
-                        egui::RichText::new("开机自动启动（登录时运行）").size(font::BODY_LARGE),
-                    );
-                } else {
-                    ui.horizontal(|ui| {
-                        ui.spinner();
+                    ui.vertical(|ui| {
                         ui.label(
-                            egui::RichText::new("正在读取开机自启状态…")
-                                .size(font::BODY)
+                            egui::RichText::new("设置")
+                                .size(font::HEADING)
+                                .strong()
+                                .color(theme().text_primary),
+                        );
+                        ui.label(
+                            egui::RichText::new("保存后立即生效并写入 app.json")
+                                .size(font::SMALL)
                                 .color(theme().text_dim),
                         );
                     });
-                }
-
+                });
                 ui.add_space(ui_style::space::LG);
-                ui.separator();
-                ui.add_space(ui_style::space::SM);
-                ui.horizontal(|ui| {
-                    if ui_style::add_button(ui, "检查更新", ButtonTone::Neutral, ButtonSize::Header)
-                        .clicked()
-                    {
-                        check_update = true;
-                    }
-                    if update_checking {
-                        ui.spinner();
-                        ui.label(
-                            egui::RichText::new("检查中…")
-                                .size(font::BODY_SMALL)
-                                .color(theme().text_dim),
+
+                ui_style::section_frame().show(ui, |ui| {
+                    ui.set_width(ui.available_width());
+                    ui_style::section_title(ui, "外观");
+                    ui.add_space(ui_style::space::XS);
+
+                    ui.horizontal(|ui| {
+                        ui_style::field_label(ui, "主题");
+                        let light_text = egui::RichText::new("日间").size(font::BODY).color(
+                            if draft.dark_mode {
+                                theme().text_secondary
+                            } else {
+                                theme().on_accent
+                            },
                         );
+                        if ui
+                            .add(ui_style::rich_button(
+                                light_text,
+                                if draft.dark_mode {
+                                    ButtonTone::Ghost
+                                } else {
+                                    ButtonTone::Primary
+                                },
+                                ButtonSize::Auto,
+                            ))
+                            .clicked()
+                        {
+                            draft.dark_mode = false;
+                            preview_dark_mode = Some(false);
+                        }
+                        let dark_text = egui::RichText::new("夜间").size(font::BODY).color(
+                            if draft.dark_mode {
+                                theme().on_accent
+                            } else {
+                                theme().text_secondary
+                            },
+                        );
+                        if ui
+                            .add(ui_style::rich_button(
+                                dark_text,
+                                if draft.dark_mode {
+                                    ButtonTone::Primary
+                                } else {
+                                    ButtonTone::Ghost
+                                },
+                                ButtonSize::Auto,
+                            ))
+                            .clicked()
+                        {
+                            draft.dark_mode = true;
+                            preview_dark_mode = Some(true);
+                        }
+                    });
+                });
+                ui.add_space(ui_style::space::MD);
+
+                ui_style::section_frame().show(ui, |ui| {
+                    ui.set_width(ui.available_width());
+                    ui_style::section_title(ui, "账号与启动");
+                    ui.add_space(ui_style::space::XS);
+                    ui.checkbox(
+                        &mut draft.mask_accounts,
+                        egui::RichText::new("账号名打码显示（只影响界面）")
+                            .size(font::BODY)
+                            .color(theme().text_primary),
+                    );
+                    ui.add_space(ui_style::space::XS);
+                    if autostart_known {
+                        ui.checkbox(
+                            &mut draft.autostart,
+                            egui::RichText::new("开机自动启动（登录时运行）")
+                                .size(font::BODY)
+                                .color(theme().text_primary),
+                        );
+                    } else {
+                        ui.horizontal(|ui| {
+                            ui.spinner();
+                            ui_style::hint_label(ui, "正在读取开机自启状态…");
+                        });
                     }
                 });
-                if let Some(message) = update_result.as_deref() {
-                    ui.label(
-                        egui::RichText::new(message)
-                            .size(font::BODY_SMALL)
-                            .color(theme().text_secondary),
-                    );
-                }
-                if let Some(url) = update_url.as_deref() {
-                    // 有更新时给出可直接点击的 Release 链接：egui 会把 OpenUrl
-                    // 交给 eframe，由系统默认浏览器打开，不在托盘内嵌网页。
-                    ui.add(
-                        egui::Hyperlink::from_label_and_url(
-                            egui::RichText::new("点击进入下载最新版本").size(font::BODY),
-                            url,
+                ui.add_space(ui_style::space::MD);
+
+                ui_style::section_frame().show(ui, |ui| {
+                    ui.set_width(ui.available_width());
+                    ui_style::section_title(ui, "刷新与网络");
+                    ui.add_space(ui_style::space::XS);
+                    ui.horizontal(|ui| {
+                        ui_style::field_label(ui, "状态刷新间隔");
+                        ui_style::drag_number(
+                            ui,
+                            &mut draft.refresh_interval_seconds,
+                            30..=86400,
+                            " 秒",
+                            10.0,
+                        );
+                    });
+                    ui.add_space(ui_style::space::XS);
+                    ui.horizontal(|ui| {
+                        ui_style::field_label(ui, "请求超时");
+                        ui_style::drag_number(
+                            ui,
+                            &mut draft.request_timeout_seconds,
+                            1..=120,
+                            " 秒",
+                            1.0,
+                        );
+                    });
+                });
+                ui.add_space(ui_style::space::MD);
+
+                ui_style::section_frame().show(ui, |ui| {
+                    ui.set_width(ui.available_width());
+                    ui_style::section_title(ui, "版本更新");
+                    ui.add_space(ui_style::space::XS);
+                    ui.horizontal(|ui| {
+                        if ui_style::add_button(
+                            ui,
+                            "检查更新",
+                            ButtonTone::Neutral,
+                            ButtonSize::Header,
                         )
-                        .open_in_new_tab(true),
-                    );
-                    ui.label(
-                        egui::RichText::new(url)
-                            .size(font::SMALL)
-                            .color(theme().text_dim),
-                    );
-                    if ui_style::add_button(
+                        .clicked()
+                        {
+                            check_update = true;
+                        }
+                        if update_checking {
+                            ui.spinner();
+                            ui_style::hint_label(ui, "检查中…");
+                        }
+                    });
+                    if let Some(message) = update_result.as_deref() {
+                        ui_style::hint_label(ui, message);
+                    }
+                    if let Some(url) = update_url.as_deref() {
+                        ui.add(
+                            egui::Hyperlink::from_label_and_url(
+                                egui::RichText::new("点击进入下载最新版本")
+                                    .size(font::BODY)
+                                    .color(theme().accent),
+                                url,
+                            )
+                            .open_in_new_tab(true),
+                        );
+                        ui_style::hint_label(ui, url);
+                        if ui_style::add_button(
+                            ui,
+                            "复制下载链接",
+                            ButtonTone::Neutral,
+                            ButtonSize::Wide,
+                        )
+                        .clicked()
+                        {
+                            copy_update_url = Some(url.to_owned());
+                        }
+                    }
+                });
+
+                ui.add_space(ui_style::space::LG);
+                ui.horizontal(|ui| {
+                    if ui_style::add_enabled_button(
                         ui,
-                        "复制下载链接",
-                        ButtonTone::Neutral,
-                        ButtonSize::Wide,
+                        autostart_known,
+                        "保存",
+                        ButtonTone::Primary,
+                        ButtonSize::Form,
                     )
                     .clicked()
                     {
-                        copy_update_url = Some(url.to_owned());
-                    }
-                }
-
-                ui.add_space(ui_style::space::MD);
-                ui.label(
-                    egui::RichText::new("保存后立即生效并写入 app.json。")
-                        .size(font::BODY_SMALL)
-                        .color(theme().text_dim),
-                );
-                ui.add_space(ui_style::space::LG);
-
-                ui.horizontal(|ui| {
-                    if ui
-                        .add_enabled_ui(autostart_known, |ui| {
-                            ui_style::add_button(ui, "保存", ButtonTone::Primary, ButtonSize::Form)
-                        })
-                        .inner
-                        .clicked()
-                    {
                         save = true;
                     }
-                    if ui_style::add_button(ui, "取消", ButtonTone::Neutral, ButtonSize::Form)
-                        .clicked()
-                    {
-                        close = true;
-                    }
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui_style::add_button(ui, "取消", ButtonTone::Neutral, ButtonSize::Form)
+                            .clicked()
+                        {
+                            close = true;
+                        }
+                    });
                 });
             });
 
@@ -2600,12 +2745,7 @@ impl TrayApp {
         }
 
         if save {
-            match self.save_settings() {
-                Ok(()) => close = true,
-                Err(message) => {
-                    self.toast = Some((message, Instant::now()));
-                }
-            }
+            self.start_save_settings(ctx);
         }
         if close {
             self.settings = None;
@@ -2891,6 +3031,9 @@ impl TrayApp {
             return;
         }
         if self.settings.is_some() {
+            if self.settings_save_rx.is_some() {
+                return;
+            }
             log::debug!("Esc：关闭设置页");
             self.settings = None;
             self.restore_settings_theme(ctx);
@@ -4096,6 +4239,7 @@ impl eframe::App for TrayApp {
         self.poll_delete_key(ctx);
         self.poll_create_key(ctx);
         self.poll_autostart(ctx);
+        self.poll_settings_save(ctx);
         self.poll_update(ctx);
         self.maybe_start_refresh(ctx);
         self.handle_focus(ctx);
@@ -5643,10 +5787,9 @@ fn draw_account_keys(
                     }
 
                     // 第三行：操作按钮只在鼠标悬浮到当前 Key 时出现。
-                    // 行高始终保留，避免鼠标移入/移出时卡片高度跳变。
-                    ui.horizontal(|ui| {
-                        ui.set_min_height(28.0);
-                        if kt > 0.05 {
+                    // 不保留空白行：未悬浮时直接不分配这段高度，让 Key 列表更紧凑。
+                    if kt > 0.05 {
+                        ui.horizontal(|ui| {
                             // 固定最小尺寸 + 更大字号，避免按钮在托盘里显得又小又难点；
                             // 三个按钮宽度一致，悬浮出现时整体更整齐。
                             if ui_style::add_button(
@@ -5694,8 +5837,8 @@ fn draw_account_keys(
                                     key_masked: key.masked.clone(),
                                 });
                             }
-                        }
-                    });
+                        });
+                    }
                 });
 
         // 刚复制成功：在方块上方盖一个"已复制"浮窗，约 1.6 秒后消失。

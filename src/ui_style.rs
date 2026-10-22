@@ -263,6 +263,7 @@ pub mod size {
     pub const DATE_PICKER_WIDTH: f32 = 108.0;
     pub const TIME_PICKER_WIDTH: f32 = 56.0;
     pub const CURRENCY_PREFIX_WIDTH: f32 = 16.0;
+    pub const NUMBER_INPUT_WIDTH: f32 = 80.0;
     pub const BUTTON_XS_W: f32 = 76.0;
     pub const BUTTON_XS_H: f32 = 22.0;
     pub const BUTTON_TINY_W: f32 = 64.0;
@@ -511,6 +512,33 @@ pub fn error_banner(ui: &mut Ui, text: &str) {
                     .color(theme().danger_text),
             );
         });
+}
+
+/// 分组/卡片标题。
+pub fn section_title(ui: &mut Ui, text: &str) {
+    ui.label(
+        RichText::new(text)
+            .size(font::SUBHEADING)
+            .strong()
+            .color(theme().text_primary),
+    );
+}
+
+/// 统一样式的数字输入框。
+pub fn drag_number<T: egui::emath::Numeric>(
+    ui: &mut Ui,
+    value: &mut T,
+    range: std::ops::RangeInclusive<T>,
+    suffix: &str,
+    speed: f64,
+) -> Response {
+    ui.add_sized(
+        [size::NUMBER_INPUT_WIDTH, size::INPUT_HEIGHT],
+        egui::DragValue::new(value)
+            .range(range)
+            .suffix(suffix)
+            .speed(speed),
+    )
 }
 
 /// 表单字段标签。
