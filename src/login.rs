@@ -30,7 +30,7 @@
 use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::time::Duration;
 
-use crate::accounts::{self, AccountRole};
+use crate::accounts::{self, AccountProvider, AccountRole};
 use crate::api::{HttpClient, LoginOutcome};
 use crate::secrets::Credentials;
 use crate::ui_style::{self, ButtonSize, ButtonTone, font, theme};
@@ -61,6 +61,8 @@ struct LoginForm {
     email: String,
     /// 密码：只存在内存里，提交后立刻清空。
     password: String,
+    /// DeepSeek 官方 API Key：只存在内存里，加密后立即清理。
+    api_key: String,
     /// 6 位验证码（仅在 2FA 阶段使用）。
     totp_code: String,
 }
@@ -71,7 +73,9 @@ struct LoginForm {
 /// 这些会失败的步骤集中在一个地方处理，失败时弹窗还能保持打开并显示原因。
 #[derive(Debug, Clone)]
 pub struct LoginDraft {
-    /// 归一化后的实例地址。
+    /// 账号来源。
+    pub provider: AccountProvider,
+    /// 展示用实例地址/平台地址。
     pub base_url: String,
     /// 登录邮箱。
     pub email: String,
@@ -116,6 +120,8 @@ pub struct LoginDialog {
     receiver: Option<Receiver<WorkerReply>>,
     /// egui 上下文，用于后台线程唤醒界面。
     ctx: egui::Context,
+    /// 当前选择的账号来源。
+    provider: AccountProvider,
     /// 非空表示当前弹窗用于已有账号原地重新登录。
     relogin_account_id: Option<String>,
 }
@@ -132,6 +138,7 @@ impl LoginDialog {
             masked_email: None,
             receiver: None,
             ctx,
+            provider: AccountProvider::Sub2Api,
             relogin_account_id: None,
         }
     }
@@ -147,6 +154,7 @@ impl LoginDialog {
     /// 但**清空密码与验证码**：密码不该在弹窗关闭后继续留在内存里。
     pub fn open(&mut self) {
         self.open = true;
+        self.provider = AccountProvider::Sub2Api;
         self.relogin_account_id = None;
         self.stage = Stage::Editing;
         self.error = None;
@@ -161,8 +169,15 @@ impl LoginDialog {
     ///
     /// 地址与邮箱来自本地账号，不再允许修改，避免用户误把新凭据写到另一账号；
     /// 用户只需要重新输入密码并完成可能的两步验证。
-    pub fn open_for_relogin(&mut self, account_id: String, base_url: String, email: String) {
+    pub fn open_for_relogin(
+        &mut self,
+        provider: AccountProvider,
+        account_id: String,
+        base_url: String,
+        email: String,
+    ) {
         self.open = true;
+        self.provider = provider;
         self.relogin_account_id = Some(account_id);
         self.stage = Stage::Editing;
         self.error = None;
@@ -171,6 +186,7 @@ impl LoginDialog {
         self.form.base_url = base_url;
         self.form.email = email;
         self.form.password.clear();
+        self.form.api_key.clear();
         self.form.totp_code.clear();
         self.ctx.request_repaint();
     }
@@ -180,6 +196,7 @@ impl LoginDialog {
         self.open = false;
         self.stage = Stage::Editing;
         self.form.password.clear();
+        self.form.api_key.clear();
         self.form.totp_code.clear();
         self.error = None;
         self.temp_token = None;
@@ -211,6 +228,7 @@ impl LoginDialog {
                 self.stage = Stage::Editing;
                 // 密码已经进了 draft 的凭据里，这里把界面上的副本清掉
                 self.form.password.clear();
+                self.form.api_key.clear();
                 self.form.totp_code.clear();
                 let mut draft = draft;
                 draft.relogin_account_id = self.relogin_account_id.clone();
@@ -297,33 +315,77 @@ impl LoginDialog {
                 );
                 ui.add_space(ui_style::space::XL);
 
-                // ---- 链接 ----
-                field_label(ui, "链接");
-                let url_edit = egui::TextEdit::singleline(&mut self.form.base_url)
-                    .hint_text("https://your-sub2api-host:8080")
-                    .desired_width(f32::INFINITY)
-                    .interactive(!submitting && !need_totp && self.relogin_account_id.is_none());
-                ui.add_sized([DIALOG_WIDTH, INPUT_HEIGHT], url_edit);
+                // ---- 账号来源 ----
+                if !relogin {
+                    field_label(ui, "账号来源");
+                    egui::ComboBox::from_id_salt("login-provider")
+                        .selected_text(
+                            egui::RichText::new(self.provider.label())
+                                .size(font::BODY)
+                                .color(theme().text_primary),
+                        )
+                        .width(DIALOG_WIDTH)
+                        .show_ui(ui, |ui| {
+                            ui.selectable_value(
+                                &mut self.provider,
+                                AccountProvider::Sub2Api,
+                                "Sub2API 中转站",
+                            );
+                            ui.selectable_value(
+                                &mut self.provider,
+                                AccountProvider::DeepSeekPlatform,
+                                "DeepSeek 官方",
+                            );
+                        });
+                    ui.add_space(ui_style::space::MD);
+                }
 
-                // ---- 账户名 ----
-                ui.add_space(ui_style::space::MD);
-                field_label(ui, "账户名（邮箱）");
-                let email_edit = egui::TextEdit::singleline(&mut self.form.email)
-                    .hint_text("you@example.com")
-                    .desired_width(f32::INFINITY)
-                    .interactive(!submitting && !need_totp && self.relogin_account_id.is_none());
-                ui.add_sized([DIALOG_WIDTH, INPUT_HEIGHT], email_edit);
+                if self.provider == AccountProvider::DeepSeekPlatform {
+                    field_label(ui, "DeepSeek API Key");
+                    let api_key_edit = egui::TextEdit::singleline(&mut self.form.api_key)
+                        .hint_text("sk-...")
+                        .password(true)
+                        .desired_width(f32::INFINITY)
+                        .interactive(!submitting);
+                    ui.add_sized([DIALOG_WIDTH, INPUT_HEIGHT], api_key_edit);
+                    ui.add_space(ui_style::space::XS);
+                    ui_style::hint_label(
+                        ui,
+                        "在 platform.deepseek.com 创建 API Key，仅保存在本机加密存储。",
+                    );
+                } else {
+                    // ---- 链接 ----
+                    field_label(ui, "链接");
+                    let url_edit = egui::TextEdit::singleline(&mut self.form.base_url)
+                        .hint_text("https://your-sub2api-host:8080")
+                        .desired_width(f32::INFINITY)
+                        .interactive(
+                            !submitting && !need_totp && self.relogin_account_id.is_none(),
+                        );
+                    ui.add_sized([DIALOG_WIDTH, INPUT_HEIGHT], url_edit);
 
-                // ---- 密码 ----
-                ui.add_space(ui_style::space::MD);
-                field_label(ui, "密码");
-                let password_edit = egui::TextEdit::singleline(&mut self.form.password)
-                    .hint_text("登录密码")
-                    .password(true)
-                    .desired_width(f32::INFINITY)
-                    // 验证码阶段不允许改密码：改了就得重新走第一步
-                    .interactive(!submitting && !need_totp);
-                ui.add_sized([DIALOG_WIDTH, INPUT_HEIGHT], password_edit);
+                    // ---- 账户名 ----
+                    ui.add_space(ui_style::space::MD);
+                    field_label(ui, "账户名（邮箱）");
+                    let email_edit = egui::TextEdit::singleline(&mut self.form.email)
+                        .hint_text("you@example.com")
+                        .desired_width(f32::INFINITY)
+                        .interactive(
+                            !submitting && !need_totp && self.relogin_account_id.is_none(),
+                        );
+                    ui.add_sized([DIALOG_WIDTH, INPUT_HEIGHT], email_edit);
+
+                    // ---- 密码 ----
+                    ui.add_space(ui_style::space::MD);
+                    field_label(ui, "密码");
+                    let password_edit = egui::TextEdit::singleline(&mut self.form.password)
+                        .hint_text("登录密码")
+                        .password(true)
+                        .desired_width(f32::INFINITY)
+                        // 验证码阶段不允许改密码：改了就得重新走第一步
+                        .interactive(!submitting && !need_totp);
+                    ui.add_sized([DIALOG_WIDTH, INPUT_HEIGHT], password_edit);
+                }
 
                 // ---- 验证码（仅 2FA 阶段） ----
                 if need_totp {
@@ -427,7 +489,22 @@ impl LoginDialog {
                 self.stage = Stage::Editing;
                 return;
             };
-            self.spawn_worker(timeout, Some(temp_token));
+            self.spawn_worker(self.provider, timeout, Some(temp_token));
+            return;
+        }
+
+        if self.provider == AccountProvider::DeepSeekPlatform {
+            let api_key = self.form.api_key.trim().to_owned();
+            if api_key.is_empty() {
+                self.error = Some("请输入 DeepSeek API Key".to_owned());
+                return;
+            }
+            if !api_key.starts_with("sk-") {
+                self.error = Some("DeepSeek API Key 格式不正确，通常以 sk- 开头".to_owned());
+                return;
+            }
+            self.form.api_key = api_key;
+            self.spawn_worker(AccountProvider::DeepSeekPlatform, timeout, None);
             return;
         }
 
@@ -450,15 +527,21 @@ impl LoginDialog {
 
         // 把归一化结果写回表单：用户能直接看到"实际会用的地址"
         self.form.base_url = normalized;
-        self.spawn_worker(timeout, None);
+        self.spawn_worker(self.provider, timeout, None);
     }
 
     /// 起一个后台线程执行登录（可选：带 2FA 令牌）。
-    fn spawn_worker(&mut self, timeout: Duration, temp_token: Option<String>) {
+    fn spawn_worker(
+        &mut self,
+        provider: AccountProvider,
+        timeout: Duration,
+        temp_token: Option<String>,
+    ) {
         // 快照：线程里不再借用 self
         let base_url = self.form.base_url.clone();
         let email = self.form.email.clone();
         let password = self.form.password.clone();
+        let api_key = self.form.api_key.clone();
         let totp_code = self.form.totp_code.clone();
 
         let (sender, receiver) = mpsc::channel();
@@ -468,7 +551,9 @@ impl LoginDialog {
 
         let ctx = self.ctx.clone();
         std::thread::spawn(move || {
-            let reply = run_login(base_url, email, password, temp_token, totp_code, timeout);
+            let reply = run_login(
+                provider, base_url, email, password, api_key, temp_token, totp_code, timeout,
+            );
             // 通道关闭说明用户已经关掉弹窗：忽略发送错误
             let _ = sender.send(reply);
             // 唤醒界面：否则结果要等到下一次鼠标移动才会被消费
@@ -491,14 +576,43 @@ fn field_label(ui: &mut egui::Ui, text: &str) {
 /// 顺序：建客户端 → 登录（或 2FA 登录）→ 拉 `/auth/me` 定角色。
 /// `/auth/me` 失败不影响登录成功：角色记为 `Unknown`，账号照样保存，
 /// 只是后续 0004 的"按角色分岔展示"会退化成通用视图。
+#[allow(
+    clippy::too_many_arguments,
+    reason = "登录线程入口需要一次性快照所有表单字段，拆结构体反而增加无意义样板"
+)]
 fn run_login(
+    provider: AccountProvider,
     base_url: String,
     email: String,
     password: String,
+    api_key: String,
     temp_token: Option<String>,
     totp_code: String,
     timeout: Duration,
 ) -> WorkerReply {
+    if provider == AccountProvider::DeepSeekPlatform {
+        let key = api_key.trim();
+        return match crate::deepseek::fetch_balance(key, timeout) {
+            Ok(_) => WorkerReply::Success(LoginDraft {
+                provider,
+                base_url: crate::deepseek::PLATFORM_URL.to_owned(),
+                email: crate::deepseek::mask_api_key(key),
+                role: AccountRole::Unknown,
+                credentials: Credentials {
+                    password: String::new(),
+                    access_token: key.to_owned(),
+                    refresh_token: String::new(),
+                },
+                expires_at: None,
+                relogin_account_id: None,
+            }),
+            Err(err) => {
+                log::warn!("DeepSeek API Key 校验失败：{}", err.detail());
+                WorkerReply::Failed(err.user_message())
+            }
+        };
+    }
+
     let client = match HttpClient::new(&base_url, timeout) {
         Ok(client) => client,
         Err(err) => return WorkerReply::Failed(err.user_message()),
@@ -535,6 +649,7 @@ fn run_login(
             };
 
             WorkerReply::Success(LoginDraft {
+                provider,
                 base_url: client.base_url().to_owned(),
                 email,
                 role,
@@ -591,6 +706,7 @@ mod tests {
     fn 原地重新登录保留地址邮箱并标记账号() {
         let mut dlg = dialog();
         dlg.open_for_relogin(
+            AccountProvider::Sub2Api,
             "account-1".to_owned(),
             "https://example.com".to_owned(),
             "user@example.com".to_owned(),
@@ -780,9 +896,11 @@ mod tests {
         // 环境噪声重试：仅对临时网络错误重试（见 main.rs 的 test_support 说明）
         let first = crate::test_support::retry_message(|| {
             match run_login(
+                AccountProvider::Sub2Api,
                 base_url.clone(),
                 "user@example.com".to_owned(),
                 "password".to_owned(),
+                String::new(),
                 None,
                 String::new(),
                 Duration::from_secs(5),
@@ -802,9 +920,11 @@ mod tests {
         // 第二步：带验证码登录，并读取角色
         let second = crate::test_support::retry_message(|| {
             match run_login(
+                AccountProvider::Sub2Api,
                 base_url.clone(),
                 "user@example.com".to_owned(),
                 "password".to_owned(),
+                String::new(),
                 Some(temp_token.clone()),
                 "123456".to_owned(),
                 Duration::from_secs(5),
@@ -853,9 +973,11 @@ mod tests {
         let password = read("SUB2API_ACCEPTANCE_PASSWORD");
 
         let reply = run_login(
+            AccountProvider::Sub2Api,
             base_url,
             email.clone(),
             password,
+            String::new(),
             None,
             String::new(),
             Duration::from_secs(15),

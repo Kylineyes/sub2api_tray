@@ -15,7 +15,7 @@ use std::sync::Arc;
 use std::sync::mpsc::{Receiver, TryRecvError};
 use std::time::{Duration, Instant};
 
-use crate::accounts::{self, Account};
+use crate::accounts::{self, Account, AccountProvider};
 use crate::data::DataLayer;
 use crate::fonts;
 use crate::login::{LoginDialog, LoginDraft};
@@ -446,6 +446,8 @@ const USAGE_TTL: Duration = Duration::from_secs(60);
 struct AccountCard {
     /// 账号 id（点击展开要用）。
     id: String,
+    /// 账号来源。
+    provider: AccountProvider,
     /// 展示用邮箱（已按开关打码）。
     display: String,
     /// 实例地址。
@@ -1062,8 +1064,17 @@ impl TrayApp {
 
                 AccountCard {
                     id: account.id.clone(),
-                    display: store.display_email(&account.email),
-                    base_url: account.base_url.clone(),
+                    provider: account.provider,
+                    display: if account.provider == AccountProvider::DeepSeekPlatform {
+                        account.email.clone()
+                    } else {
+                        store.display_email(&account.email)
+                    },
+                    base_url: if account.provider == AccountProvider::DeepSeekPlatform {
+                        "DeepSeek 官方 · platform.deepseek.com".to_owned()
+                    } else {
+                        account.base_url.clone()
+                    },
                     status,
                     balance: runtime.and_then(|item| item.balance),
                     summary,
@@ -1170,6 +1181,9 @@ impl TrayApp {
         let Some(account) = store.accounts().iter().find(|item| item.id == account_id) else {
             return;
         };
+        if account.provider != AccountProvider::Sub2Api {
+            return;
+        }
         let base_url = account.base_url.clone();
         let secrets_blob = account.secrets.clone();
         let secret_store = store.secret_store();
@@ -1358,6 +1372,7 @@ impl TrayApp {
             DataLayer::Ready(store) => store
                 .accounts()
                 .iter()
+                .filter(|item| item.provider == AccountProvider::Sub2Api)
                 .filter(|item| self.expanded_accounts.contains(&item.id))
                 .filter(|item| !self.usage_collapsed.contains(&item.id))
                 .map(|item| item.id.clone())
@@ -1396,6 +1411,7 @@ impl TrayApp {
             DataLayer::Ready(store) => store
                 .accounts()
                 .iter()
+                .filter(|item| item.provider == AccountProvider::Sub2Api)
                 .filter(|item| self.expanded_accounts.contains(&item.id))
                 .map(|item| item.id.clone())
                 .filter(|id| !self.account_keys.contains_key(id) && !self.keys_rx.contains_key(id))
@@ -1939,6 +1955,7 @@ impl TrayApp {
             return;
         };
         self.login.open_for_relogin(
+            account.provider,
             account.id.clone(),
             account.base_url.clone(),
             account.email.clone(),
@@ -3089,7 +3106,11 @@ impl TrayApp {
                         self.login.set_error(message);
                         return;
                     }
-                    let display = store.display_email(&draft.email);
+                    let display = if draft.provider == AccountProvider::DeepSeekPlatform {
+                        draft.email.clone()
+                    } else {
+                        store.display_email(&draft.email)
+                    };
                     log::info!("账号凭据已原地更新：{display}");
                     self.toast = Some((format!("已重新登录 {display}"), Instant::now()));
                     self.login.close();
@@ -3105,7 +3126,11 @@ impl TrayApp {
                     }
 
                     // 日志只留打码后的账号，避免明文邮箱长期堆积在日志里
-                    let display = store.display_email(&draft.email);
+                    let display = if draft.provider == AccountProvider::DeepSeekPlatform {
+                        draft.email.clone()
+                    } else {
+                        store.display_email(&draft.email)
+                    };
                     log::info!("账号已保存：{display}");
                     self.toast = Some((format!("已登录 {display}"), Instant::now()));
                     self.login.close();
@@ -4934,7 +4959,9 @@ fn draw_account_card(
             // 标题行只有左侧账号信息可点击展开/收起；右侧按钮使用独立
             // 控件自己的点击响应，不能再叠加整行手势。
             let mut header_clicked = false;
-            let can_create_key = card.keys.as_ref().is_some_and(|state| !state.loading);
+            let is_deepseek = card.provider == AccountProvider::DeepSeekPlatform;
+            let can_create_key =
+                !is_deepseek && card.keys.as_ref().is_some_and(|state| !state.loading);
 
             // 手动画出整行矩形，左右各自拥有明确的最大矩形，避免 horizontal
             // 按内容收缩导致右侧按钮停在中间。
@@ -5006,20 +5033,22 @@ fn draw_account_card(
                         .max_rect(right_rect)
                         .layout(egui::Layout::top_down(egui::Align::Max)),
                     |ui| {
-                        let add_clicked = ui
-                            .add_enabled_ui(can_create_key, |ui| {
-                                ui_style::add_button(
-                                    ui,
-                                    "新增key",
-                                    ButtonTone::Neutral,
-                                    ButtonSize::Header,
-                                )
-                            })
-                            .inner
-                            .on_hover_text("在当前账号下创建一个新的 API Key")
-                            .clicked();
-                        if add_clicked {
-                            key_actions.create_key_request = Some(card.id.clone());
+                        if !is_deepseek {
+                            let add_clicked = ui
+                                .add_enabled_ui(can_create_key, |ui| {
+                                    ui_style::add_button(
+                                        ui,
+                                        "新增key",
+                                        ButtonTone::Neutral,
+                                        ButtonSize::Header,
+                                    )
+                                })
+                                .inner
+                                .on_hover_text("在当前账号下创建一个新的 API Key")
+                                .clicked();
+                            if add_clicked {
+                                key_actions.create_key_request = Some(card.id.clone());
+                            }
                         }
                         if ui_style::add_button(
                             ui,
@@ -5048,7 +5077,8 @@ fn draw_account_card(
             if card.expanded {
                 let mut status_line = card.status.label().to_owned();
                 if let Some(balance) = card.balance {
-                    status_line.push_str(&format!(" · 余额 ${balance:.2}"));
+                    let symbol = if is_deepseek { "¥" } else { "$" };
+                    status_line.push_str(&format!(" · 余额 {symbol}{balance:.2}"));
                 }
                 ui.label(
                     egui::RichText::new(status_line)
@@ -5091,14 +5121,19 @@ fn draw_account_card(
                 }
 
                 ui.add_space(ui_style::space::SM);
-                ui.separator();
-
-                // 用量曲线：走用户态接口，看到的是本账号自己的数据
-                draw_usage_section(ui, card, usage_actions);
-                ui.add_space(ui_style::space::SM);
-                ui.separator();
-
-                draw_account_keys(ui, card, hover, key_actions);
+                if is_deepseek {
+                    ui_style::hint_label(
+                        ui,
+                        "DeepSeek 官方账号：仅同步账户余额，不提供 Key 列表与用量曲线。",
+                    );
+                } else {
+                    ui.separator();
+                    // 用量曲线：走用户态接口，看到的是本账号自己的数据
+                    draw_usage_section(ui, card, usage_actions);
+                    ui.add_space(ui_style::space::SM);
+                    ui.separator();
+                    draw_account_keys(ui, card, hover, key_actions);
+                }
             }
         });
 
@@ -6000,7 +6035,8 @@ fn save_login(store: &mut crate::data::DataStore, draft: &LoginDraft) -> Result<
     }
 
     // 先用空 secrets 建出账号，拿到它的 id（macOS 钥匙串条目以 id 为 account）
-    let mut account = Account::new(
+    let mut account = Account::new_with_provider(
+        draft.provider,
         draft.base_url.clone(),
         draft.email.clone(),
         draft.role,
