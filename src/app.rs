@@ -5016,7 +5016,7 @@ fn draw_account_card(
                             header_clicked = true;
                         }
                         let link_hint = if card.provider == AccountProvider::DeepSeekPlatform {
-                            "DeepSeek 官方网站，使用 API Key 读取余额，不提供用量曲线。"
+                            "DeepSeek 官方网站\n使用 API Key 读取余额，不提供用量曲线。"
                         } else {
                             "Sub2API 中转站"
                         };
@@ -5025,15 +5025,22 @@ fn draw_account_card(
                         } else {
                             theme().text_dim
                         };
-                        ui.add(
+                        let link_response = ui.add(
                             egui::Label::new(
                                 egui::RichText::new(&card.base_url)
                                     .size(font::BODY_SMALL)
                                     .color(link_color),
                             )
                             .truncate(),
-                        )
-                        .on_hover_text(link_hint);
+                        );
+                        link_response.on_hover_ui(|ui| {
+                            ui.set_max_width(ui_style::size::TOOLTIP_MAX_WIDTH);
+                            ui.label(
+                                egui::RichText::new(link_hint)
+                                    .size(font::BODY_SMALL)
+                                    .color(theme().text_primary),
+                            );
+                        });
                     });
                 },
             );
@@ -5131,13 +5138,8 @@ fn draw_account_card(
                     }
                 }
 
-                ui.add_space(ui_style::space::SM);
-                if is_deepseek {
-                    ui_style::hint_label(
-                        ui,
-                        "DeepSeek 官方账号：仅同步账户余额，不提供 Key 列表与用量曲线。",
-                    );
-                } else {
+                if !is_deepseek {
+                    ui.add_space(ui_style::space::SM);
                     ui.separator();
                     // 用量曲线：走用户态接口，看到的是本账号自己的数据
                     draw_usage_section(ui, card, usage_actions);
