@@ -25,6 +25,7 @@
 * 使用 egui immediate viewport 创建无边框、透明、置顶、任务栏隐藏的 64×64 悬浮球；
 * 未悬浮时绘制为右侧窄条，鼠标悬停展开为圆形；该行为受 `floatingBallEdgeHide` 控制；
 * 左键点击悬浮球调用 `show_panel`；
+* 配色使用 `card_bg` / `hover_card_bg`、`accent` 描边、`text_primary` 数值和状态点，不使用整块高饱和品牌色；
 * 账号余额由现有刷新链更新；主 Key 每 60 秒拉一次 Key 列表并更新剩余额度；
 * 悬浮球只展示最终数值，不展示刷新倒计时。
 

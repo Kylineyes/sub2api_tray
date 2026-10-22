@@ -1381,6 +1381,11 @@ impl TrayApp {
         }
         let view = self.floating_ball_view();
         let expanded = !self.floating_ball_edge_hide || self.floating_ball_hovered;
+        let ball_background = if self.floating_ball_hovered {
+            theme().hover_card_bg
+        } else {
+            theme().card_bg
+        };
         let width = ui_style::size::FLOATING_BALL_SIZE;
         let monitor = ctx
             .input(|i| i.viewport().monitor_size)
@@ -1417,28 +1422,24 @@ impl TrayApp {
             let painter = ui.painter();
             if expanded {
                 let center = rect.center();
-                painter.circle_filled(
-                    center,
-                    ui_style::size::FLOATING_BALL_SIZE * 0.5 - 2.0,
-                    theme().accent,
-                );
+                let radius = ui_style::size::FLOATING_BALL_SIZE * 0.5 - 2.0;
+                painter.circle_filled(center, radius, ball_background);
+                painter.circle_stroke(center, radius, egui::Stroke::new(1.5, theme().accent));
                 painter.circle_stroke(
                     center,
-                    ui_style::size::FLOATING_BALL_SIZE * 0.5 - 2.0,
-                    egui::Stroke::new(1.0, theme().on_accent),
+                    radius - 4.0,
+                    egui::Stroke::new(1.0, theme().chart_fill),
                 );
                 painter.text(
                     center,
                     egui::Align2::CENTER_CENTER,
                     &view.text,
                     egui::FontId::proportional(font::BODY_SMALL_PLUS),
-                    theme().on_accent,
+                    theme().text_primary,
                 );
-                painter.circle_filled(
-                    rect.right_bottom() - egui::vec2(12.0, 12.0),
-                    4.0,
-                    status_color(view.status),
-                );
+                let dot = rect.right_bottom() - egui::vec2(12.0, 12.0);
+                painter.circle_filled(dot, 5.0, theme().panel_bg);
+                painter.circle_filled(dot, 3.5, status_color(view.status));
             } else {
                 let tab = egui::Rect::from_min_max(
                     egui::pos2(
@@ -1450,7 +1451,13 @@ impl TrayApp {
                 painter.rect_filled(
                     tab,
                     egui::CornerRadius::same(ui_style::size::RADIUS_LG),
-                    theme().accent,
+                    ball_background,
+                );
+                painter.rect_stroke(
+                    tab,
+                    egui::CornerRadius::same(ui_style::size::RADIUS_LG),
+                    egui::Stroke::new(1.0, theme().accent),
+                    egui::StrokeKind::Inside,
                 );
                 painter.circle_filled(tab.center(), 3.0, status_color(view.status));
             }

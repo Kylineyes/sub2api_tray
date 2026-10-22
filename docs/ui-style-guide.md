@@ -137,8 +137,11 @@ ui_style::add_enabled_button(ui, enabled, "删除", ButtonTone::Danger, ButtonSi
 - 尺寸 token：`size::FLOATING_BALL_SIZE`
 - 收起宽度：`size::FLOATING_BALL_COLLAPSED_WIDTH`
 - 屏幕边距：`size::FLOATING_BALL_MARGIN`
-- 颜色仍使用 `theme().accent` / `theme().on_accent`
-- 状态点使用 `status_color`
+- 球形背景：`theme().card_bg`，悬浮时 `theme().hover_card_bg`
+- 外圈：`theme().accent` 描边，内圈可使用 `theme().chart_fill`
+- 数值文字：`theme().text_primary`
+- 状态点：`status_color`
+- 不使用整块高饱和品牌色填充
 
 ## 十、异步操作
 
