@@ -1,6 +1,6 @@
 [package]
 name = "sub2api_tray"
-version = "0.4.2"
+version = "0.4.3"
 edition = "2024"
 rust-version = "1.95"
 description = "用量统计托盘：在 Windows 通知区域 / macOS 菜单栏中查看已登录的账户状态"
