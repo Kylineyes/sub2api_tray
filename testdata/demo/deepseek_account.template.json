@@ -1,0 +1,18 @@
+{
+  "schemaVersion": 1,
+  "accounts": [
+    {
+      "id": "22222222-2222-4222-8222-222222222222",
+      "provider": "deepSeekPlatform",
+      "baseUrl": "https://platform.deepseek.com",
+      "email": "sk-...demo",
+      "role": "unknown",
+      "secrets": "__SECRET__",
+      "createdAt": "2026-10-21T00:00:00Z",
+      "lastLoginAt": "2026-10-21T00:00:00Z",
+      "tokenExpiresAt": null,
+      "expanded": true,
+      "apiKeys": []
+    }
+  ]
+}

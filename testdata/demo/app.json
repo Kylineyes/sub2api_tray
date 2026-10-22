@@ -1,0 +1,8 @@
+{
+  "schemaVersion": 1,
+  "maskAccounts": false,
+  "refreshIntervalSeconds": 300,
+  "requestTimeoutSeconds": 10,
+  "panelPinned": false,
+  "theme": "dark"
+}
