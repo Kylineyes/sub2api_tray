@@ -452,3 +452,4 @@ cargo build --release                  # 产物：target/release/sub2api_tray
 | 2026-10-22 | 新增 Key 日期选择器 | 引入 `egui_extras` 的 `DatePickerButton` 与 `jiff`；有效期指定时间改为日期选择器 + 小时/分钟输入，按本地时区转换为 RFC3339，不再要求手填时间字符串 |
 | 2026-10-22 | 发布 v0.4.1 | Cargo.toml/Cargo.lock/README 版本升至 0.4.1；汇总新增 Key 有效期、日期选择器、原地重新登录、DPAPI 错误码、统一 UI 样式与布局修复 |
 | 2026-10-22 | 发布 v0.4.2 | 版本升至 0.4.2；重新设计设置页；设置保存改为后台线程并显示阻塞式进度弹窗；Key 操作按钮未悬浮时不占高度 |
+| 2026-10-22 | 兼容字符串业务码 | 后端 `code` 字段可能返回 `UNAUTHORIZED` / `TOKEN_EXPIRED` 等字符串；统一映射到 401/403/404/429/500，避免误判为不是 Sub2API 实例并恢复 token 续期链 |
