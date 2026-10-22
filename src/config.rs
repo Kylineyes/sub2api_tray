@@ -74,6 +74,18 @@ pub struct AppConfig {
     /// 用字符串而不是 bool，是为了将来可平滑扩展 `system` 等模式；
     /// 非法值在 [`AppConfig::sanitize`] 中回落到夜间。
     pub theme: String,
+
+    /// 是否显示桌面悬浮球。
+    pub floating_ball_visible: bool,
+
+    /// 悬浮球是否启用贴边自动收起。
+    pub floating_ball_edge_hide: bool,
+
+    /// 悬浮球主账号 id。
+    pub floating_ball_account_id: Option<String>,
+
+    /// 悬浮球主 API Key id；为空表示展示账号余额。
+    pub floating_ball_api_key_id: Option<String>,
 }
 
 impl Default for AppConfig {
@@ -88,6 +100,10 @@ impl Default for AppConfig {
             panel_pinned: false,
             // 保持现有观感，老用户升级后不会突然变成浅色
             theme: "dark".to_owned(),
+            floating_ball_visible: false,
+            floating_ball_edge_hide: true,
+            floating_ball_account_id: None,
+            floating_ball_api_key_id: None,
         }
     }
 }
@@ -220,6 +236,15 @@ pub fn load_or_create(dir: &Path) -> Result<(AppConfig, ConfigLoadReport)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn 悬浮球字段缺失时使用默认值() {
+        let config: AppConfig = serde_json::from_str(r#"{"schemaVersion":1}"#).unwrap();
+        assert!(!config.floating_ball_visible);
+        assert!(config.floating_ball_edge_hide);
+        assert!(config.floating_ball_account_id.is_none());
+        assert!(config.floating_ball_api_key_id.is_none());
+    }
 
     #[test]
     fn 文件不存在时创建默认配置() {

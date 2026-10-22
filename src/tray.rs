@@ -29,7 +29,7 @@
 use std::sync::{Arc, Mutex};
 
 use anyhow::{Context as _, Result};
-use tray_icon::menu::{Menu, MenuEvent, MenuItem, PredefinedMenuItem};
+use tray_icon::menu::{Menu, MenuEvent, MenuItem, PredefinedMenuItem, Submenu};
 use tray_icon::{
     Icon, MouseButton, MouseButtonState, Rect as TrayRect, TrayIcon, TrayIconBuilder, TrayIconEvent,
 };
@@ -46,6 +46,15 @@ const MENU_ID_REFRESH: &str = "refresh";
 /// 菜单项 id：退出程序。
 const MENU_ID_QUIT: &str = "quit";
 
+/// 菜单项 id：显示/隐藏悬浮球。
+const MENU_ID_BALL_TOGGLE: &str = "ball-toggle";
+
+/// 菜单项 id：切换贴边自动收起。
+const MENU_ID_BALL_EDGE_HIDE: &str = "ball-edge-hide";
+
+/// 悬浮球主目标菜单项前缀。
+const MENU_ID_BALL_TARGET_PREFIX: &str = "ball-target|";
+
 /// 托盘需要应用做的事。
 ///
 /// 这里不再是 `Copy`：删除账号要带上 id。投递成本仍然很低（Vec push）。
@@ -57,6 +66,39 @@ pub enum TrayCommand {
     RefreshNow,
     /// 退出整个应用（菜单项）。
     Quit,
+    /// 显示或隐藏桌面悬浮球。
+    ToggleFloatingBall,
+    /// 切换悬浮球贴边自动收起。
+    ToggleFloatingBallEdgeHide,
+    /// 设置悬浮球主账号/主 Key。
+    SetFloatingBallTarget {
+        account_id: String,
+        key_id: Option<String>,
+    },
+}
+
+/// 托盘菜单里的一个悬浮球目标。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BallTargetMenuItem {
+    /// 账号 id。
+    pub account_id: String,
+    /// Key id；None 表示展示账号余额。
+    pub key_id: Option<String>,
+    /// 菜单文案（已包含缩进/勾选）。
+    pub label: String,
+    /// 当前是否被选中。
+    pub selected: bool,
+}
+
+/// 托盘菜单需要的悬浮球状态快照。
+#[derive(Debug, Clone, Default)]
+pub struct TrayMenuModel {
+    /// 悬浮球是否显示。
+    pub ball_visible: bool,
+    /// 是否启用贴边自动收起。
+    pub ball_edge_hide: bool,
+    /// 可选主账号/主 Key 列表。
+    pub ball_targets: Vec<BallTargetMenuItem>,
 }
 
 /// 托盘与 egui 之间的通信桥。
@@ -266,12 +308,67 @@ pub fn load_icon_rgba() -> Result<(Vec<u8>, u32, u32)> {
 ///
 /// 面板用左键单击托盘图标切换，登录入口在面板顶部，账号信息也都在面板里，
 /// 因此菜单不再提供"显示面板 / 登陆新用户 / 账号子菜单"。
-pub fn build_menu() -> Result<Menu> {
+pub fn build_menu(model: &TrayMenuModel) -> Result<Menu> {
     let menu = Menu::new();
 
-    // 菜单只留"原子动作"：面板用左键单击切换、登录在面板顶部，
-    // 所以这里不再放"显示面板/登陆新用户"两项。
     let refresh_item = MenuItem::with_id(MENU_ID_REFRESH, "立即刷新", true, None);
+    let ball_menu = Submenu::new("悬浮球", true);
+    let ball_toggle = MenuItem::with_id(
+        MENU_ID_BALL_TOGGLE,
+        if model.ball_visible {
+            "隐藏悬浮球"
+        } else {
+            "显示悬浮球"
+        },
+        true,
+        None,
+    );
+    let edge_hide = MenuItem::with_id(
+        MENU_ID_BALL_EDGE_HIDE,
+        if model.ball_edge_hide {
+            "贴边自动收起：开"
+        } else {
+            "贴边自动收起：关"
+        },
+        true,
+        None,
+    );
+    let target_menu = Submenu::new("主账号 / 主 Key", true);
+    if model.ball_targets.is_empty() {
+        target_menu
+            .append(&MenuItem::with_id(
+                "ball-target-empty",
+                "暂无可用账号",
+                false,
+                None,
+            ))
+            .context("构建悬浮球目标菜单失败")?;
+    } else {
+        for target in &model.ball_targets {
+            let id = format!(
+                "{MENU_ID_BALL_TARGET_PREFIX}{}|{}",
+                target.account_id,
+                target.key_id.as_deref().unwrap_or("")
+            );
+            let label = if target.selected {
+                format!("✓ {}", target.label)
+            } else {
+                format!("  {}", target.label)
+            };
+            target_menu
+                .append(&MenuItem::with_id(id, label, true, None))
+                .context("构建悬浮球目标菜单项失败")?;
+        }
+    }
+    ball_menu
+        .append_items(&[
+            &ball_toggle,
+            &edge_hide,
+            &PredefinedMenuItem::separator(),
+            &target_menu,
+        ])
+        .context("构建悬浮球子菜单失败")?;
+
     let version_item = MenuItem::with_id(
         "version",
         format!("版本 v{}", crate::APP_VERSION),
@@ -280,15 +377,15 @@ pub fn build_menu() -> Result<Menu> {
     );
     let quit_item = MenuItem::with_id(MENU_ID_QUIT, "退出", true, None);
 
-    menu.append(&refresh_item).context("构建托盘菜单失败")?;
-
     menu.append_items(&[
+        &refresh_item,
+        &ball_menu,
         &PredefinedMenuItem::separator(),
         &version_item,
         &PredefinedMenuItem::separator(),
         &quit_item,
     ])
-    .context("构建托盘菜单尾部失败")?;
+    .context("构建托盘菜单失败")?;
 
     Ok(menu)
 }
@@ -307,7 +404,7 @@ pub fn install(bridge: Arc<TrayBridge>) -> Result<TrayHandle> {
     let icon = Icon::from_rgba(rgba, width, height).context("托盘图标 RGBA 数据非法")?;
 
     // 初始菜单没有账号；`app` 拿到数据层后会立刻用真实账号重建一次。
-    let menu = build_menu()?;
+    let menu = build_menu(&TrayMenuModel::default())?;
 
     // ---- 菜单事件 ----
     // 只注册一次：菜单会被整份替换，但 id 规则不变，所以按 id 字符串分发即可。
@@ -317,6 +414,19 @@ pub fn install(bridge: Arc<TrayBridge>) -> Result<TrayHandle> {
         match id {
             MENU_ID_REFRESH => menu_bridge.push(TrayCommand::RefreshNow),
             MENU_ID_QUIT => menu_bridge.push(TrayCommand::Quit),
+            MENU_ID_BALL_TOGGLE => menu_bridge.push(TrayCommand::ToggleFloatingBall),
+            MENU_ID_BALL_EDGE_HIDE => menu_bridge.push(TrayCommand::ToggleFloatingBallEdgeHide),
+            id if id.starts_with(MENU_ID_BALL_TARGET_PREFIX) => {
+                let rest = &id[MENU_ID_BALL_TARGET_PREFIX.len()..];
+                if let Some((account_id, key_id)) = rest.split_once('|')
+                    && !account_id.is_empty()
+                {
+                    menu_bridge.push(TrayCommand::SetFloatingBallTarget {
+                        account_id: account_id.to_owned(),
+                        key_id: (!key_id.is_empty()).then(|| key_id.to_owned()),
+                    });
+                }
+            }
             // 版本项是禁用的，不会产生事件；其它未知 id 直接忽略
             _ => {}
         }

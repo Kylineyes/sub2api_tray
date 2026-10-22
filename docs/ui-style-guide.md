@@ -132,14 +132,22 @@ ui_style::add_enabled_button(ui, enabled, "删除", ButtonTone::Danger, ButtonSi
 * 说明文字使用 `ui_style::hint_label`；
 * 主操作「保存」使用 `ButtonTone::Primary`，次操作「取消」使用 `ButtonTone::Neutral`。
 
-## 九、异步操作
+## 九、悬浮球
+
+- 尺寸 token：`size::FLOATING_BALL_SIZE`
+- 收起宽度：`size::FLOATING_BALL_COLLAPSED_WIDTH`
+- 屏幕边距：`size::FLOATING_BALL_MARGIN`
+- 颜色仍使用 `theme().accent` / `theme().on_accent`
+- 状态点使用 `status_color`
+
+## 十、异步操作
 
 * 写磁盘、注册表、网络请求等可能阻塞的操作不得放在 UI 线程里同步执行；
 * 操作进行中必须展示明确的阻塞式进度弹窗或行内 loading；
 * 进度期间禁用重复提交，不允许 `Esc` 或点击遮罩取消；
 * 设置保存使用「正在保存设置」弹窗，后台线程完成后才关闭设置页。
 
-## 十、交互约定
+## 十一、交互约定
 
 1. Key 的「复制」「调额度」「删除」只在悬浮该 Key 时出现；未悬浮时不保留按钮行高度，保持列表紧凑。
 2. 账号标题行只有折叠箭头和邮箱可触发展开/收起；右侧按钮必须有独立点击热区。
@@ -147,7 +155,7 @@ ui_style::add_enabled_button(ui, enabled, "删除", ButtonTone::Danger, ButtonSi
 4. 所有面向用户的文案使用简体中文。
 5. 不允许在 Label 上拖选文本。
 
-## 十一、开发检查
+## 十二、开发检查
 
 提交前至少执行：
 
