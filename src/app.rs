@@ -290,6 +290,27 @@ struct SettingsSaveResult {
     autostart: bool,
 }
 
+/// 悬浮球主目标：账号余额或某个 API Key 的剩余额度。
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct FloatingBallTarget {
+    /// 账号 id。
+    account_id: String,
+    /// Key id；None 表示展示账号余额。
+    key_id: Option<String>,
+}
+
+/// 悬浮球当前要展示的内容。
+#[derive(Debug, Clone)]
+struct FloatingBallView {
+    /// 正中心大字。
+    text: String,
+    /// 账号状态色。
+    status: AccountStatus,
+}
+
+/// 悬浮球主 Key 的后台刷新周期。
+const FLOATING_BALL_KEY_REFRESH_TTL: Duration = Duration::from_secs(60);
+
 /// 悬浮动画状态：按 key 记录"当前淡入进度"与"上一帧的命中矩形"。
 ///
 /// 为什么不用 egui 自带的 `animate_bool`：它要求稳定的 `Id`，而这里的行是按
@@ -741,6 +762,17 @@ pub struct TrayApp {
     /// 面板是否被钉住（置顶显示，点外部不自动收起）。
     pinned: bool,
 
+    /// 是否显示桌面悬浮球。
+    floating_ball_visible: bool,
+    /// 悬浮球是否启用贴边自动收起。
+    floating_ball_edge_hide: bool,
+    /// 悬浮球主目标。
+    floating_ball_target: Option<FloatingBallTarget>,
+    /// 上一帧鼠标是否在悬浮球上。
+    floating_ball_hovered: bool,
+    /// 主 Key 最近一次刷新时间。
+    floating_ball_key_refresh_at: Option<Instant>,
+
     dark_mode: bool,
 
     /// 每个账号选中的用量区间（默认 24 小时）。
@@ -860,6 +892,25 @@ impl TrayApp {
             DataLayer::Unavailable(_) => false,
         };
 
+        let (floating_ball_visible, floating_ball_edge_hide, floating_ball_target) =
+            match &data {
+                DataLayer::Ready(store) => {
+                    let config = store.config();
+                    let target = config.floating_ball_account_id.as_ref().map(|account_id| {
+                        FloatingBallTarget {
+                            account_id: account_id.clone(),
+                            key_id: config.floating_ball_api_key_id.clone(),
+                        }
+                    });
+                    (
+                        config.floating_ball_visible,
+                        config.floating_ball_edge_hide,
+                        target,
+                    )
+                }
+                DataLayer::Unavailable(_) => (false, true, None),
+            };
+
         let bridge = TrayBridge::new(cc.egui_ctx.clone());
         let tray = crate::tray::install(Arc::clone(&bridge))?;
 
@@ -898,6 +949,11 @@ impl TrayApp {
             account_keys: HashMap::new(),
             keys_rx: HashMap::new(),
             pinned,
+            floating_ball_visible,
+            floating_ball_edge_hide,
+            floating_ball_target,
+            floating_ball_hovered: false,
+            floating_ball_key_refresh_at: None,
             dark_mode,
             usage_range: HashMap::new(),
             usage_metric: HashMap::new(),
@@ -945,7 +1001,7 @@ impl TrayApp {
     fn rebuild_menu(&self) {
         // 账号不再进原生菜单（Windows/macOS 的系统菜单既不能滚动也不能展开），
         // 菜单只保留固定入口；账号的一切操作都在面板里完成。
-        match crate::tray::build_menu() {
+        match crate::tray::build_menu(&self.tray_menu_model()) {
             Ok(menu) => self.tray.set_menu(menu),
             Err(err) => log::warn!("重建托盘菜单失败：{err:#}"),
         }
@@ -1108,6 +1164,319 @@ impl TrayApp {
     }
 
     /// 处理本帧从托盘收到的指令。
+    /// 构建托盘菜单里的悬浮球目标列表。
+    fn tray_menu_model(&self) -> crate::tray::TrayMenuModel {
+        let mut targets = Vec::new();
+        let DataLayer::Ready(store) = &self.data else {
+            return crate::tray::TrayMenuModel {
+                ball_visible: self.floating_ball_visible,
+                ball_edge_hide: self.floating_ball_edge_hide,
+                ball_targets: targets,
+            };
+        };
+
+        for account in store.accounts() {
+            let account_label = if account.provider == AccountProvider::DeepSeekPlatform {
+                format!("{} · 余额", account.email)
+            } else {
+                store.display_email(&account.email)
+            };
+            let account_selected = self
+                .floating_ball_target
+                .as_ref()
+                .is_some_and(|target| target.account_id == account.id && target.key_id.is_none());
+            targets.push(crate::tray::BallTargetMenuItem {
+                account_id: account.id.clone(),
+                key_id: None,
+                label: account_label,
+                selected: account_selected,
+            });
+
+            let keys = self
+                .account_keys
+                .get(&account.id)
+                .map(|state| state.keys.clone())
+                .unwrap_or_else(|| self.cached_api_keys(&account.id));
+            for key in keys {
+                let selected = self.floating_ball_target.as_ref().is_some_and(|target| {
+                    target.account_id == account.id
+                        && target.key_id.as_deref() == Some(key.id.as_str())
+                });
+                targets.push(crate::tray::BallTargetMenuItem {
+                    account_id: account.id.clone(),
+                    key_id: Some(key.id.clone()),
+                    label: format!("{}  {}", key.name, key.masked),
+                    selected,
+                });
+            }
+        }
+
+        crate::tray::TrayMenuModel {
+            ball_visible: self.floating_ball_visible,
+            ball_edge_hide: self.floating_ball_edge_hide,
+            ball_targets: targets,
+        }
+    }
+
+    /// 把悬浮球配置写回 app.json。
+    fn persist_floating_ball_settings(&mut self) {
+        let DataLayer::Ready(store) = &mut self.data else {
+            return;
+        };
+        let mut config = store.config().clone();
+        config.floating_ball_visible = self.floating_ball_visible;
+        config.floating_ball_edge_hide = self.floating_ball_edge_hide;
+        config.floating_ball_account_id = self
+            .floating_ball_target
+            .as_ref()
+            .map(|target| target.account_id.clone());
+        config.floating_ball_api_key_id = self
+            .floating_ball_target
+            .as_ref()
+            .and_then(|target| target.key_id.clone());
+        if let Err(err) = crate::config::save(store.dir(), &config) {
+            log::warn!("保存悬浮球配置失败：{err:#}");
+        } else {
+            *store.config_mut() = config;
+        }
+    }
+
+    /// 选一个默认悬浮球目标（第一个账号）。
+    fn choose_default_floating_ball_target(&mut self) {
+        if self.floating_ball_target.is_some() {
+            return;
+        }
+        let account_id = match &self.data {
+            DataLayer::Ready(store) => store.accounts().first().map(|item| item.id.clone()),
+            DataLayer::Unavailable(_) => None,
+        };
+        if let Some(account_id) = account_id {
+            self.floating_ball_target = Some(FloatingBallTarget {
+                account_id,
+                key_id: None,
+            });
+        }
+    }
+
+    /// 设置悬浮球主目标，并立即拉一轮数据。
+    fn set_floating_ball_target(
+        &mut self,
+        ctx: &egui::Context,
+        account_id: String,
+        key_id: Option<String>,
+    ) {
+        self.floating_ball_target = Some(FloatingBallTarget {
+            account_id: account_id.clone(),
+            key_id: key_id.clone(),
+        });
+        self.floating_ball_visible = true;
+        self.floating_ball_key_refresh_at = key_id.as_ref().map(|_| Instant::now());
+        self.persist_floating_ball_settings();
+        self.rebuild_menu();
+        self.try_start_refresh(ctx, true);
+        if key_id.is_some() {
+            self.request_account_keys(ctx, &account_id);
+        }
+        ctx.request_repaint();
+    }
+
+    /// 悬浮球主 Key 的后台刷新；账号余额由现有状态刷新链更新。
+    fn maybe_refresh_floating_ball_data(&mut self, ctx: &egui::Context) {
+        if !self.floating_ball_visible {
+            return;
+        }
+        let Some(target) = self.floating_ball_target.clone() else {
+            return;
+        };
+        if target.key_id.is_none() {
+            return;
+        }
+        let due = self
+            .floating_ball_key_refresh_at
+            .map(|at| at.elapsed() >= FLOATING_BALL_KEY_REFRESH_TTL)
+            .unwrap_or(true);
+        if due && !self.keys_rx.contains_key(&target.account_id) {
+            self.floating_ball_key_refresh_at = Some(Instant::now());
+            self.request_account_keys(ctx, &target.account_id);
+        }
+    }
+
+    /// 计算悬浮球当前展示内容。
+    fn floating_ball_view(&self) -> FloatingBallView {
+        let status = self
+            .floating_ball_target
+            .as_ref()
+            .and_then(|target| self.runtime.get(&target.account_id))
+            .map(|runtime| runtime.status)
+            .unwrap_or(AccountStatus::Unknown);
+        let Some(target) = self.floating_ball_target.as_ref() else {
+            return FloatingBallView {
+                text: "设置".to_owned(),
+                status,
+            };
+        };
+        let DataLayer::Ready(store) = &self.data else {
+            return FloatingBallView {
+                text: "--".to_owned(),
+                status,
+            };
+        };
+        let Some(account) = store
+            .accounts()
+            .iter()
+            .find(|item| item.id == target.account_id)
+        else {
+            return FloatingBallView {
+                text: "失效".to_owned(),
+                status,
+            };
+        };
+
+        if let Some(key_id) = target.key_id.as_ref() {
+            let key = self
+                .account_keys
+                .get(&account.id)
+                .and_then(|state| state.keys.iter().find(|key| key.id == *key_id))
+                .cloned()
+                .or_else(|| {
+                    self.cached_api_keys(&account.id)
+                        .into_iter()
+                        .find(|key| key.id == *key_id)
+                });
+            if let Some(key) = key {
+                let text = match key.quota {
+                    Some(quota) if quota > 0.0 => {
+                        format!("${:.2}", (quota - key.quota_used.unwrap_or(0.0)).max(0.0))
+                    }
+                    _ => "不限".to_owned(),
+                };
+                return FloatingBallView { text, status };
+            }
+            return FloatingBallView {
+                text: "--".to_owned(),
+                status,
+            };
+        }
+
+        let balance = self
+            .runtime
+            .get(&account.id)
+            .and_then(|runtime| runtime.balance);
+        let text = balance
+            .map(|value| {
+                if account.provider == AccountProvider::DeepSeekPlatform {
+                    format!("¥{value:.2}")
+                } else {
+                    format!("${value:.2}")
+                }
+            })
+            .unwrap_or_else(|| "--".to_owned());
+        FloatingBallView { text, status }
+    }
+
+    /// 绘制并处理桌面悬浮球窗口。
+    fn render_floating_ball(&mut self, ctx: &egui::Context) {
+        if !self.floating_ball_visible {
+            return;
+        }
+        let view = self.floating_ball_view();
+        let expanded = !self.floating_ball_edge_hide || self.floating_ball_hovered;
+        let width = ui_style::size::FLOATING_BALL_SIZE;
+        let monitor = ctx
+            .input(|i| i.viewport().monitor_size)
+            .unwrap_or(egui::vec2(1920.0, 1080.0));
+        let position = egui::pos2(
+            (monitor.x - width - ui_style::size::FLOATING_BALL_MARGIN).max(0.0),
+            ((monitor.y - ui_style::size::FLOATING_BALL_SIZE) * 0.5).max(0.0),
+        );
+        let viewport_id = egui::ViewportId::from_hash_of("floating-ball");
+        let builder = egui::ViewportBuilder::default()
+            .with_title("用量统计悬浮球")
+            .with_inner_size([width, ui_style::size::FLOATING_BALL_SIZE])
+            .with_min_inner_size([width, ui_style::size::FLOATING_BALL_SIZE])
+            .with_decorations(false)
+            .with_transparent(true)
+            .with_always_on_top()
+            .with_taskbar(false)
+            .with_resizable(false)
+            .with_position(position);
+
+        let mut clicked = false;
+        let mut hovered = false;
+        let mut close_requested = false;
+        ctx.show_viewport_immediate(viewport_id, builder, |ui, _class| {
+            let child_ctx = ui.ctx().clone();
+            close_requested = child_ctx.input(|i| i.viewport().close_requested());
+            egui::CentralPanel::default()
+                .frame(egui::Frame::NONE.fill(egui::Color32::TRANSPARENT))
+                .show(ui, |ui| {
+                    ui.set_min_size(egui::vec2(width, ui_style::size::FLOATING_BALL_SIZE));
+                    let (rect, response) = ui.allocate_exact_size(
+                        egui::vec2(width, ui_style::size::FLOATING_BALL_SIZE),
+                        egui::Sense::click(),
+                    );
+                    let painter = ui.painter();
+                    if expanded {
+                        let center = rect.center();
+                        painter.circle_filled(
+                            center,
+                            ui_style::size::FLOATING_BALL_SIZE * 0.5 - 2.0,
+                            theme().accent,
+                        );
+                        painter.circle_stroke(
+                            center,
+                            ui_style::size::FLOATING_BALL_SIZE * 0.5 - 2.0,
+                            egui::Stroke::new(1.0, theme().on_accent),
+                        );
+                        painter.text(
+                            center,
+                            egui::Align2::CENTER_CENTER,
+                            &view.text,
+                            egui::FontId::proportional(font::BODY_SMALL_PLUS),
+                            theme().on_accent,
+                        );
+                        painter.circle_filled(
+                            rect.right_bottom() - egui::vec2(12.0, 12.0),
+                            4.0,
+                            status_color(view.status),
+                        );
+                    } else {
+                        let tab = egui::Rect::from_min_max(
+                            egui::pos2(
+                                rect.right() - ui_style::size::FLOATING_BALL_COLLAPSED_WIDTH,
+                                rect.top() + 4.0,
+                            ),
+                            rect.right_bottom() - egui::vec2(0.0, 4.0),
+                        );
+                        painter.rect_filled(
+                            tab,
+                            egui::CornerRadius::same(ui_style::size::RADIUS_LG),
+                            theme().accent,
+                        );
+                        painter.circle_filled(tab.center(), 3.0, status_color(view.status));
+                    }
+                    let response = response.on_hover_cursor(egui::CursorIcon::PointingHand);
+                    hovered = response.hovered();
+                    if response.clicked() {
+                        clicked = true;
+                    }
+                });
+        });
+
+        if close_requested {
+            self.floating_ball_visible = false;
+            self.persist_floating_ball_settings();
+            self.rebuild_menu();
+        }
+        if hovered != self.floating_ball_hovered {
+            self.floating_ball_hovered = hovered;
+            ctx.request_repaint();
+        }
+        if clicked {
+            self.show_panel(ctx);
+        }
+    }
+
     fn handle_tray_commands(&mut self, ctx: &egui::Context) {
         for command in self.bridge.drain() {
             match command {
@@ -1128,6 +1497,25 @@ impl TrayApp {
                 TrayCommand::Quit => {
                     log::info!("收到退出指令，关闭应用");
                     ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                }
+                TrayCommand::ToggleFloatingBall => {
+                    self.floating_ball_visible = !self.floating_ball_visible;
+                    if self.floating_ball_visible {
+                        self.choose_default_floating_ball_target();
+                        self.try_start_refresh(ctx, true);
+                    }
+                    self.persist_floating_ball_settings();
+                    self.rebuild_menu();
+                    ctx.request_repaint();
+                }
+                TrayCommand::ToggleFloatingBallEdgeHide => {
+                    self.floating_ball_edge_hide = !self.floating_ball_edge_hide;
+                    self.persist_floating_ball_settings();
+                    self.rebuild_menu();
+                    ctx.request_repaint();
+                }
+                TrayCommand::SetFloatingBallTarget { account_id, key_id } => {
+                    self.set_floating_ball_target(ctx, account_id, key_id);
                 }
             }
         }
@@ -1465,6 +1853,8 @@ impl TrayApp {
         if changed {
             // 有位置空出来后补上剩余展开账号，保持最多 4 个请求并行。
             self.request_next_keys(ctx);
+            // Key 列表变化会影响托盘的「主账号 / 主 Key」菜单。
+            self.rebuild_menu();
             ctx.request_repaint();
         }
     }
@@ -4276,6 +4666,8 @@ impl eframe::App for TrayApp {
         self.poll_create_key(ctx);
         self.poll_autostart(ctx);
         self.poll_settings_save(ctx);
+        self.maybe_refresh_floating_ball_data(ctx);
+        self.render_floating_ball(ctx);
         self.poll_update(ctx);
         self.maybe_start_refresh(ctx);
         self.handle_focus(ctx);
