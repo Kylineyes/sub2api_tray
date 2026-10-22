@@ -2566,162 +2566,173 @@ impl TrayApp {
                 });
                 ui.add_space(ui_style::space::LG);
 
-                ui_style::section_frame().show(ui, |ui| {
-                    ui.set_width(ui.available_width());
-                    ui_style::section_title(ui, "外观");
-                    ui.add_space(ui_style::space::XS);
+                let scroll_max_height = (ctx.content_rect().height()
+                    - ui_style::size::SETTINGS_SCROLL_RESERVED)
+                    .max(ui_style::size::SETTINGS_SCROLL_MIN);
+                egui::ScrollArea::vertical()
+                    .id_salt("settings-scroll")
+                    .max_height(scroll_max_height)
+                    .auto_shrink([false, true])
+                    .show(ui, |ui| {
+                        ui.set_width(ui.available_width());
 
-                    ui.horizontal(|ui| {
-                        ui_style::field_label(ui, "主题");
-                        let light_text = egui::RichText::new("日间").size(font::BODY).color(
-                            if draft.dark_mode {
-                                theme().text_secondary
-                            } else {
-                                theme().on_accent
-                            },
-                        );
-                        if ui
-                            .add(ui_style::rich_button(
-                                light_text,
-                                if draft.dark_mode {
-                                    ButtonTone::Ghost
-                                } else {
-                                    ButtonTone::Primary
-                                },
-                                ButtonSize::Auto,
-                            ))
-                            .clicked()
-                        {
-                            draft.dark_mode = false;
-                            preview_dark_mode = Some(false);
-                        }
-                        let dark_text = egui::RichText::new("夜间").size(font::BODY).color(
-                            if draft.dark_mode {
-                                theme().on_accent
-                            } else {
-                                theme().text_secondary
-                            },
-                        );
-                        if ui
-                            .add(ui_style::rich_button(
-                                dark_text,
-                                if draft.dark_mode {
-                                    ButtonTone::Primary
-                                } else {
-                                    ButtonTone::Ghost
-                                },
-                                ButtonSize::Auto,
-                            ))
-                            .clicked()
-                        {
-                            draft.dark_mode = true;
-                            preview_dark_mode = Some(true);
-                        }
-                    });
-                });
-                ui.add_space(ui_style::space::MD);
+                        ui_style::section_frame().show(ui, |ui| {
+                            ui.set_width(ui.available_width());
+                            ui_style::section_title(ui, "外观");
+                            ui.add_space(ui_style::space::XS);
 
-                ui_style::section_frame().show(ui, |ui| {
-                    ui.set_width(ui.available_width());
-                    ui_style::section_title(ui, "账号与启动");
-                    ui.add_space(ui_style::space::XS);
-                    ui.checkbox(
-                        &mut draft.mask_accounts,
-                        egui::RichText::new("账号名打码显示（只影响界面）")
-                            .size(font::BODY)
-                            .color(theme().text_primary),
-                    );
-                    ui.add_space(ui_style::space::XS);
-                    if autostart_known {
-                        ui.checkbox(
-                            &mut draft.autostart,
-                            egui::RichText::new("开机自动启动（登录时运行）")
-                                .size(font::BODY)
-                                .color(theme().text_primary),
-                        );
-                    } else {
-                        ui.horizontal(|ui| {
-                            ui.spinner();
-                            ui_style::hint_label(ui, "正在读取开机自启状态…");
-                        });
-                    }
-                });
-                ui.add_space(ui_style::space::MD);
-
-                ui_style::section_frame().show(ui, |ui| {
-                    ui.set_width(ui.available_width());
-                    ui_style::section_title(ui, "刷新与网络");
-                    ui.add_space(ui_style::space::XS);
-                    ui.horizontal(|ui| {
-                        ui_style::field_label(ui, "状态刷新间隔");
-                        ui_style::drag_number(
-                            ui,
-                            &mut draft.refresh_interval_seconds,
-                            30..=86400,
-                            " 秒",
-                            10.0,
-                        );
-                    });
-                    ui.add_space(ui_style::space::XS);
-                    ui.horizontal(|ui| {
-                        ui_style::field_label(ui, "请求超时");
-                        ui_style::drag_number(
-                            ui,
-                            &mut draft.request_timeout_seconds,
-                            1..=120,
-                            " 秒",
-                            1.0,
-                        );
-                    });
-                });
-                ui.add_space(ui_style::space::MD);
-
-                ui_style::section_frame().show(ui, |ui| {
-                    ui.set_width(ui.available_width());
-                    ui_style::section_title(ui, "版本更新");
-                    ui.add_space(ui_style::space::XS);
-                    ui.horizontal(|ui| {
-                        if ui_style::add_button(
-                            ui,
-                            "检查更新",
-                            ButtonTone::Neutral,
-                            ButtonSize::Header,
-                        )
-                        .clicked()
-                        {
-                            check_update = true;
-                        }
-                        if update_checking {
-                            ui.spinner();
-                            ui_style::hint_label(ui, "检查中…");
-                        }
-                    });
-                    if let Some(message) = update_result.as_deref() {
-                        ui_style::hint_label(ui, message);
-                    }
-                    if let Some(url) = update_url.as_deref() {
-                        ui.add(
-                            egui::Hyperlink::from_label_and_url(
-                                egui::RichText::new("点击进入下载最新版本")
+                            ui.horizontal(|ui| {
+                                ui_style::field_label(ui, "主题");
+                                let light_text = egui::RichText::new("日间")
                                     .size(font::BODY)
-                                    .color(theme().accent),
-                                url,
-                            )
-                            .open_in_new_tab(true),
-                        );
-                        ui_style::hint_label(ui, url);
-                        if ui_style::add_button(
-                            ui,
-                            "复制下载链接",
-                            ButtonTone::Neutral,
-                            ButtonSize::Wide,
-                        )
-                        .clicked()
-                        {
-                            copy_update_url = Some(url.to_owned());
-                        }
-                    }
-                });
+                                    .color(if draft.dark_mode {
+                                        theme().text_secondary
+                                    } else {
+                                        theme().on_accent
+                                    });
+                                if ui
+                                    .add(ui_style::rich_button(
+                                        light_text,
+                                        if draft.dark_mode {
+                                            ButtonTone::Ghost
+                                        } else {
+                                            ButtonTone::Primary
+                                        },
+                                        ButtonSize::Auto,
+                                    ))
+                                    .clicked()
+                                {
+                                    draft.dark_mode = false;
+                                    preview_dark_mode = Some(false);
+                                }
+                                let dark_text = egui::RichText::new("夜间").size(font::BODY).color(
+                                    if draft.dark_mode {
+                                        theme().on_accent
+                                    } else {
+                                        theme().text_secondary
+                                    },
+                                );
+                                if ui
+                                    .add(ui_style::rich_button(
+                                        dark_text,
+                                        if draft.dark_mode {
+                                            ButtonTone::Primary
+                                        } else {
+                                            ButtonTone::Ghost
+                                        },
+                                        ButtonSize::Auto,
+                                    ))
+                                    .clicked()
+                                {
+                                    draft.dark_mode = true;
+                                    preview_dark_mode = Some(true);
+                                }
+                            });
+                        });
+                        ui.add_space(ui_style::space::MD);
+
+                        ui_style::section_frame().show(ui, |ui| {
+                            ui.set_width(ui.available_width());
+                            ui_style::section_title(ui, "账号与启动");
+                            ui.add_space(ui_style::space::XS);
+                            ui.checkbox(
+                                &mut draft.mask_accounts,
+                                egui::RichText::new("账号名打码显示（只影响界面）")
+                                    .size(font::BODY)
+                                    .color(theme().text_primary),
+                            );
+                            ui.add_space(ui_style::space::XS);
+                            if autostart_known {
+                                ui.checkbox(
+                                    &mut draft.autostart,
+                                    egui::RichText::new("开机自动启动（登录时运行）")
+                                        .size(font::BODY)
+                                        .color(theme().text_primary),
+                                );
+                            } else {
+                                ui.horizontal(|ui| {
+                                    ui.spinner();
+                                    ui_style::hint_label(ui, "正在读取开机自启状态…");
+                                });
+                            }
+                        });
+                        ui.add_space(ui_style::space::MD);
+
+                        ui_style::section_frame().show(ui, |ui| {
+                            ui.set_width(ui.available_width());
+                            ui_style::section_title(ui, "刷新与网络");
+                            ui.add_space(ui_style::space::XS);
+                            ui.horizontal(|ui| {
+                                ui_style::field_label(ui, "状态刷新间隔");
+                                ui_style::drag_number(
+                                    ui,
+                                    &mut draft.refresh_interval_seconds,
+                                    30..=86400,
+                                    " 秒",
+                                    10.0,
+                                );
+                            });
+                            ui.add_space(ui_style::space::XS);
+                            ui.horizontal(|ui| {
+                                ui_style::field_label(ui, "请求超时");
+                                ui_style::drag_number(
+                                    ui,
+                                    &mut draft.request_timeout_seconds,
+                                    1..=120,
+                                    " 秒",
+                                    1.0,
+                                );
+                            });
+                        });
+                        ui.add_space(ui_style::space::MD);
+
+                        ui_style::section_frame().show(ui, |ui| {
+                            ui.set_width(ui.available_width());
+                            ui_style::section_title(ui, "版本更新");
+                            ui.add_space(ui_style::space::XS);
+                            ui.horizontal(|ui| {
+                                if ui_style::add_button(
+                                    ui,
+                                    "检查更新",
+                                    ButtonTone::Neutral,
+                                    ButtonSize::Header,
+                                )
+                                .clicked()
+                                {
+                                    check_update = true;
+                                }
+                                if update_checking {
+                                    ui.spinner();
+                                    ui_style::hint_label(ui, "检查中…");
+                                }
+                            });
+                            if let Some(message) = update_result.as_deref() {
+                                ui_style::hint_label(ui, message);
+                            }
+                            if let Some(url) = update_url.as_deref() {
+                                ui.add(
+                                    egui::Hyperlink::from_label_and_url(
+                                        egui::RichText::new("点击进入下载最新版本")
+                                            .size(font::BODY)
+                                            .color(theme().accent),
+                                        url,
+                                    )
+                                    .open_in_new_tab(true),
+                                );
+                                ui_style::hint_label(ui, url);
+                                if ui_style::add_button(
+                                    ui,
+                                    "复制下载链接",
+                                    ButtonTone::Neutral,
+                                    ButtonSize::Wide,
+                                )
+                                .clicked()
+                                {
+                                    copy_update_url = Some(url.to_owned());
+                                }
+                            }
+                        });
+                    });
 
                 ui.add_space(ui_style::space::LG);
                 ui.horizontal(|ui| {
