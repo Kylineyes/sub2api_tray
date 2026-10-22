@@ -1,0 +1,62 @@
+{
+  "trend": [
+    {
+      "date": "2026-10-21 16:00",
+      "requests": 12,
+      "input_tokens": 18000,
+      "output_tokens": 7000,
+      "cache_creation_tokens": 2000,
+      "cache_read_tokens": 9000,
+      "total_tokens": 36000,
+      "cost": 0.08,
+      "actual_cost": 0.06
+    },
+    {
+      "date": "2026-10-21 18:00",
+      "requests": 25,
+      "input_tokens": 32000,
+      "output_tokens": 14000,
+      "cache_creation_tokens": 4000,
+      "cache_read_tokens": 16000,
+      "total_tokens": 66000,
+      "cost": 0.16,
+      "actual_cost": 0.12
+    },
+    {
+      "date": "2026-10-21 20:00",
+      "requests": 41,
+      "input_tokens": 52000,
+      "output_tokens": 22000,
+      "cache_creation_tokens": 8000,
+      "cache_read_tokens": 26000,
+      "total_tokens": 108000,
+      "cost": 0.27,
+      "actual_cost": 0.21
+    },
+    {
+      "date": "2026-10-21 22:00",
+      "requests": 36,
+      "input_tokens": 48000,
+      "output_tokens": 19000,
+      "cache_creation_tokens": 6000,
+      "cache_read_tokens": 21000,
+      "total_tokens": 94000,
+      "cost": 0.24,
+      "actual_cost": 0.18
+    },
+    {
+      "date": "2026-10-22 00:00",
+      "requests": 53,
+      "input_tokens": 69000,
+      "output_tokens": 31000,
+      "cache_creation_tokens": 9000,
+      "cache_read_tokens": 33000,
+      "total_tokens": 142000,
+      "cost": 0.35,
+      "actual_cost": 0.28
+    }
+  ],
+  "start_date": "2026-10-21",
+  "end_date": "2026-10-22",
+  "granularity": "hour"
+}

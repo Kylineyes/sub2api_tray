@@ -45,6 +45,9 @@ mod tray;
 mod ui_style;
 mod update;
 
+#[cfg(test)]
+mod test_fixtures;
+
 /// 应用显示名称：同时用作窗口标题和托盘提示文字的前缀。
 pub const APP_NAME: &str = "用量统计托盘";
 

@@ -1,0 +1,53 @@
+{
+  "schemaVersion": 1,
+  "accounts": [
+    {
+      "id": "11111111-1111-4111-8111-111111111111",
+      "provider": "sub2Api",
+      "baseUrl": "http://127.0.0.1:18080",
+      "email": "demo@example.com",
+      "role": "user",
+      "secrets": "__SECRET__",
+      "createdAt": "2026-10-21T00:00:00Z",
+      "lastLoginAt": "2026-10-21T00:00:00Z",
+      "tokenExpiresAt": "2026-10-23T00:00:00Z",
+      "expanded": true,
+      "apiKeys": [
+        {
+          "id": "101",
+          "name": "Demo Key A",
+          "maskedKey": "sk-d...cdef",
+          "status": "active",
+          "groupName": "Demo Group",
+          "lastUsedAt": "2026-10-22T00:20:00Z",
+          "quota": 100.0,
+          "quotaUsed": 12.3456,
+          "usage5h": 1.25,
+          "usage1d": 4.5,
+          "usage7d": 9.75,
+          "rateLimit5h": 50.0,
+          "rateLimit1d": 200.0,
+          "rateLimit7d": 0.0,
+          "fetchedAt": "2026-10-22T00:25:00Z"
+        },
+        {
+          "id": "102",
+          "name": "Demo Key B",
+          "maskedKey": "sk-d...9f2c",
+          "status": "active",
+          "groupName": "Demo Group",
+          "lastUsedAt": "2026-10-21T23:50:00Z",
+          "quota": 0.0,
+          "quotaUsed": 3.21,
+          "usage5h": 0.0,
+          "usage1d": 0.0,
+          "usage7d": 0.0,
+          "rateLimit5h": 0.0,
+          "rateLimit1d": 0.0,
+          "rateLimit7d": 0.0,
+          "fetchedAt": "2026-10-22T00:25:00Z"
+        }
+      ]
+    }
+  ]
+}
