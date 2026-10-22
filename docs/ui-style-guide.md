@@ -123,15 +123,31 @@ ui_style::add_enabled_button(ui, enabled, "删除", ButtonTone::Danger, ButtonSi
 - 用户选择的是本地时间，提交前通过 `jiff::tz::TimeZone::system()` 转成 RFC3339；
 - 不要再让用户手填 RFC3339 字符串。
 
-## 八、交互约定
+## 八、设置页
 
-1. Key 的「复制」「调额度」「删除」只在悬浮该 Key 时出现。
+* 使用 `ui_style::modal_frame` 和 `ui_style::section_frame`；
+* 分组标题使用 `ui_style::section_title`；
+* 字段标签使用 `ui_style::field_label`；
+* 数字输入使用 `ui_style::drag_number`，宽度为 `size::NUMBER_INPUT_WIDTH`；
+* 说明文字使用 `ui_style::hint_label`；
+* 主操作「保存」使用 `ButtonTone::Primary`，次操作「取消」使用 `ButtonTone::Neutral`。
+
+## 九、异步操作
+
+* 写磁盘、注册表、网络请求等可能阻塞的操作不得放在 UI 线程里同步执行；
+* 操作进行中必须展示明确的阻塞式进度弹窗或行内 loading；
+* 进度期间禁用重复提交，不允许 `Esc` 或点击遮罩取消；
+* 设置保存使用「正在保存设置」弹窗，后台线程完成后才关闭设置页。
+
+## 十、交互约定
+
+1. Key 的「复制」「调额度」「删除」只在悬浮该 Key 时出现；未悬浮时不保留按钮行高度，保持列表紧凑。
 2. 账号标题行只有折叠箭头和邮箱可触发展开/收起；右侧按钮必须有独立点击热区。
 3. 危险操作必须有二次确认。
 4. 所有面向用户的文案使用简体中文。
 5. 不允许在 Label 上拖选文本。
 
-## 九、开发检查
+## 十一、开发检查
 
 提交前至少执行：
 
