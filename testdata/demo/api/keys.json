@@ -1,0 +1,37 @@
+{
+  "items": [
+    {
+      "id": 101,
+      "name": "Demo Key A",
+      "key": "sk-demo-101-cdef",
+      "status": "active",
+      "group_name": "Demo Group",
+      "quota": 100.0,
+      "quota_used": 12.3456,
+      "usage_5h": 1.25,
+      "usage_1d": 4.5,
+      "usage_7d": 9.75,
+      "rate_limit_5h": 50.0,
+      "rate_limit_1d": 200.0,
+      "rate_limit_7d": 0.0,
+      "last_used_at": "2026-10-22T00:20:00Z"
+    },
+    {
+      "id": 102,
+      "name": "Demo Key B",
+      "key": "sk-demo-102-9f2c",
+      "status": "active",
+      "group_name": "Demo Group",
+      "quota": 0.0,
+      "quota_used": 3.21,
+      "usage_5h": 0.0,
+      "usage_1d": 0.0,
+      "usage_7d": 0.0,
+      "rate_limit_5h": 0.0,
+      "rate_limit_1d": 0.0,
+      "rate_limit_7d": 0.0,
+      "last_used_at": "2026-10-21T23:50:00Z"
+    }
+  ],
+  "total": 2
+}

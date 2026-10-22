@@ -35,6 +35,7 @@
 | 7 | v0.4.2 发布：设置页重设计、异步保存进度弹窗、Key 列表紧凑布局 | ✅ 已完成（0030，已合入 dev） |
 | 8 | DeepSeek 官方账号：登录来源下拉、API Key 登录、余额刷新、面板专属展示 | ✅ 已完成（0032） |
 | 9 | v0.4.3 发布：DeepSeek 官方账号、账号来源提示、设置页滚动与图钉说明 | ✅ 已完成（0032/0033，已合入 dev） |
+| 10 | 桌面悬浮球：托盘菜单开关与主账号/主 Key 选择、置顶常驻、贴边收起、后台刷新 | ✅ 已完成（0034） |
 
 **现阶段明确的非目标**（不要顺手做）：
 
@@ -89,6 +90,10 @@ sub2api_tray/
 ├── .github/
 │   └── workflows/
 │       └── release-windows.yml  # 发布流水线：v* tag → Windows x64 产物挂 Release
+├── testdata/
+│   └── demo/                 # 唯一演示账号与展示夹具（截图/验收复用）
+├── scripts/
+│   └── demo/                 # 演示数据生成与假 Sub2API 服务
 ├── docs/
 │   ├── panel-preview.png     # 面板截图（README 引用）
 │   ├── ui-style-guide.md     # UI 样式子规范（颜色/字号/按钮/间距）
@@ -176,6 +181,10 @@ sub2api_tray/
 * **UI 样式**：颜色、字号、按钮、圆角和边距统一从 `ui_style.rs` 取 token；
   禁止在绘制代码里直接写 `Color32::from_rgb`、`.size(12.0)`、`Button::new` 或
   `add_sized([...])`。完整规范见 [`docs/ui-style-guide.md`](docs/ui-style-guide.md)。
+* **演示账号与展示夹具**：所有 README 截图、UI 验收和手工演示统一使用
+  [`testdata/demo`](testdata/demo/README.md) 的固定演示账号与数据，不要另造一套；
+  生成脚本见 `scripts/demo/make_demo.ps1`，假服务见 `scripts/demo/fake_server.py`。
+  需要更多展示数据时继续填充现有 JSON，并由 `src/test_fixtures.rs` 保持关键字段稳定。
 * **依赖**：新增依赖需要在本文件“技术栈”表中登记，并说明用途；
   能用标准库解决的不加 crate。
 * **定时任务（重要坑）**：eframe 是**按需重绘**的，空闲时不会再调用 `App::logic`。
@@ -458,3 +467,5 @@ cargo build --release                  # 产物：target/release/sub2api_tray
 | 2026-10-22 | 兼容字符串业务码 | 后端 `code` 字段可能返回 `UNAUTHORIZED` / `TOKEN_EXPIRED` 等字符串；统一映射到 401/403/404/429/500，避免误判为不是 Sub2API 实例并恢复 token 续期链 |
 | 2026-10-23 | DeepSeek 官方账号支持 | 新增 `AccountProvider`（旧账号默认 Sub2API）；登录弹窗支持来源下拉；DeepSeek 官方使用 API Key 校验与余额接口；面板隐藏不适用的 Key 列表和用量曲线 |
 | 2026-10-23 | 发布 v0.4.3 | 版本升至 0.4.3；汇总 DeepSeek 官方账号、账号来源悬浮说明、设置页滚动与图钉语义说明 |
+| 2026-10-23 | 固化演示账号与展示夹具 | 新增 `testdata/demo`、演示数据生成脚本和假 Sub2API 服务；AGENTS 强制后续截图与验收复用同一套演示账号，并增加夹具回归测试 |
+| 2026-10-23 | 桌面悬浮球 | 托盘菜单支持显示/隐藏悬浮球与选择主账号/主 Key；新增独立置顶视图、贴边收起、左键打开面板、后台刷新和配置持久化 |

@@ -1,0 +1,10 @@
+{
+  "active_count": 1,
+  "total_used_usd": 8.75,
+  "subscriptions": [
+    {
+      "group_name": "Demo Group",
+      "status": "active"
+    }
+  ]
+}
