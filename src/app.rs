@@ -1407,60 +1407,58 @@ impl TrayApp {
         ctx.show_viewport_immediate(viewport_id, builder, |ui, _class| {
             let child_ctx = ui.ctx().clone();
             close_requested = child_ctx.input(|i| i.viewport().close_requested());
-            egui::CentralPanel::default()
-                .frame(egui::Frame::NONE.fill(egui::Color32::TRANSPARENT))
-                .show(ui, |ui| {
-                    ui.set_min_size(egui::vec2(width, ui_style::size::FLOATING_BALL_SIZE));
-                    let (rect, response) = ui.allocate_exact_size(
-                        egui::vec2(width, ui_style::size::FLOATING_BALL_SIZE),
-                        egui::Sense::click(),
-                    );
-                    let painter = ui.painter();
-                    if expanded {
-                        let center = rect.center();
-                        painter.circle_filled(
-                            center,
-                            ui_style::size::FLOATING_BALL_SIZE * 0.5 - 2.0,
-                            theme().accent,
-                        );
-                        painter.circle_stroke(
-                            center,
-                            ui_style::size::FLOATING_BALL_SIZE * 0.5 - 2.0,
-                            egui::Stroke::new(1.0, theme().on_accent),
-                        );
-                        painter.text(
-                            center,
-                            egui::Align2::CENTER_CENTER,
-                            &view.text,
-                            egui::FontId::proportional(font::BODY_SMALL_PLUS),
-                            theme().on_accent,
-                        );
-                        painter.circle_filled(
-                            rect.right_bottom() - egui::vec2(12.0, 12.0),
-                            4.0,
-                            status_color(view.status),
-                        );
-                    } else {
-                        let tab = egui::Rect::from_min_max(
-                            egui::pos2(
-                                rect.right() - ui_style::size::FLOATING_BALL_COLLAPSED_WIDTH,
-                                rect.top() + 4.0,
-                            ),
-                            rect.right_bottom() - egui::vec2(0.0, 4.0),
-                        );
-                        painter.rect_filled(
-                            tab,
-                            egui::CornerRadius::same(ui_style::size::RADIUS_LG),
-                            theme().accent,
-                        );
-                        painter.circle_filled(tab.center(), 3.0, status_color(view.status));
-                    }
-                    let response = response.on_hover_cursor(egui::CursorIcon::PointingHand);
-                    hovered = response.hovered();
-                    if response.clicked() {
-                        clicked = true;
-                    }
-                });
+            // 不套 CentralPanel/Frame：它们会绘制面板底色，透明 viewport 上会留下
+            // 一层半透明方形底层。直接在最外层 Ui 上分配矩形并只画圆/窄条。
+            ui.set_min_size(egui::vec2(width, ui_style::size::FLOATING_BALL_SIZE));
+            let (rect, response) = ui.allocate_exact_size(
+                egui::vec2(width, ui_style::size::FLOATING_BALL_SIZE),
+                egui::Sense::click(),
+            );
+            let painter = ui.painter();
+            if expanded {
+                let center = rect.center();
+                painter.circle_filled(
+                    center,
+                    ui_style::size::FLOATING_BALL_SIZE * 0.5 - 2.0,
+                    theme().accent,
+                );
+                painter.circle_stroke(
+                    center,
+                    ui_style::size::FLOATING_BALL_SIZE * 0.5 - 2.0,
+                    egui::Stroke::new(1.0, theme().on_accent),
+                );
+                painter.text(
+                    center,
+                    egui::Align2::CENTER_CENTER,
+                    &view.text,
+                    egui::FontId::proportional(font::BODY_SMALL_PLUS),
+                    theme().on_accent,
+                );
+                painter.circle_filled(
+                    rect.right_bottom() - egui::vec2(12.0, 12.0),
+                    4.0,
+                    status_color(view.status),
+                );
+            } else {
+                let tab = egui::Rect::from_min_max(
+                    egui::pos2(
+                        rect.right() - ui_style::size::FLOATING_BALL_COLLAPSED_WIDTH,
+                        rect.top() + 4.0,
+                    ),
+                    rect.right_bottom() - egui::vec2(0.0, 4.0),
+                );
+                painter.rect_filled(
+                    tab,
+                    egui::CornerRadius::same(ui_style::size::RADIUS_LG),
+                    theme().accent,
+                );
+                painter.circle_filled(tab.center(), 3.0, status_color(view.status));
+            }
+            let response = response.on_hover_cursor(egui::CursorIcon::PointingHand);
+            hovered = response.hovered();
+            if response.clicked() {
+                clicked = true;
+            }
         });
 
         if close_requested {
