@@ -29,7 +29,7 @@
 | 标题左侧抓手或标题文字 | 拖动面板 |
 | 面板四角 / 四边 | 拖动缩放 |
 | 标题栏日月按钮 | 切换日间 / 夜间主题 |
-| 标题栏图钉 | 置顶 / 取消置顶 |
+| 标题栏图钉 | 钉住 / 取消钉住（控制点击面板外部时是否自动收起） |
 | `Esc` | 关闭弹窗；无弹窗时收起面板 |
 
 ## 最近更新
@@ -48,6 +48,14 @@
 | 收起（账号概览） | 展开（用量与 Key 明细） |
 | --- | --- |
 | ![收起：账号概览](docs/panel-collapsed.png) | ![展开：用量与 Key 明细](docs/panel-preview.png) |
+
+截图统一使用 [`testdata/demo`](testdata/demo/README.md) 的固定演示账号：
+
+```text
+demo@example.com
+Demo Key A / Demo Key B
+Demo Group
+```
 
 ## 构建
 
