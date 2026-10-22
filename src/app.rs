@@ -15,7 +15,7 @@ use std::sync::Arc;
 use std::sync::mpsc::{Receiver, TryRecvError};
 use std::time::{Duration, Instant};
 
-use crate::accounts::{self, Account};
+use crate::accounts::{self, Account, AccountProvider};
 use crate::data::DataLayer;
 use crate::fonts;
 use crate::login::{LoginDialog, LoginDraft};
@@ -446,6 +446,8 @@ const USAGE_TTL: Duration = Duration::from_secs(60);
 struct AccountCard {
     /// 账号 id（点击展开要用）。
     id: String,
+    /// 账号来源。
+    provider: AccountProvider,
     /// 展示用邮箱（已按开关打码）。
     display: String,
     /// 实例地址。
@@ -1062,8 +1064,17 @@ impl TrayApp {
 
                 AccountCard {
                     id: account.id.clone(),
-                    display: store.display_email(&account.email),
-                    base_url: account.base_url.clone(),
+                    provider: account.provider,
+                    display: if account.provider == AccountProvider::DeepSeekPlatform {
+                        account.email.clone()
+                    } else {
+                        store.display_email(&account.email)
+                    },
+                    base_url: if account.provider == AccountProvider::DeepSeekPlatform {
+                        "DeepSeek 官方 API Key".to_owned()
+                    } else {
+                        account.base_url.clone()
+                    },
                     status,
                     balance: runtime.and_then(|item| item.balance),
                     summary,
@@ -1170,6 +1181,9 @@ impl TrayApp {
         let Some(account) = store.accounts().iter().find(|item| item.id == account_id) else {
             return;
         };
+        if account.provider != AccountProvider::Sub2Api {
+            return;
+        }
         let base_url = account.base_url.clone();
         let secrets_blob = account.secrets.clone();
         let secret_store = store.secret_store();
@@ -1358,6 +1372,7 @@ impl TrayApp {
             DataLayer::Ready(store) => store
                 .accounts()
                 .iter()
+                .filter(|item| item.provider == AccountProvider::Sub2Api)
                 .filter(|item| self.expanded_accounts.contains(&item.id))
                 .filter(|item| !self.usage_collapsed.contains(&item.id))
                 .map(|item| item.id.clone())
@@ -1396,6 +1411,7 @@ impl TrayApp {
             DataLayer::Ready(store) => store
                 .accounts()
                 .iter()
+                .filter(|item| item.provider == AccountProvider::Sub2Api)
                 .filter(|item| self.expanded_accounts.contains(&item.id))
                 .map(|item| item.id.clone())
                 .filter(|id| !self.account_keys.contains_key(id) && !self.keys_rx.contains_key(id))
@@ -1939,6 +1955,7 @@ impl TrayApp {
             return;
         };
         self.login.open_for_relogin(
+            account.provider,
             account.id.clone(),
             account.base_url.clone(),
             account.email.clone(),
@@ -2549,162 +2566,173 @@ impl TrayApp {
                 });
                 ui.add_space(ui_style::space::LG);
 
-                ui_style::section_frame().show(ui, |ui| {
-                    ui.set_width(ui.available_width());
-                    ui_style::section_title(ui, "外观");
-                    ui.add_space(ui_style::space::XS);
+                let scroll_max_height = (ctx.content_rect().height()
+                    - ui_style::size::SETTINGS_SCROLL_RESERVED)
+                    .max(ui_style::size::SETTINGS_SCROLL_MIN);
+                egui::ScrollArea::vertical()
+                    .id_salt("settings-scroll")
+                    .max_height(scroll_max_height)
+                    .auto_shrink([false, true])
+                    .show(ui, |ui| {
+                        ui.set_width(ui.available_width());
 
-                    ui.horizontal(|ui| {
-                        ui_style::field_label(ui, "主题");
-                        let light_text = egui::RichText::new("日间").size(font::BODY).color(
-                            if draft.dark_mode {
-                                theme().text_secondary
-                            } else {
-                                theme().on_accent
-                            },
-                        );
-                        if ui
-                            .add(ui_style::rich_button(
-                                light_text,
-                                if draft.dark_mode {
-                                    ButtonTone::Ghost
-                                } else {
-                                    ButtonTone::Primary
-                                },
-                                ButtonSize::Auto,
-                            ))
-                            .clicked()
-                        {
-                            draft.dark_mode = false;
-                            preview_dark_mode = Some(false);
-                        }
-                        let dark_text = egui::RichText::new("夜间").size(font::BODY).color(
-                            if draft.dark_mode {
-                                theme().on_accent
-                            } else {
-                                theme().text_secondary
-                            },
-                        );
-                        if ui
-                            .add(ui_style::rich_button(
-                                dark_text,
-                                if draft.dark_mode {
-                                    ButtonTone::Primary
-                                } else {
-                                    ButtonTone::Ghost
-                                },
-                                ButtonSize::Auto,
-                            ))
-                            .clicked()
-                        {
-                            draft.dark_mode = true;
-                            preview_dark_mode = Some(true);
-                        }
-                    });
-                });
-                ui.add_space(ui_style::space::MD);
+                        ui_style::section_frame().show(ui, |ui| {
+                            ui.set_width(ui.available_width());
+                            ui_style::section_title(ui, "外观");
+                            ui.add_space(ui_style::space::XS);
 
-                ui_style::section_frame().show(ui, |ui| {
-                    ui.set_width(ui.available_width());
-                    ui_style::section_title(ui, "账号与启动");
-                    ui.add_space(ui_style::space::XS);
-                    ui.checkbox(
-                        &mut draft.mask_accounts,
-                        egui::RichText::new("账号名打码显示（只影响界面）")
-                            .size(font::BODY)
-                            .color(theme().text_primary),
-                    );
-                    ui.add_space(ui_style::space::XS);
-                    if autostart_known {
-                        ui.checkbox(
-                            &mut draft.autostart,
-                            egui::RichText::new("开机自动启动（登录时运行）")
-                                .size(font::BODY)
-                                .color(theme().text_primary),
-                        );
-                    } else {
-                        ui.horizontal(|ui| {
-                            ui.spinner();
-                            ui_style::hint_label(ui, "正在读取开机自启状态…");
-                        });
-                    }
-                });
-                ui.add_space(ui_style::space::MD);
-
-                ui_style::section_frame().show(ui, |ui| {
-                    ui.set_width(ui.available_width());
-                    ui_style::section_title(ui, "刷新与网络");
-                    ui.add_space(ui_style::space::XS);
-                    ui.horizontal(|ui| {
-                        ui_style::field_label(ui, "状态刷新间隔");
-                        ui_style::drag_number(
-                            ui,
-                            &mut draft.refresh_interval_seconds,
-                            30..=86400,
-                            " 秒",
-                            10.0,
-                        );
-                    });
-                    ui.add_space(ui_style::space::XS);
-                    ui.horizontal(|ui| {
-                        ui_style::field_label(ui, "请求超时");
-                        ui_style::drag_number(
-                            ui,
-                            &mut draft.request_timeout_seconds,
-                            1..=120,
-                            " 秒",
-                            1.0,
-                        );
-                    });
-                });
-                ui.add_space(ui_style::space::MD);
-
-                ui_style::section_frame().show(ui, |ui| {
-                    ui.set_width(ui.available_width());
-                    ui_style::section_title(ui, "版本更新");
-                    ui.add_space(ui_style::space::XS);
-                    ui.horizontal(|ui| {
-                        if ui_style::add_button(
-                            ui,
-                            "检查更新",
-                            ButtonTone::Neutral,
-                            ButtonSize::Header,
-                        )
-                        .clicked()
-                        {
-                            check_update = true;
-                        }
-                        if update_checking {
-                            ui.spinner();
-                            ui_style::hint_label(ui, "检查中…");
-                        }
-                    });
-                    if let Some(message) = update_result.as_deref() {
-                        ui_style::hint_label(ui, message);
-                    }
-                    if let Some(url) = update_url.as_deref() {
-                        ui.add(
-                            egui::Hyperlink::from_label_and_url(
-                                egui::RichText::new("点击进入下载最新版本")
+                            ui.horizontal(|ui| {
+                                ui_style::field_label(ui, "主题");
+                                let light_text = egui::RichText::new("日间")
                                     .size(font::BODY)
-                                    .color(theme().accent),
-                                url,
-                            )
-                            .open_in_new_tab(true),
-                        );
-                        ui_style::hint_label(ui, url);
-                        if ui_style::add_button(
-                            ui,
-                            "复制下载链接",
-                            ButtonTone::Neutral,
-                            ButtonSize::Wide,
-                        )
-                        .clicked()
-                        {
-                            copy_update_url = Some(url.to_owned());
-                        }
-                    }
-                });
+                                    .color(if draft.dark_mode {
+                                        theme().text_secondary
+                                    } else {
+                                        theme().on_accent
+                                    });
+                                if ui
+                                    .add(ui_style::rich_button(
+                                        light_text,
+                                        if draft.dark_mode {
+                                            ButtonTone::Ghost
+                                        } else {
+                                            ButtonTone::Primary
+                                        },
+                                        ButtonSize::Auto,
+                                    ))
+                                    .clicked()
+                                {
+                                    draft.dark_mode = false;
+                                    preview_dark_mode = Some(false);
+                                }
+                                let dark_text = egui::RichText::new("夜间").size(font::BODY).color(
+                                    if draft.dark_mode {
+                                        theme().on_accent
+                                    } else {
+                                        theme().text_secondary
+                                    },
+                                );
+                                if ui
+                                    .add(ui_style::rich_button(
+                                        dark_text,
+                                        if draft.dark_mode {
+                                            ButtonTone::Primary
+                                        } else {
+                                            ButtonTone::Ghost
+                                        },
+                                        ButtonSize::Auto,
+                                    ))
+                                    .clicked()
+                                {
+                                    draft.dark_mode = true;
+                                    preview_dark_mode = Some(true);
+                                }
+                            });
+                        });
+                        ui.add_space(ui_style::space::MD);
+
+                        ui_style::section_frame().show(ui, |ui| {
+                            ui.set_width(ui.available_width());
+                            ui_style::section_title(ui, "账号与启动");
+                            ui.add_space(ui_style::space::XS);
+                            ui.checkbox(
+                                &mut draft.mask_accounts,
+                                egui::RichText::new("账号名打码显示（只影响界面）")
+                                    .size(font::BODY)
+                                    .color(theme().text_primary),
+                            );
+                            ui.add_space(ui_style::space::XS);
+                            if autostart_known {
+                                ui.checkbox(
+                                    &mut draft.autostart,
+                                    egui::RichText::new("开机自动启动（登录时运行）")
+                                        .size(font::BODY)
+                                        .color(theme().text_primary),
+                                );
+                            } else {
+                                ui.horizontal(|ui| {
+                                    ui.spinner();
+                                    ui_style::hint_label(ui, "正在读取开机自启状态…");
+                                });
+                            }
+                        });
+                        ui.add_space(ui_style::space::MD);
+
+                        ui_style::section_frame().show(ui, |ui| {
+                            ui.set_width(ui.available_width());
+                            ui_style::section_title(ui, "刷新与网络");
+                            ui.add_space(ui_style::space::XS);
+                            ui.horizontal(|ui| {
+                                ui_style::field_label(ui, "状态刷新间隔");
+                                ui_style::drag_number(
+                                    ui,
+                                    &mut draft.refresh_interval_seconds,
+                                    30..=86400,
+                                    " 秒",
+                                    10.0,
+                                );
+                            });
+                            ui.add_space(ui_style::space::XS);
+                            ui.horizontal(|ui| {
+                                ui_style::field_label(ui, "请求超时");
+                                ui_style::drag_number(
+                                    ui,
+                                    &mut draft.request_timeout_seconds,
+                                    1..=120,
+                                    " 秒",
+                                    1.0,
+                                );
+                            });
+                        });
+                        ui.add_space(ui_style::space::MD);
+
+                        ui_style::section_frame().show(ui, |ui| {
+                            ui.set_width(ui.available_width());
+                            ui_style::section_title(ui, "版本更新");
+                            ui.add_space(ui_style::space::XS);
+                            ui.horizontal(|ui| {
+                                if ui_style::add_button(
+                                    ui,
+                                    "检查更新",
+                                    ButtonTone::Neutral,
+                                    ButtonSize::Header,
+                                )
+                                .clicked()
+                                {
+                                    check_update = true;
+                                }
+                                if update_checking {
+                                    ui.spinner();
+                                    ui_style::hint_label(ui, "检查中…");
+                                }
+                            });
+                            if let Some(message) = update_result.as_deref() {
+                                ui_style::hint_label(ui, message);
+                            }
+                            if let Some(url) = update_url.as_deref() {
+                                ui.add(
+                                    egui::Hyperlink::from_label_and_url(
+                                        egui::RichText::new("点击进入下载最新版本")
+                                            .size(font::BODY)
+                                            .color(theme().accent),
+                                        url,
+                                    )
+                                    .open_in_new_tab(true),
+                                );
+                                ui_style::hint_label(ui, url);
+                                if ui_style::add_button(
+                                    ui,
+                                    "复制下载链接",
+                                    ButtonTone::Neutral,
+                                    ButtonSize::Wide,
+                                )
+                                .clicked()
+                                {
+                                    copy_update_url = Some(url.to_owned());
+                                }
+                            }
+                        });
+                    });
 
                 ui.add_space(ui_style::space::LG);
                 ui.horizontal(|ui| {
@@ -3089,7 +3117,11 @@ impl TrayApp {
                         self.login.set_error(message);
                         return;
                     }
-                    let display = store.display_email(&draft.email);
+                    let display = if draft.provider == AccountProvider::DeepSeekPlatform {
+                        draft.email.clone()
+                    } else {
+                        store.display_email(&draft.email)
+                    };
                     log::info!("账号凭据已原地更新：{display}");
                     self.toast = Some((format!("已重新登录 {display}"), Instant::now()));
                     self.login.close();
@@ -3105,7 +3137,11 @@ impl TrayApp {
                     }
 
                     // 日志只留打码后的账号，避免明文邮箱长期堆积在日志里
-                    let display = store.display_email(&draft.email);
+                    let display = if draft.provider == AccountProvider::DeepSeekPlatform {
+                        draft.email.clone()
+                    } else {
+                        store.display_email(&draft.email)
+                    };
                     log::info!("账号已保存：{display}");
                     self.toast = Some((format!("已登录 {display}"), Instant::now()));
                     self.login.close();
@@ -4394,7 +4430,14 @@ fn draw_pin(ui: &mut egui::Ui, pinned: bool) -> egui::Response {
         egui::Stroke::new(1.6, color),
     );
 
-    response.on_hover_cursor(egui::CursorIcon::PointingHand)
+    let hint = if pinned {
+        "已钉住：点击面板外部不会收起；再次点击取消钉住"
+    } else {
+        "钉住面板：点击面板外部时保持打开"
+    };
+    response
+        .on_hover_cursor(egui::CursorIcon::PointingHand)
+        .on_hover_text(hint)
 }
 
 /// 画一个矢量齿轮（设置入口）。
@@ -4934,7 +4977,9 @@ fn draw_account_card(
             // 标题行只有左侧账号信息可点击展开/收起；右侧按钮使用独立
             // 控件自己的点击响应，不能再叠加整行手势。
             let mut header_clicked = false;
-            let can_create_key = card.keys.as_ref().is_some_and(|state| !state.loading);
+            let is_deepseek = card.provider == AccountProvider::DeepSeekPlatform;
+            let can_create_key =
+                !is_deepseek && card.keys.as_ref().is_some_and(|state| !state.loading);
 
             // 手动画出整行矩形，左右各自拥有明确的最大矩形，避免 horizontal
             // 按内容收缩导致右侧按钮停在中间。
@@ -4988,14 +5033,32 @@ fn draw_account_card(
                         if email.clicked() {
                             header_clicked = true;
                         }
-                        ui.add(
+                        let link_hint = if card.provider == AccountProvider::DeepSeekPlatform {
+                            "DeepSeek 官方网站\n使用 API Key 读取余额，不提供用量曲线。"
+                        } else {
+                            "Sub2API 中转站"
+                        };
+                        let link_color = if card.provider == AccountProvider::DeepSeekPlatform {
+                            theme().text_secondary
+                        } else {
+                            theme().text_dim
+                        };
+                        let link_response = ui.add(
                             egui::Label::new(
                                 egui::RichText::new(&card.base_url)
                                     .size(font::BODY_SMALL)
-                                    .color(theme().text_dim),
+                                    .color(link_color),
                             )
                             .truncate(),
                         );
+                        link_response.on_hover_ui(|ui| {
+                            ui.set_max_width(ui_style::size::TOOLTIP_MAX_WIDTH);
+                            ui.label(
+                                egui::RichText::new(link_hint)
+                                    .size(font::BODY_SMALL)
+                                    .color(theme().text_primary),
+                            );
+                        });
                     });
                 },
             );
@@ -5006,20 +5069,22 @@ fn draw_account_card(
                         .max_rect(right_rect)
                         .layout(egui::Layout::top_down(egui::Align::Max)),
                     |ui| {
-                        let add_clicked = ui
-                            .add_enabled_ui(can_create_key, |ui| {
-                                ui_style::add_button(
-                                    ui,
-                                    "新增key",
-                                    ButtonTone::Neutral,
-                                    ButtonSize::Header,
-                                )
-                            })
-                            .inner
-                            .on_hover_text("在当前账号下创建一个新的 API Key")
-                            .clicked();
-                        if add_clicked {
-                            key_actions.create_key_request = Some(card.id.clone());
+                        if !is_deepseek {
+                            let add_clicked = ui
+                                .add_enabled_ui(can_create_key, |ui| {
+                                    ui_style::add_button(
+                                        ui,
+                                        "新增key",
+                                        ButtonTone::Neutral,
+                                        ButtonSize::Header,
+                                    )
+                                })
+                                .inner
+                                .on_hover_text("在当前账号下创建一个新的 API Key")
+                                .clicked();
+                            if add_clicked {
+                                key_actions.create_key_request = Some(card.id.clone());
+                            }
                         }
                         if ui_style::add_button(
                             ui,
@@ -5048,7 +5113,8 @@ fn draw_account_card(
             if card.expanded {
                 let mut status_line = card.status.label().to_owned();
                 if let Some(balance) = card.balance {
-                    status_line.push_str(&format!(" · 余额 ${balance:.2}"));
+                    let symbol = if is_deepseek { "¥" } else { "$" };
+                    status_line.push_str(&format!(" · 余额 {symbol}{balance:.2}"));
                 }
                 ui.label(
                     egui::RichText::new(status_line)
@@ -5090,15 +5156,15 @@ fn draw_account_card(
                     }
                 }
 
-                ui.add_space(ui_style::space::SM);
-                ui.separator();
-
-                // 用量曲线：走用户态接口，看到的是本账号自己的数据
-                draw_usage_section(ui, card, usage_actions);
-                ui.add_space(ui_style::space::SM);
-                ui.separator();
-
-                draw_account_keys(ui, card, hover, key_actions);
+                if !is_deepseek {
+                    ui.add_space(ui_style::space::SM);
+                    ui.separator();
+                    // 用量曲线：走用户态接口，看到的是本账号自己的数据
+                    draw_usage_section(ui, card, usage_actions);
+                    ui.add_space(ui_style::space::SM);
+                    ui.separator();
+                    draw_account_keys(ui, card, hover, key_actions);
+                }
             }
         });
 
@@ -6000,7 +6066,8 @@ fn save_login(store: &mut crate::data::DataStore, draft: &LoginDraft) -> Result<
     }
 
     // 先用空 secrets 建出账号，拿到它的 id（macOS 钥匙串条目以 id 为 account）
-    let mut account = Account::new(
+    let mut account = Account::new_with_provider(
+        draft.provider,
         draft.base_url.clone(),
         draft.email.clone(),
         draft.role,

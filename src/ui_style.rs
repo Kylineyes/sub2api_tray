@@ -264,6 +264,9 @@ pub mod size {
     pub const TIME_PICKER_WIDTH: f32 = 56.0;
     pub const CURRENCY_PREFIX_WIDTH: f32 = 16.0;
     pub const NUMBER_INPUT_WIDTH: f32 = 80.0;
+    pub const TOOLTIP_MAX_WIDTH: f32 = 240.0;
+    pub const SETTINGS_SCROLL_RESERVED: f32 = 210.0;
+    pub const SETTINGS_SCROLL_MIN: f32 = 220.0;
     pub const BUTTON_XS_W: f32 = 76.0;
     pub const BUTTON_XS_H: f32 = 22.0;
     pub const BUTTON_TINY_W: f32 = 64.0;

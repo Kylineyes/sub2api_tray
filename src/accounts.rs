@@ -73,6 +73,27 @@ impl AccountRole {
     }
 }
 
+/// 账号来源/后端类型。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum AccountProvider {
+    /// Sub2API 中转站：支持邮箱密码登录、Key 列表、用量曲线。
+    #[default]
+    Sub2Api,
+    /// DeepSeek 官方平台：使用 API Key，只读取余额。
+    DeepSeekPlatform,
+}
+
+impl AccountProvider {
+    /// 面向界面的中文标签。
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Sub2Api => "Sub2API 中转站",
+            Self::DeepSeekPlatform => "DeepSeek 官方",
+        }
+    }
+}
+
 /// 单个已登录账号。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -83,6 +104,9 @@ pub struct Account {
     pub base_url: String,
     /// 登录邮箱，原样保存（展示时才按开关打码）。
     pub email: String,
+    /// 账号来源；旧文件没有该字段时默认按 Sub2API 中转站处理。
+    #[serde(default)]
+    pub provider: AccountProvider,
     /// 角色。
     pub role: AccountRole,
     /// 加密后的凭据块，格式由 [`crate::secrets`] 决定。
@@ -112,8 +136,20 @@ impl Account {
     /// `id` 与 `createdAt` 由本函数生成，调用方不需要（也不应该）自己造：
     /// 顺序与唯一性都依赖这两个字段。
     pub fn new(base_url: String, email: String, role: AccountRole, secrets: String) -> Self {
+        Self::new_with_provider(AccountProvider::Sub2Api, base_url, email, role, secrets)
+    }
+
+    /// 按指定来源创建账号。
+    pub fn new_with_provider(
+        provider: AccountProvider,
+        base_url: String,
+        email: String,
+        role: AccountRole,
+        secrets: String,
+    ) -> Self {
         Self {
             id: uuid::Uuid::new_v4().to_string(),
+            provider,
             base_url,
             email,
             role,
@@ -196,7 +232,7 @@ impl AccountsStore {
     pub fn add(&mut self, account: Account) -> Result<()> {
         let mut account = account;
         account.base_url = normalize_base_url(&account.base_url)?;
-        if !is_valid_email(&account.email) {
+        if account.provider == AccountProvider::Sub2Api && !is_valid_email(&account.email) {
             bail!("邮箱格式不正确：{}", account.email);
         }
         if let Some(existing) = self.find_duplicate(&account.base_url, &account.email) {
