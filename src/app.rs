@@ -4430,7 +4430,14 @@ fn draw_pin(ui: &mut egui::Ui, pinned: bool) -> egui::Response {
         egui::Stroke::new(1.6, color),
     );
 
-    response.on_hover_cursor(egui::CursorIcon::PointingHand)
+    let hint = if pinned {
+        "已钉住：点击面板外部不会收起；再次点击取消钉住"
+    } else {
+        "钉住面板：点击面板外部时保持打开"
+    };
+    response
+        .on_hover_cursor(egui::CursorIcon::PointingHand)
+        .on_hover_text(hint)
 }
 
 /// 画一个矢量齿轮（设置入口）。
