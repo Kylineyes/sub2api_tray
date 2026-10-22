@@ -201,8 +201,9 @@ fn refresh_one(target: &RefreshTarget, store: &dyn SecretStore, timeout: Duratio
     let mut credentials = match secrets::open_credentials(store, &target.id, &target.secrets) {
         Ok(credentials) => credentials,
         Err(err) => {
-            // 解密失败（换了 Windows 用户/机器，或钥匙串条目被删）属于"凭据损坏"
-            log::warn!("账号 {id} 凭据解密失败：{err:#}");
+            // 解密失败（换了 Windows 用户/机器，或钥匙串条目被删）属于"凭据损坏"。
+            // err 链里包含 DPAPI/钥匙串的底层错误码，便于区分"文件坏了"与"跨用户/跨机器"。
+            log::warn!("账号 {id} 凭据解密失败（DPAPI/钥匙串错误）：{err:#}");
             return RoundResult {
                 id,
                 outcome: RefreshOutcome::CredentialsInvalid(

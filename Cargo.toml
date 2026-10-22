@@ -1,6 +1,6 @@
 [package]
 name = "sub2api_tray"
-version = "0.4.0"
+version = "0.4.2"
 edition = "2024"
 rust-version = "1.95"
 description = "用量统计托盘：在 Windows 通知区域 / macOS 菜单栏中查看已登录的账户状态"
@@ -19,9 +19,12 @@ base64 = "0.23.1"
 # 圆角面板会露出一块方形底色；glow 走 OpenGL，两个平台都能实现真正的透明窗口。
 eframe = { version = "0.37.0", features = ["glow"] }
 egui = "0.37.0"
+# 日期选择器：新增 Key 的有效期需要可视化选日期（datepicker 特性）
+egui_extras = { version = "0.37.0", features = ["datepicker"] }
 env_logger = "0.11.11"
 # 只解码内嵌的那一张 PNG：直接用 png 而不引进整个 image（省下约 1MB）
 png = "0.17"
+jiff = "0.2.35"
 log = "0.4.34"
 # app.json / accounts.json 的序列化与反序列化
 serde = { version = "1.0.229", features = ["derive"] }

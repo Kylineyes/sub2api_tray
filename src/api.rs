@@ -172,6 +172,8 @@ pub struct CreatedApiKey {
     pub info: ApiKeyInfo,
     /// 完整 Key 值。只允许短暂留在内存/剪贴板，绝不写入缓存或日志。
     pub full_key: String,
+    /// 客户端侧警告，例如创建成功但精确结束时间写入失败。
+    pub warning: Option<String>,
 }
 
 /// 把 Key 打码成"前 4 + … + 后 4"。
@@ -341,12 +343,45 @@ pub struct SubscriptionSummary {
 /// 套在外面的响应信封。
 #[derive(Debug, Deserialize)]
 struct Envelope {
+    /// 业务码：后端可能返回数字，也可能返回 `"UNAUTHORIZED"` 这类字符串。
     #[serde(default)]
-    code: i64,
+    code: serde_json::Value,
     #[serde(default)]
     message: String,
     #[serde(default)]
     data: Option<serde_json::Value>,
+}
+
+impl Envelope {
+    /// 把数字或字符串业务码映射成 HTTP 语义状态；None 表示成功。
+    fn code_status(&self) -> Option<u16> {
+        match &self.code {
+            serde_json::Value::Null => None,
+            serde_json::Value::Number(number) => number
+                .as_i64()
+                .and_then(|value| u16::try_from(value).ok())
+                .filter(|value| *value != 0),
+            serde_json::Value::String(text) => {
+                let upper = text.trim().to_ascii_uppercase();
+                if upper.is_empty() {
+                    return None;
+                }
+                if let Ok(value) = upper.parse::<u16>() {
+                    return (value != 0).then_some(value);
+                }
+                match upper.as_str() {
+                    "OK" | "SUCCESS" | "NO_ERROR" => None,
+                    "UNAUTHORIZED" | "UNAUTHENTICATED" | "TOKEN_EXPIRED" | "TOKEN_INVALID"
+                    | "INVALID_TOKEN" | "AUTH_REQUIRED" => Some(401),
+                    "FORBIDDEN" | "INSUFFICIENT_PERMISSIONS" => Some(403),
+                    "NOT_FOUND" | "RESOURCE_NOT_FOUND" => Some(404),
+                    "RATE_LIMITED" | "RATE_LIMIT_EXCEEDED" | "TOO_MANY_REQUESTS" => Some(429),
+                    _ => Some(500),
+                }
+            }
+            _ => Some(500),
+        }
+    }
 }
 
 /// 登录/2FA 接口的 `data` 字段。
@@ -420,13 +455,10 @@ fn parse_envelope(body: &str) -> Result<Envelope, ApiError> {
 /// 读取信封并处理"HTTP 200 但 code != 0"的情况，返回 `data`。
 fn read_data(status: u16, body: &str, kind: RequestKind) -> Result<serde_json::Value, ApiError> {
     let envelope = parse_envelope(body)?;
-    if status != 200 || envelope.code != 0 {
-        // 后端把业务错误码同时写进 HTTP 状态与 code；code 优先，因为有些代理会改写状态码
-        let effective = if envelope.code != 0 {
-            envelope.code.clamp(0, u16::MAX as i64) as u16
-        } else {
-            status
-        };
+    let code_status = envelope.code_status();
+    if status != 200 || code_status.is_some() {
+        // 业务码可能同时出现在 HTTP 状态与 code 中；code 优先，因为代理可能改写状态码。
+        let effective = code_status.unwrap_or(status);
         return Err(classify_error(effective, &envelope.message, kind));
     }
     Ok(envelope.data.unwrap_or(serde_json::Value::Null))
@@ -930,7 +962,11 @@ pub fn parse_created_api_key_response(status: u16, body: &str) -> Result<Created
             "创建成功但响应没有返回完整 Key，请到 Web 后台复制".to_owned(),
         ));
     }
-    Ok(CreatedApiKey { info, full_key })
+    Ok(CreatedApiKey {
+        info,
+        full_key,
+        warning: None,
+    })
 }
 
 /// 阻塞式 HTTP 客户端。
@@ -1107,6 +1143,8 @@ impl HttpClient {
         name: &str,
         group_id: i64,
         quota: f64,
+        expires_in_days: Option<u32>,
+        expires_at: Option<&str>,
     ) -> Result<CreatedApiKey, ApiError> {
         if name.trim().is_empty() {
             return Err(ApiError::InvalidInput("API Key 名称不能为空".to_owned()));
@@ -1119,13 +1157,54 @@ impl HttpClient {
                 "额度必须是大于或等于 0 的数字".to_owned(),
             ));
         }
-        let body = serde_json::json!({
+        if matches!(expires_in_days, Some(0)) {
+            return Err(ApiError::InvalidInput("有效期天数必须大于 0".to_owned()));
+        }
+
+        let mut body = serde_json::json!({
             "name": name.trim(),
             "group_id": group_id,
             "quota": quota,
         });
+        if let Some(days) = expires_in_days {
+            body["expires_in_days"] = serde_json::json!(days);
+        }
         let (status, text) = self.post_json_auth(API_KEYS_PATH, access_token, &body)?;
-        parse_created_api_key_response(status, &text)
+        let mut created = parse_created_api_key_response(status, &text)?;
+
+        // 创建接口只接受天数；需要精确到时间时，创建成功后再用 PUT 写入 expires_at。
+        // 创建时已经带了按天向上取整的兜底有效期，因此即使第二次请求失败，Key 也不会变成永久。
+        if let Some(expires_at) = expires_at {
+            match self.update_api_key_expiry(access_token, &created.info.id, expires_at) {
+                Ok(updated) => created.info = updated,
+                Err(err) => {
+                    created.warning = Some(format!(
+                        "Key 已创建，但精确结束时间设置失败：{}",
+                        err.user_message()
+                    ));
+                }
+            }
+        }
+        Ok(created)
+    }
+
+    /// 更新单个 API Key 的精确过期时间。
+    pub fn update_api_key_expiry(
+        &self,
+        access_token: &str,
+        id: &str,
+        expires_at: &str,
+    ) -> Result<ApiKeyInfo, ApiError> {
+        if id.is_empty() {
+            return Err(ApiError::InvalidInput("API Key id 不能为空".to_owned()));
+        }
+        if expires_at.is_empty() {
+            return Err(ApiError::InvalidInput("结束时间不能为空".to_owned()));
+        }
+        let path = format!("{API_KEYS_PATH}/{id}");
+        let body = serde_json::json!({ "expires_at": expires_at });
+        let (status, text) = self.put_json(&path, access_token, &body)?;
+        parse_api_key_update_response(status, &text)
     }
 
     /// 删除一个 API Key。
@@ -1406,6 +1485,33 @@ mod tests {
 
         let err = parse_login_response(401, body, RequestKind::Login).unwrap_err();
         assert_eq!(err, ApiError::Unauthorized, "密码请求仍应提示凭据错误");
+    }
+
+    #[test]
+    fn 字符串错误码按_http_语义分类() {
+        let err = read_data(
+            401,
+            r#"{"code":"UNAUTHORIZED","message":"Authorization header is required"}"#,
+            RequestKind::Me,
+        )
+        .unwrap_err();
+        assert_eq!(err, ApiError::Unauthorized);
+
+        let expired = read_data(
+            401,
+            r#"{"code":"TOKEN_EXPIRED","message":"Token has expired"}"#,
+            RequestKind::Me,
+        )
+        .unwrap_err();
+        assert_eq!(expired, ApiError::Unauthorized);
+
+        let data = read_data(
+            200,
+            r#"{"code":"OK","message":"success","data":{"email":"demo@example.com"}}"#,
+            RequestKind::Me,
+        )
+        .unwrap();
+        assert_eq!(data["email"], "demo@example.com");
     }
 
     #[test]
@@ -1719,6 +1825,7 @@ mod tests {
         assert_eq!(created.info.id, "100");
         assert_eq!(created.info.masked, "sk-f…alue");
         assert_eq!(created.full_key, "sk-full-secret-value");
+        assert!(created.warning.is_none());
     }
 
     #[test]
