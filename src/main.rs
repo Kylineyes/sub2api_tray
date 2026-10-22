@@ -32,6 +32,7 @@ mod app;
 mod autostart;
 mod config;
 mod data;
+mod deepseek;
 mod fonts;
 mod login;
 mod mask;

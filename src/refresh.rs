@@ -29,7 +29,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc::{self, Receiver};
 use std::time::{Duration, Instant};
 
-use crate::accounts::Account;
+use crate::accounts::{Account, AccountProvider};
 use crate::api::{ApiError, HttpClient, LoginOutcome, MeInfo, SubscriptionSummary};
 use crate::secrets::{self, Credentials, SecretStore};
 
@@ -75,8 +75,10 @@ pub struct RefreshTarget {
     pub id: String,
     /// 实例地址（已归一化）。
     pub base_url: String,
-    /// 登录邮箱。
+    /// 登录邮箱（DeepSeek 官方为脱敏 API Key）。
     pub email: String,
+    /// 账号来源。
+    pub provider: AccountProvider,
     /// 加密凭据块。
     pub secrets: String,
 }
@@ -88,6 +90,7 @@ impl RefreshTarget {
             id: account.id.clone(),
             base_url: account.base_url.clone(),
             email: account.email.clone(),
+            provider: account.provider,
             secrets: account.secrets.clone(),
         }
     }
@@ -195,6 +198,32 @@ fn refresh_worker_count(total: usize) -> usize {
 }
 
 /// 刷新单个账号（在后台线程里执行）。
+/// DeepSeek 官方账号刷新：只用 API Key 查余额。
+fn refresh_deepseek(id: &str, api_key: &str, timeout: Duration) -> RoundResult {
+    match crate::deepseek::fetch_balance(api_key, timeout) {
+        Ok(balance) => RoundResult {
+            id: id.to_owned(),
+            outcome: RefreshOutcome::Online {
+                status: MeInfo {
+                    role: crate::accounts::AccountRole::Unknown,
+                    email: Some(crate::deepseek::mask_api_key(api_key)),
+                    balance: Some(balance.total_balance),
+                },
+                summary: None,
+                rotated: None,
+            },
+        },
+        Err(ApiError::Unauthorized) => RoundResult {
+            id: id.to_owned(),
+            outcome: RefreshOutcome::CredentialsInvalid("DeepSeek API Key 无效或已撤销".to_owned()),
+        },
+        Err(err) => RoundResult {
+            id: id.to_owned(),
+            outcome: RefreshOutcome::Offline(err.user_message()),
+        },
+    }
+}
+
 fn refresh_one(target: &RefreshTarget, store: &dyn SecretStore, timeout: Duration) -> RoundResult {
     let id = target.id.clone();
 
@@ -212,6 +241,10 @@ fn refresh_one(target: &RefreshTarget, store: &dyn SecretStore, timeout: Duratio
             };
         }
     };
+
+    if target.provider == AccountProvider::DeepSeekPlatform {
+        return refresh_deepseek(&id, &credentials.access_token, timeout);
+    }
 
     let client = match HttpClient::new(&target.base_url, timeout) {
         Ok(client) => client,
@@ -484,6 +517,7 @@ mod tests {
             id: account_id.to_owned(),
             base_url: format!("http://{addr}"),
             email: "user@example.com".to_owned(),
+            provider: AccountProvider::Sub2Api,
             secrets: sealed,
         };
 
@@ -537,6 +571,7 @@ mod tests {
             id: "broken".to_owned(),
             base_url: "http://127.0.0.1:9".to_owned(),
             email: "user@example.com".to_owned(),
+            provider: AccountProvider::Sub2Api,
             secrets: "enc:dpapi:v1:not-a-real-cipher".to_owned(),
         };
 

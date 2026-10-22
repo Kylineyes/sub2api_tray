@@ -33,6 +33,7 @@
 | 5 | v0.4.0 界面与性能优化：固定宽度用量汇总、多账号并行拉取、设置页异步自启、主题即时预览、底部浮层提示 | ✅ 已完成（0022-0026，已合入 dev） |
 | 6 | v0.4.1 发布：Key 日期选择器、账号原地重新登录、统一 UI 样式与对齐修复 | ✅ 已完成（0027-0029，已合入 dev） |
 | 7 | v0.4.2 发布：设置页重设计、异步保存进度弹窗、Key 列表紧凑布局 | ✅ 已完成（0030，已合入 dev） |
+| 8 | DeepSeek 官方账号：登录来源下拉、API Key 登录、余额刷新、面板专属展示 | ✅ 已完成（0032） |
 
 **现阶段明确的非目标**（不要顺手做）：
 
@@ -388,6 +389,7 @@ cargo build --release                  # 产物：target/release/sub2api_tray
 | --- | --- |
 | `schemaVersion` | 文件版本 |
 | `accounts[].id` | UUID v4，稳定标识 |
+| `accounts[].provider` | 账号来源：`sub2Api` / `deepSeekPlatform`，缺失时默认 `sub2Api` |
 | `accounts[].baseUrl` | 实例地址，已归一化（无尾斜杠、无查询参数） |
 | `accounts[].email` | 登录邮箱，原样保存（展示时才打码） |
 | `accounts[].role` | `admin` / `user` / `unknown` |
@@ -453,3 +455,4 @@ cargo build --release                  # 产物：target/release/sub2api_tray
 | 2026-10-22 | 发布 v0.4.1 | Cargo.toml/Cargo.lock/README 版本升至 0.4.1；汇总新增 Key 有效期、日期选择器、原地重新登录、DPAPI 错误码、统一 UI 样式与布局修复 |
 | 2026-10-22 | 发布 v0.4.2 | 版本升至 0.4.2；重新设计设置页；设置保存改为后台线程并显示阻塞式进度弹窗；Key 操作按钮未悬浮时不占高度 |
 | 2026-10-22 | 兼容字符串业务码 | 后端 `code` 字段可能返回 `UNAUTHORIZED` / `TOKEN_EXPIRED` 等字符串；统一映射到 401/403/404/429/500，避免误判为不是 Sub2API 实例并恢复 token 续期链 |
+| 2026-10-23 | DeepSeek 官方账号支持 | 新增 `AccountProvider`（旧账号默认 Sub2API）；登录弹窗支持来源下拉；DeepSeek 官方使用 API Key 校验与余额接口；面板隐藏不适用的 Key 列表和用量曲线 |
