@@ -29,7 +29,7 @@
 use std::sync::{Arc, Mutex};
 
 use anyhow::{Context as _, Result};
-use tray_icon::menu::{Menu, MenuEvent, MenuItem, PredefinedMenuItem, Submenu};
+use tray_icon::menu::{CheckMenuItem, Menu, MenuEvent, MenuItem, PredefinedMenuItem, Submenu};
 use tray_icon::{
     Icon, MouseButton, MouseButtonState, Rect as TrayRect, TrayIcon, TrayIconBuilder, TrayIconEvent,
 };
@@ -55,6 +55,9 @@ const MENU_ID_BALL_EDGE_HIDE: &str = "ball-edge-hide";
 /// 悬浮球主目标菜单项前缀。
 const MENU_ID_BALL_TARGET_PREFIX: &str = "ball-target|";
 
+/// 刷新悬浮球可选 Key 列表。
+const MENU_ID_BALL_TARGET_REFRESH: &str = "ball-target-refresh";
+
 /// 托盘需要应用做的事。
 ///
 /// 这里不再是 `Copy`：删除账号要带上 id。投递成本仍然很低（Vec push）。
@@ -75,6 +78,8 @@ pub enum TrayCommand {
         account_id: String,
         key_id: Option<String>,
     },
+    /// 刷新悬浮球菜单里的 Key 列表。
+    RefreshFloatingBallTargets,
 }
 
 /// 托盘菜单里的一个悬浮球目标。
@@ -334,6 +339,17 @@ pub fn build_menu(model: &TrayMenuModel) -> Result<Menu> {
         None,
     );
     let target_menu = Submenu::new("主账号 / 主 Key", true);
+    target_menu
+        .append(&MenuItem::with_id(
+            MENU_ID_BALL_TARGET_REFRESH,
+            "刷新 Key 列表",
+            true,
+            None,
+        ))
+        .context("构建悬浮球 Key 刷新菜单失败")?;
+    target_menu
+        .append(&PredefinedMenuItem::separator())
+        .context("构建悬浮球目标分隔线失败")?;
     if model.ball_targets.is_empty() {
         target_menu
             .append(&MenuItem::with_id(
@@ -350,13 +366,14 @@ pub fn build_menu(model: &TrayMenuModel) -> Result<Menu> {
                 target.account_id,
                 target.key_id.as_deref().unwrap_or("")
             );
-            let label = if target.selected {
-                format!("✓ {}", target.label)
-            } else {
-                format!("  {}", target.label)
-            };
             target_menu
-                .append(&MenuItem::with_id(id, label, true, None))
+                .append(&CheckMenuItem::with_id(
+                    id,
+                    &target.label,
+                    true,
+                    target.selected,
+                    None,
+                ))
                 .context("构建悬浮球目标菜单项失败")?;
         }
     }
@@ -416,6 +433,9 @@ pub fn install(bridge: Arc<TrayBridge>) -> Result<TrayHandle> {
             MENU_ID_QUIT => menu_bridge.push(TrayCommand::Quit),
             MENU_ID_BALL_TOGGLE => menu_bridge.push(TrayCommand::ToggleFloatingBall),
             MENU_ID_BALL_EDGE_HIDE => menu_bridge.push(TrayCommand::ToggleFloatingBallEdgeHide),
+            MENU_ID_BALL_TARGET_REFRESH => {
+                menu_bridge.push(TrayCommand::RefreshFloatingBallTargets)
+            }
             id if id.starts_with(MENU_ID_BALL_TARGET_PREFIX) => {
                 let rest = &id[MENU_ID_BALL_TARGET_PREFIX.len()..];
                 if let Some((account_id, key_id)) = rest.split_once('|')

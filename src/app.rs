@@ -1515,6 +1515,25 @@ impl TrayApp {
                 TrayCommand::SetFloatingBallTarget { account_id, key_id } => {
                     self.set_floating_ball_target(ctx, account_id, key_id);
                 }
+                TrayCommand::RefreshFloatingBallTargets => {
+                    let ids = match &self.data {
+                        DataLayer::Ready(store) => store
+                            .accounts()
+                            .iter()
+                            .filter(|account| account.provider == AccountProvider::Sub2Api)
+                            .map(|account| account.id.clone())
+                            .collect::<Vec<_>>(),
+                        DataLayer::Unavailable(_) => Vec::new(),
+                    };
+                    for id in ids {
+                        if !self.keys_rx.contains_key(&id) {
+                            self.request_account_keys(ctx, &id);
+                        }
+                    }
+                    self.try_start_refresh(ctx, true);
+                    self.toast = Some(("正在刷新 Key 列表".to_owned(), Instant::now()));
+                    ctx.request_repaint();
+                }
             }
         }
     }
