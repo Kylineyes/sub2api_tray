@@ -21,6 +21,7 @@
 
 * `app.json` 新增 `floatingBallVisible`、`floatingBallEdgeHide`、`floatingBallAccountId`、`floatingBallApiKeyId`；
 * 托盘菜单新增「悬浮球」子菜单：显示/隐藏、贴边收起开关、主账号/主 Key 选择；
+* 主面板总览卡片新增「悬浮球」下拉选择器和刷新 Key 按钮，可在面板内选择账号余额或具体 Key；
 * 主账号/主 Key 使用原生 `CheckMenuItem` 单选联动，并提供「刷新 Key 列表」入口；
 * 使用 egui immediate viewport 创建无边框、透明、置顶、任务栏隐藏的 64×64 悬浮球；
 * 悬浮球支持拖拽；未悬浮且贴近屏幕边缘时绘制为窄条，鼠标悬停展开为圆形；
