@@ -7,10 +7,16 @@
 /// 把指定标题的窗口改成无边框弹出窗口。
 #[cfg(windows)]
 pub fn make_borderless(title: &str) -> bool {
+    use windows_sys::Win32::Foundation::RECT;
+    use windows_sys::Win32::Graphics::Dwm::{
+        DWMNCRP_DISABLED, DWMWA_BORDER_COLOR, DWMWA_COLOR_NONE, DWMWA_NCRENDERING_POLICY,
+        DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_DONOTROUND, DwmSetWindowAttribute,
+    };
+    use windows_sys::Win32::Graphics::Gdi::{CreateRectRgn, SetWindowRgn};
     use windows_sys::Win32::UI::WindowsAndMessaging::{
-        FindWindowW, GWL_STYLE, GetWindowLongW, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE,
-        SWP_NOSIZE, SWP_NOZORDER, SetWindowLongW, SetWindowPos, WS_BORDER, WS_CAPTION, WS_DLGFRAME,
-        WS_MAXIMIZEBOX, WS_MINIMIZEBOX, WS_POPUP, WS_SYSMENU, WS_THICKFRAME,
+        FindWindowW, GWL_STYLE, GetClientRect, GetWindowLongW, SWP_FRAMECHANGED, SWP_NOACTIVATE,
+        SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SetWindowLongW, SetWindowPos, WS_BORDER, WS_CAPTION,
+        WS_DLGFRAME, WS_MAXIMIZEBOX, WS_MINIMIZEBOX, WS_POPUP, WS_SYSMENU, WS_THICKFRAME,
     };
 
     let title: Vec<u16> = title.encode_utf16().chain(std::iter::once(0)).collect();
@@ -39,6 +45,39 @@ pub fn make_borderless(title: &str) -> bool {
             0,
             SWP_FRAMECHANGED | SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE,
         );
+
+        // Windows 11 仍可能给顶层窗口画 1px DWM 边框；显式关闭边框颜色和圆角。
+        let none: u32 = DWMWA_COLOR_NONE;
+        let _ = DwmSetWindowAttribute(
+            hwnd,
+            DWMWA_BORDER_COLOR as u32,
+            (&none as *const u32).cast(),
+            std::mem::size_of::<u32>() as u32,
+        );
+        let policy = DWMNCRP_DISABLED;
+        let _ = DwmSetWindowAttribute(
+            hwnd,
+            DWMWA_NCRENDERING_POLICY as u32,
+            (&policy as *const i32).cast(),
+            std::mem::size_of::<i32>() as u32,
+        );
+        let corner = DWMWCP_DONOTROUND;
+        let _ = DwmSetWindowAttribute(
+            hwnd,
+            DWMWA_WINDOW_CORNER_PREFERENCE as u32,
+            (&corner as *const i32).cast(),
+            std::mem::size_of::<i32>() as u32,
+        );
+
+        // 某些 Windows 版本即使关掉 DWM 边框，客户区顶部仍会保留 1px 亮线。
+        // 把客户区四周各裁掉 1px，圆形本身留了边距，不会影响绘制。
+        let mut client = RECT::default();
+        if GetClientRect(hwnd, &mut client) != 0 {
+            let region = CreateRectRgn(1, 1, client.right - 1, client.bottom - 1);
+            if !region.is_null() {
+                let _ = SetWindowRgn(hwnd, region, 1);
+            }
+        }
     }
     true
 }

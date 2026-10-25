@@ -23,7 +23,8 @@
 * 托盘菜单新增「悬浮球」子菜单：显示/隐藏、贴边收起开关、主账号/主 Key 选择；
 * 主账号/主 Key 使用原生 `CheckMenuItem` 单选联动，并提供「刷新 Key 列表」入口；
 * 使用 egui immediate viewport 创建无边框、透明、置顶、任务栏隐藏的 64×64 悬浮球；
-* 未悬浮时绘制为右侧窄条，鼠标悬停展开为圆形；该行为受 `floatingBallEdgeHide` 控制；
+* 悬浮球支持拖拽；未悬浮且贴近屏幕边缘时绘制为窄条，鼠标悬停展开为圆形；
+* 拖离屏幕边缘后始终保持圆形，不再收起；该行为受 `floatingBallEdgeHide` 控制；
 * 左键点击悬浮球调用 `show_panel`；
 * 配色使用 `card_bg` / `hover_card_bg`、`accent` 描边、`text_primary` 数值和状态点，不使用整块高饱和品牌色；
 * 账号余额由现有刷新链更新；主 Key 每 60 秒拉一次 Key 列表并更新剩余额度；
@@ -43,7 +44,8 @@
 * `cargo build --release`
 * 实机验证悬浮球窗口创建、余额展示和贴边收起绘制；
 * 悬浮球直接在透明 viewport 外层 Ui 绘制，不套 CentralPanel；
-* Windows 下额外把悬浮球 HWND 改成 `WS_POPUP`，移除系统 `WS_CAPTION`/`WS_THICKFRAME` 产生的边框和阴影。
+* Windows 下额外把悬浮球 HWND 改成 `WS_POPUP`，移除系统 `WS_CAPTION`/`WS_THICKFRAME` 产生的边框和阴影；
+* 将窗口客户区四周裁掉 1px，消除部分系统仍保留的顶部 1px 亮线。
 
 ## 五、结果
 
