@@ -770,6 +770,12 @@ pub struct TrayApp {
     floating_ball_target: Option<FloatingBallTarget>,
     /// 上一帧鼠标是否在悬浮球上。
     floating_ball_hovered: bool,
+    /// 悬浮球当前窗口位置；拖拽后记录，隐藏/重新显示时恢复。
+    floating_ball_position: Option<egui::Pos2>,
+    /// 是否已经完成本轮窗口定位（避免每帧重置拖拽位置）。
+    floating_ball_positioned: bool,
+    /// 悬浮球当前是否贴着屏幕边缘。
+    floating_ball_at_edge: bool,
     /// 是否已经去掉过悬浮球原生窗口边框。
     floating_ball_native_ready: bool,
     /// 主 Key 最近一次刷新时间。
@@ -955,6 +961,9 @@ impl TrayApp {
             floating_ball_edge_hide,
             floating_ball_target,
             floating_ball_hovered: false,
+            floating_ball_position: None,
+            floating_ball_positioned: false,
+            floating_ball_at_edge: false,
             floating_ball_native_ready: false,
             floating_ball_key_refresh_at: None,
             dark_mode,
@@ -1383,7 +1392,10 @@ impl TrayApp {
             return;
         }
         let view = self.floating_ball_view();
-        let expanded = !self.floating_ball_edge_hide || self.floating_ball_hovered;
+        // 只有贴边时才允许收起；拖到屏幕中间后始终保持圆形。
+        let expanded = !self.floating_ball_edge_hide
+            || !self.floating_ball_at_edge
+            || self.floating_ball_hovered;
         let ball_background = if self.floating_ball_hovered {
             theme().hover_card_bg
         } else {
@@ -1393,12 +1405,13 @@ impl TrayApp {
         let monitor = ctx
             .input(|i| i.viewport().monitor_size)
             .unwrap_or(egui::vec2(1920.0, 1080.0));
-        let position = egui::pos2(
+        let default_position = egui::pos2(
             (monitor.x - width - ui_style::size::FLOATING_BALL_MARGIN).max(0.0),
             ((monitor.y - ui_style::size::FLOATING_BALL_SIZE) * 0.5).max(0.0),
         );
+        let position = self.floating_ball_position.unwrap_or(default_position);
         let viewport_id = egui::ViewportId::from_hash_of("floating-ball");
-        let builder = egui::ViewportBuilder::default()
+        let mut builder = egui::ViewportBuilder::default()
             .with_title("用量统计悬浮球")
             .with_inner_size([width, ui_style::size::FLOATING_BALL_SIZE])
             .with_min_inner_size([width, ui_style::size::FLOATING_BALL_SIZE])
@@ -1406,12 +1419,16 @@ impl TrayApp {
             .with_transparent(true)
             .with_always_on_top()
             .with_taskbar(false)
-            .with_resizable(false)
-            .with_position(position);
+            .with_resizable(false);
+        if !self.floating_ball_positioned {
+            builder = builder.with_position(position);
+        }
 
         let mut clicked = false;
         let mut hovered = false;
         let mut close_requested = false;
+        let mut next_position: Option<egui::Pos2> = None;
+        let mut next_at_edge = self.floating_ball_at_edge;
         ctx.show_viewport_immediate(viewport_id, builder, |ui, _class| {
             let child_ctx = ui.ctx().clone();
             // 某些平台/eframe 路径会忽略 ViewportBuilder 的 decorations 设置，
@@ -1419,13 +1436,27 @@ impl TrayApp {
             child_ctx.send_viewport_cmd(egui::ViewportCommand::Decorations(false));
             child_ctx.send_viewport_cmd(egui::ViewportCommand::Transparent(true));
             close_requested = child_ctx.input(|i| i.viewport().close_requested());
+            if let Some(outer) = child_ctx.input(|i| i.viewport().outer_rect) {
+                next_position = Some(outer.min);
+                let monitor = child_ctx
+                    .input(|i| i.viewport().monitor_size)
+                    .unwrap_or(egui::vec2(1920.0, 1080.0));
+                let threshold = ui_style::size::FLOATING_BALL_EDGE_THRESHOLD;
+                next_at_edge = outer.left() <= threshold
+                    || outer.top() <= threshold
+                    || monitor.x - outer.right() <= threshold
+                    || monitor.y - outer.bottom() <= threshold;
+            }
             // 不套 CentralPanel/Frame：它们会绘制面板底色，透明 viewport 上会留下
             // 一层半透明方形底层。直接在最外层 Ui 上分配矩形并只画圆/窄条。
             ui.set_min_size(egui::vec2(width, ui_style::size::FLOATING_BALL_SIZE));
             let (rect, response) = ui.allocate_exact_size(
                 egui::vec2(width, ui_style::size::FLOATING_BALL_SIZE),
-                egui::Sense::click(),
+                egui::Sense::click_and_drag(),
             );
+            if response.drag_started() {
+                child_ctx.send_viewport_cmd(egui::ViewportCommand::StartDrag);
+            }
             let painter = ui.painter();
             if expanded {
                 let center = rect.center();
@@ -1469,11 +1500,17 @@ impl TrayApp {
                 painter.circle_filled(tab.center(), 3.0, status_color(view.status));
             }
             let response = response.on_hover_cursor(egui::CursorIcon::PointingHand);
-            hovered = response.hovered();
+            hovered = response.hovered() || response.dragged();
             if response.clicked() {
                 clicked = true;
             }
         });
+
+        if let Some(position) = next_position {
+            self.floating_ball_position = Some(position);
+        }
+        self.floating_ball_at_edge = next_at_edge;
+        self.floating_ball_positioned = true;
 
         if !self.floating_ball_native_ready {
             self.floating_ball_native_ready =
@@ -1483,6 +1520,7 @@ impl TrayApp {
         if close_requested {
             self.floating_ball_visible = false;
             self.floating_ball_native_ready = false;
+            self.floating_ball_positioned = false;
             self.persist_floating_ball_settings();
             self.rebuild_menu();
         }
@@ -1519,6 +1557,7 @@ impl TrayApp {
                 TrayCommand::ToggleFloatingBall => {
                     self.floating_ball_visible = !self.floating_ball_visible;
                     self.floating_ball_native_ready = false;
+                    self.floating_ball_positioned = false;
                     if self.floating_ball_visible {
                         self.choose_default_floating_ball_target();
                         self.try_start_refresh(ctx, true);
