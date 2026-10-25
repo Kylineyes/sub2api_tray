@@ -770,6 +770,8 @@ pub struct TrayApp {
     floating_ball_target: Option<FloatingBallTarget>,
     /// 上一帧鼠标是否在悬浮球上。
     floating_ball_hovered: bool,
+    /// 是否已经去掉过悬浮球原生窗口边框。
+    floating_ball_native_ready: bool,
     /// 主 Key 最近一次刷新时间。
     floating_ball_key_refresh_at: Option<Instant>,
 
@@ -953,6 +955,7 @@ impl TrayApp {
             floating_ball_edge_hide,
             floating_ball_target,
             floating_ball_hovered: false,
+            floating_ball_native_ready: false,
             floating_ball_key_refresh_at: None,
             dark_mode,
             usage_range: HashMap::new(),
@@ -1411,6 +1414,10 @@ impl TrayApp {
         let mut close_requested = false;
         ctx.show_viewport_immediate(viewport_id, builder, |ui, _class| {
             let child_ctx = ui.ctx().clone();
+            // 某些平台/eframe 路径会忽略 ViewportBuilder 的 decorations 设置，
+            // 导致原生窗口仍带一圈系统边框和阴影。这里再显式发送一次。
+            child_ctx.send_viewport_cmd(egui::ViewportCommand::Decorations(false));
+            child_ctx.send_viewport_cmd(egui::ViewportCommand::Transparent(true));
             close_requested = child_ctx.input(|i| i.viewport().close_requested());
             // 不套 CentralPanel/Frame：它们会绘制面板底色，透明 viewport 上会留下
             // 一层半透明方形底层。直接在最外层 Ui 上分配矩形并只画圆/窄条。
@@ -1468,8 +1475,14 @@ impl TrayApp {
             }
         });
 
+        if !self.floating_ball_native_ready {
+            self.floating_ball_native_ready =
+                crate::floating_window::make_borderless("用量统计悬浮球");
+        }
+
         if close_requested {
             self.floating_ball_visible = false;
+            self.floating_ball_native_ready = false;
             self.persist_floating_ball_settings();
             self.rebuild_menu();
         }
@@ -1505,6 +1518,7 @@ impl TrayApp {
                 }
                 TrayCommand::ToggleFloatingBall => {
                     self.floating_ball_visible = !self.floating_ball_visible;
+                    self.floating_ball_native_ready = false;
                     if self.floating_ball_visible {
                         self.choose_default_floating_ball_target();
                         self.try_start_refresh(ctx, true);

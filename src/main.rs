@@ -33,6 +33,7 @@ mod autostart;
 mod config;
 mod data;
 mod deepseek;
+mod floating_window;
 mod fonts;
 mod login;
 mod mask;
