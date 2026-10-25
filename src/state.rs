@@ -60,8 +60,12 @@ pub struct AccountRuntime {
     pub status: AccountStatus,
     /// 最近一次成功刷新拿到的角色（可能与持久化时不同）。
     pub role: AccountRole,
-    /// 余额（美元）。
+    /// 余额（币种由账号 provider 决定）。
     pub balance: Option<f64>,
+    /// DeepSeek 赠送/奖励余额。
+    pub granted_balance: Option<f64>,
+    /// DeepSeek 充值余额。
+    pub topped_up_balance: Option<f64>,
     /// 订阅摘要。
     pub summary: Option<SubscriptionSummary>,
     /// 最近一次成功刷新的时刻。
@@ -76,6 +80,8 @@ impl Default for AccountRuntime {
             status: AccountStatus::Unknown,
             role: AccountRole::Unknown,
             balance: None,
+            granted_balance: None,
+            topped_up_balance: None,
             summary: None,
             last_refreshed: None,
             last_error: None,
@@ -119,11 +125,17 @@ impl RuntimeTable {
     }
 
     /// 记录一次成功刷新。
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "刷新结果需要同时记录总额、赠送余额、充值余额与订阅摘要"
+    )]
     pub fn apply_online(
         &mut self,
         id: &str,
         role: AccountRole,
         balance: Option<f64>,
+        granted_balance: Option<f64>,
+        topped_up_balance: Option<f64>,
         summary: Option<SubscriptionSummary>,
         now: Instant,
     ) {
@@ -131,6 +143,8 @@ impl RuntimeTable {
         entry.status = AccountStatus::Online;
         entry.role = role;
         entry.balance = balance;
+        entry.granted_balance = granted_balance;
+        entry.topped_up_balance = topped_up_balance;
         entry.summary = summary;
         entry.last_refreshed = Some(now);
         entry.last_error = None;
@@ -178,7 +192,7 @@ mod tests {
     fn 成功刷新后变为在线并记录余额() {
         let mut table = RuntimeTable::default();
         let now = Instant::now();
-        table.apply_online("a", AccountRole::Admin, Some(12.5), None, now);
+        table.apply_online("a", AccountRole::Admin, Some(12.5), None, None, None, now);
 
         let runtime = table.get("a").expect("应当存在");
         assert_eq!(runtime.status, AccountStatus::Online);
@@ -192,7 +206,7 @@ mod tests {
     fn 失败不改动刷新时间以便下一轮重试() {
         let mut table = RuntimeTable::default();
         let now = Instant::now();
-        table.apply_online("a", AccountRole::User, Some(1.0), None, now);
+        table.apply_online("a", AccountRole::User, Some(1.0), None, None, None, now);
         table.apply_error("a", AccountStatus::Offline, "网络不可达");
 
         let runtime = table.get("a").unwrap();
@@ -205,7 +219,15 @@ mod tests {
     #[test]
     fn 删除账号清理运行态() {
         let mut table = RuntimeTable::default();
-        table.apply_online("a", AccountRole::User, None, None, Instant::now());
+        table.apply_online(
+            "a",
+            AccountRole::User,
+            None,
+            None,
+            None,
+            None,
+            Instant::now(),
+        );
         table.remove("a");
         assert!(table.get("a").is_none());
         assert_eq!(table.online_count(), 0);

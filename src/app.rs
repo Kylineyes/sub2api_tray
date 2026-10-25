@@ -324,6 +324,8 @@ struct FloatingBallView {
     text: String,
     /// 账号状态色。
     status: AccountStatus,
+    /// 球内第二行小字（DeepSeek 奖励金额等）。
+    subtext: Option<String>,
 }
 
 /// 悬浮球主 Key 的后台刷新周期。
@@ -493,8 +495,12 @@ struct AccountCard {
     base_url: String,
     /// 登录态。
     status: AccountStatus,
-    /// 余额（美元）。
+    /// 余额（币种由 provider 决定）。
     balance: Option<f64>,
+    /// DeepSeek 赠送/奖励余额。
+    granted_balance: Option<f64>,
+    /// DeepSeek 充值余额。
+    topped_up_balance: Option<f64>,
     /// 订阅摘要的一行文字。
     summary: Option<String>,
     /// "x 秒前刷新"。
@@ -1163,6 +1169,8 @@ impl TrayApp {
                     },
                     status,
                     balance: runtime.and_then(|item| item.balance),
+                    granted_balance: runtime.and_then(|item| item.granted_balance),
+                    topped_up_balance: runtime.and_then(|item| item.topped_up_balance),
                     summary,
                     refreshed,
                     error: runtime.and_then(|item| item.last_error.clone()),
@@ -1364,12 +1372,14 @@ impl TrayApp {
             return FloatingBallView {
                 text: "设置".to_owned(),
                 status,
+                subtext: None,
             };
         };
         let DataLayer::Ready(store) = &self.data else {
             return FloatingBallView {
                 text: "--".to_owned(),
                 status,
+                subtext: None,
             };
         };
         let Some(account) = store
@@ -1380,6 +1390,7 @@ impl TrayApp {
             return FloatingBallView {
                 text: "失效".to_owned(),
                 status,
+                subtext: None,
             };
         };
 
@@ -1401,18 +1412,21 @@ impl TrayApp {
                     }
                     _ => "不限".to_owned(),
                 };
-                return FloatingBallView { text, status };
+                return FloatingBallView {
+                    text,
+                    status,
+                    subtext: None,
+                };
             }
             return FloatingBallView {
                 text: "--".to_owned(),
                 status,
+                subtext: None,
             };
         }
 
-        let balance = self
-            .runtime
-            .get(&account.id)
-            .and_then(|runtime| runtime.balance);
+        let runtime = self.runtime.get(&account.id);
+        let balance = runtime.and_then(|runtime| runtime.balance);
         let text = balance
             .map(|value| {
                 if account.provider == AccountProvider::DeepSeekPlatform {
@@ -1422,7 +1436,18 @@ impl TrayApp {
                 }
             })
             .unwrap_or_else(|| "--".to_owned());
-        FloatingBallView { text, status }
+        let subtext = if account.provider == AccountProvider::DeepSeekPlatform {
+            runtime
+                .and_then(|runtime| runtime.granted_balance)
+                .map(|reward| format!("奖励 ¥{reward:.2}"))
+        } else {
+            None
+        };
+        FloatingBallView {
+            text,
+            status,
+            subtext,
+        }
     }
 
     /// 绘制并处理桌面悬浮球窗口。
@@ -1540,13 +1565,30 @@ impl TrayApp {
                     radius - 4.0,
                     egui::Stroke::new(1.0, theme().chart_fill),
                 );
-                painter.text(
-                    center,
-                    egui::Align2::CENTER_CENTER,
-                    &view.text,
-                    egui::FontId::proportional(font::BODY_SMALL_PLUS),
-                    theme().text_primary,
-                );
+                if let Some(subtext) = view.subtext.as_deref() {
+                    painter.text(
+                        center - egui::vec2(0.0, 7.0),
+                        egui::Align2::CENTER_CENTER,
+                        &view.text,
+                        egui::FontId::proportional(font::BODY_SMALL_PLUS),
+                        theme().text_primary,
+                    );
+                    painter.text(
+                        center + egui::vec2(0.0, 10.0),
+                        egui::Align2::CENTER_CENTER,
+                        subtext,
+                        egui::FontId::proportional(font::CAPTION),
+                        theme().text_secondary,
+                    );
+                } else {
+                    painter.text(
+                        center,
+                        egui::Align2::CENTER_CENTER,
+                        &view.text,
+                        egui::FontId::proportional(font::BODY_SMALL_PLUS),
+                        theme().text_primary,
+                    );
+                }
                 let dot = rect.right_bottom() - egui::vec2(12.0, 12.0);
                 painter.circle_filled(dot, 5.0, theme().panel_bg);
                 painter.circle_filled(dot, 3.5, status_color(view.status));
@@ -3387,6 +3429,8 @@ impl TrayApp {
                                 &result.id,
                                 status.role,
                                 status.balance,
+                                status.granted_balance,
+                                status.topped_up_balance,
                                 summary,
                                 now,
                             );
@@ -5739,6 +5783,14 @@ fn draw_account_card(
                 if let Some(balance) = card.balance {
                     let symbol = if is_deepseek { "¥" } else { "$" };
                     status_line.push_str(&format!(" · 余额 {symbol}{balance:.2}"));
+                }
+                if is_deepseek {
+                    if let Some(reward) = card.granted_balance {
+                        status_line.push_str(&format!(" · 奖励 ¥{reward:.2}"));
+                    }
+                    if let Some(topped_up) = card.topped_up_balance {
+                        status_line.push_str(&format!(" · 充值 ¥{topped_up:.2}"));
+                    }
                 }
                 ui.label(
                     egui::RichText::new(status_line)
