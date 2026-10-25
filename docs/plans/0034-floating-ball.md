@@ -42,7 +42,8 @@
 * `cargo test`：130 passed，8 ignored
 * `cargo build --release`
 * 实机验证悬浮球窗口创建、余额展示和贴边收起绘制；
-* 悬浮球直接在透明 viewport 外层 Ui 绘制，不套 CentralPanel，避免贴边收起时出现半透明方形底层。
+* 悬浮球直接在透明 viewport 外层 Ui 绘制，不套 CentralPanel；
+* Windows 下额外把悬浮球 HWND 改成 `WS_POPUP`，移除系统 `WS_CAPTION`/`WS_THICKFRAME` 产生的边框和阴影。
 
 ## 五、结果
 

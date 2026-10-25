@@ -53,7 +53,7 @@ panic = "abort"
 
 [target.'cfg(windows)'.dependencies]
 # DPAPI：把凭据加密成只有当前 Windows 用户能解开的密文
-windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_Security_Cryptography"] }
+windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_Security_Cryptography", "Win32_UI_WindowsAndMessaging"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 # 钥匙串：凭据存进系统钥匙串，accounts.json 里只留引用
