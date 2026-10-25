@@ -23,6 +23,10 @@ pub struct DeepSeekBalance {
     pub currency: String,
     /// 总余额。
     pub total_balance: f64,
+    /// 赠送/奖励余额。
+    pub granted_balance: f64,
+    /// 充值余额。
+    pub topped_up_balance: f64,
 }
 
 /// 返回 API Key 的安全展示文本。
@@ -71,11 +75,23 @@ pub fn parse_balance_response(status: u16, body: &str) -> Result<DeepSeekBalance
         .and_then(|item| item.as_str())
         .and_then(|text| text.parse::<f64>().ok())
         .ok_or_else(|| ApiError::Server("DeepSeek 余额字段格式错误".to_owned()))?;
+    let granted_balance = selected
+        .get("granted_balance")
+        .and_then(|item| item.as_str())
+        .and_then(|text| text.parse::<f64>().ok())
+        .unwrap_or(0.0);
+    let topped_up_balance = selected
+        .get("topped_up_balance")
+        .and_then(|item| item.as_str())
+        .and_then(|text| text.parse::<f64>().ok())
+        .unwrap_or(0.0);
 
     Ok(DeepSeekBalance {
         is_available,
         currency,
         total_balance,
+        granted_balance,
+        topped_up_balance,
     })
 }
 
@@ -120,13 +136,15 @@ mod tests {
             "is_available": true,
             "balance_infos": [
                 {"currency":"USD","total_balance":"1.00"},
-                {"currency":"CNY","total_balance":"110.00"}
+                {"currency":"CNY","total_balance":"110.00","granted_balance":"10.50","topped_up_balance":"99.50"}
             ]
         }"#;
         let got = parse_balance_response(200, body).unwrap();
         assert!(got.is_available);
         assert_eq!(got.currency, "CNY");
         assert_eq!(got.total_balance, 110.0);
+        assert_eq!(got.granted_balance, 10.5);
+        assert_eq!(got.topped_up_balance, 99.5);
     }
 
     #[test]

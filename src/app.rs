@@ -197,6 +197,15 @@ struct UsageUiActions {
     toggle_collapse: Option<String>,
 }
 
+/// 总览卡片里的悬浮球选择动作。
+#[derive(Debug, Default)]
+struct FloatingBallUiActions {
+    /// 选择主账号/主 Key；第二项 None 表示账号余额。
+    target: Option<(String, Option<String>)>,
+    /// 请求刷新 Key 列表。
+    refresh_keys: bool,
+}
+
 /// 用量区汇总指标。
 #[derive(Debug, Clone, Copy, Default)]
 struct UsageTotals {
@@ -299,6 +308,15 @@ struct FloatingBallTarget {
     key_id: Option<String>,
 }
 
+/// 悬浮球贴住的屏幕边缘。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FloatingBallDockEdge {
+    Left,
+    Right,
+    Top,
+    Bottom,
+}
+
 /// 悬浮球当前要展示的内容。
 #[derive(Debug, Clone)]
 struct FloatingBallView {
@@ -306,6 +324,8 @@ struct FloatingBallView {
     text: String,
     /// 账号状态色。
     status: AccountStatus,
+    /// 球内第二行小字（DeepSeek 奖励金额等）。
+    subtext: Option<String>,
 }
 
 /// 悬浮球主 Key 的后台刷新周期。
@@ -475,8 +495,12 @@ struct AccountCard {
     base_url: String,
     /// 登录态。
     status: AccountStatus,
-    /// 余额（美元）。
+    /// 余额（币种由 provider 决定）。
     balance: Option<f64>,
+    /// DeepSeek 赠送/奖励余额。
+    granted_balance: Option<f64>,
+    /// DeepSeek 充值余额。
+    topped_up_balance: Option<f64>,
     /// 订阅摘要的一行文字。
     summary: Option<String>,
     /// "x 秒前刷新"。
@@ -770,6 +794,14 @@ pub struct TrayApp {
     floating_ball_target: Option<FloatingBallTarget>,
     /// 上一帧鼠标是否在悬浮球上。
     floating_ball_hovered: bool,
+    /// 悬浮球当前窗口位置；拖拽后记录，隐藏/重新显示时恢复。
+    floating_ball_position: Option<egui::Pos2>,
+    /// 是否已经完成本轮窗口定位（避免每帧重置拖拽位置）。
+    floating_ball_positioned: bool,
+    /// 悬浮球当前贴住的屏幕边缘；None 表示在屏幕中间。
+    floating_ball_dock_edge: Option<FloatingBallDockEdge>,
+    /// 是否已经去掉过悬浮球原生窗口边框。
+    floating_ball_native_ready: bool,
     /// 主 Key 最近一次刷新时间。
     floating_ball_key_refresh_at: Option<Instant>,
 
@@ -953,6 +985,10 @@ impl TrayApp {
             floating_ball_edge_hide,
             floating_ball_target,
             floating_ball_hovered: false,
+            floating_ball_position: None,
+            floating_ball_positioned: false,
+            floating_ball_dock_edge: None,
+            floating_ball_native_ready: false,
             floating_ball_key_refresh_at: None,
             dark_mode,
             usage_range: HashMap::new(),
@@ -1133,6 +1169,8 @@ impl TrayApp {
                     },
                     status,
                     balance: runtime.and_then(|item| item.balance),
+                    granted_balance: runtime.and_then(|item| item.granted_balance),
+                    topped_up_balance: runtime.and_then(|item| item.topped_up_balance),
                     summary,
                     refreshed,
                     error: runtime.and_then(|item| item.last_error.clone()),
@@ -1280,6 +1318,27 @@ impl TrayApp {
         ctx.request_repaint();
     }
 
+    /// 刷新所有 Sub2API 账号的 Key 列表，供托盘菜单和面板选择器使用。
+    fn refresh_floating_ball_targets(&mut self, ctx: &egui::Context) {
+        let ids = match &self.data {
+            DataLayer::Ready(store) => store
+                .accounts()
+                .iter()
+                .filter(|account| account.provider == AccountProvider::Sub2Api)
+                .map(|account| account.id.clone())
+                .collect::<Vec<_>>(),
+            DataLayer::Unavailable(_) => Vec::new(),
+        };
+        for id in ids {
+            if !self.keys_rx.contains_key(&id) {
+                self.request_account_keys(ctx, &id);
+            }
+        }
+        self.try_start_refresh(ctx, true);
+        self.toast = Some(("正在刷新 Key 列表".to_owned(), Instant::now()));
+        ctx.request_repaint();
+    }
+
     /// 悬浮球主 Key 的后台刷新；账号余额由现有状态刷新链更新。
     fn maybe_refresh_floating_ball_data(&mut self, ctx: &egui::Context) {
         if !self.floating_ball_visible {
@@ -1313,12 +1372,14 @@ impl TrayApp {
             return FloatingBallView {
                 text: "设置".to_owned(),
                 status,
+                subtext: None,
             };
         };
         let DataLayer::Ready(store) = &self.data else {
             return FloatingBallView {
                 text: "--".to_owned(),
                 status,
+                subtext: None,
             };
         };
         let Some(account) = store
@@ -1329,6 +1390,7 @@ impl TrayApp {
             return FloatingBallView {
                 text: "失效".to_owned(),
                 status,
+                subtext: None,
             };
         };
 
@@ -1350,18 +1412,21 @@ impl TrayApp {
                     }
                     _ => "不限".to_owned(),
                 };
-                return FloatingBallView { text, status };
+                return FloatingBallView {
+                    text,
+                    status,
+                    subtext: None,
+                };
             }
             return FloatingBallView {
                 text: "--".to_owned(),
                 status,
+                subtext: None,
             };
         }
 
-        let balance = self
-            .runtime
-            .get(&account.id)
-            .and_then(|runtime| runtime.balance);
+        let runtime = self.runtime.get(&account.id);
+        let balance = runtime.and_then(|runtime| runtime.balance);
         let text = balance
             .map(|value| {
                 if account.provider == AccountProvider::DeepSeekPlatform {
@@ -1371,7 +1436,18 @@ impl TrayApp {
                 }
             })
             .unwrap_or_else(|| "--".to_owned());
-        FloatingBallView { text, status }
+        let subtext = if account.provider == AccountProvider::DeepSeekPlatform {
+            runtime
+                .and_then(|runtime| runtime.granted_balance)
+                .map(|reward| format!("奖励 ¥{reward:.2}"))
+        } else {
+            None
+        };
+        FloatingBallView {
+            text,
+            status,
+            subtext,
+        }
     }
 
     /// 绘制并处理桌面悬浮球窗口。
@@ -1380,17 +1456,33 @@ impl TrayApp {
             return;
         }
         let view = self.floating_ball_view();
-        let expanded = !self.floating_ball_edge_hide || self.floating_ball_hovered;
+        // 只有贴边时才允许收起；拖到屏幕中间后始终保持圆形。
+        let dock_edge = self.floating_ball_dock_edge;
+        let expanded =
+            !self.floating_ball_edge_hide || dock_edge.is_none() || self.floating_ball_hovered;
+        let ball_background = if self.floating_ball_hovered {
+            theme().hover_card_bg
+        } else {
+            theme().card_bg
+        };
         let width = ui_style::size::FLOATING_BALL_SIZE;
         let monitor = ctx
             .input(|i| i.viewport().monitor_size)
             .unwrap_or(egui::vec2(1920.0, 1080.0));
-        let position = egui::pos2(
+        let default_position = egui::pos2(
             (monitor.x - width - ui_style::size::FLOATING_BALL_MARGIN).max(0.0),
             ((monitor.y - ui_style::size::FLOATING_BALL_SIZE) * 0.5).max(0.0),
         );
+        let stored_position = self.floating_ball_position.unwrap_or(default_position);
+        let position = egui::pos2(
+            stored_position.x.clamp(0.0, (monitor.x - width).max(0.0)),
+            stored_position.y.clamp(
+                0.0,
+                (monitor.y - ui_style::size::FLOATING_BALL_SIZE).max(0.0),
+            ),
+        );
         let viewport_id = egui::ViewportId::from_hash_of("floating-ball");
-        let builder = egui::ViewportBuilder::default()
+        let mut builder = egui::ViewportBuilder::default()
             .with_title("用量统计悬浮球")
             .with_inner_size([width, ui_style::size::FLOATING_BALL_SIZE])
             .with_min_inner_size([width, ui_style::size::FLOATING_BALL_SIZE])
@@ -1398,71 +1490,164 @@ impl TrayApp {
             .with_transparent(true)
             .with_always_on_top()
             .with_taskbar(false)
-            .with_resizable(false)
-            .with_position(position);
+            .with_resizable(false);
+        if !self.floating_ball_positioned {
+            builder = builder.with_position(position);
+        }
 
         let mut clicked = false;
         let mut hovered = false;
         let mut close_requested = false;
+        let mut next_position: Option<egui::Pos2> = None;
+        let mut next_dock_edge = self.floating_ball_dock_edge;
         ctx.show_viewport_immediate(viewport_id, builder, |ui, _class| {
             let child_ctx = ui.ctx().clone();
+            // 某些平台/eframe 路径会忽略 ViewportBuilder 的 decorations 设置，
+            // 导致原生窗口仍带一圈系统边框和阴影。这里再显式发送一次。
+            child_ctx.send_viewport_cmd(egui::ViewportCommand::Decorations(false));
+            child_ctx.send_viewport_cmd(egui::ViewportCommand::Transparent(true));
             close_requested = child_ctx.input(|i| i.viewport().close_requested());
+            if let Some(outer) = child_ctx.input(|i| i.viewport().outer_rect) {
+                let monitor = child_ctx
+                    .input(|i| i.viewport().monitor_size)
+                    .unwrap_or(egui::vec2(1920.0, 1080.0));
+                // 原生拖拽不会自动限制在屏幕内；这里把整个窗口夹回显示器范围。
+                let clamped = egui::pos2(
+                    outer
+                        .left()
+                        .clamp(0.0, (monitor.x - outer.width()).max(0.0)),
+                    outer
+                        .top()
+                        .clamp(0.0, (monitor.y - outer.height()).max(0.0)),
+                );
+                next_position = Some(clamped);
+                if (clamped - outer.min).length_sq() > 0.01 {
+                    child_ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(clamped));
+                }
+
+                let threshold = ui_style::size::FLOATING_BALL_EDGE_THRESHOLD;
+                let distances = [
+                    (clamped.x, FloatingBallDockEdge::Left),
+                    (
+                        (monitor.x - clamped.x - outer.width()).max(0.0),
+                        FloatingBallDockEdge::Right,
+                    ),
+                    (clamped.y, FloatingBallDockEdge::Top),
+                    (
+                        (monitor.y - clamped.y - outer.height()).max(0.0),
+                        FloatingBallDockEdge::Bottom,
+                    ),
+                ];
+                next_dock_edge = distances
+                    .into_iter()
+                    .filter(|(distance, _)| *distance <= threshold)
+                    .min_by(|left, right| left.0.total_cmp(&right.0))
+                    .map(|(_, edge)| edge);
+            }
             // 不套 CentralPanel/Frame：它们会绘制面板底色，透明 viewport 上会留下
             // 一层半透明方形底层。直接在最外层 Ui 上分配矩形并只画圆/窄条。
             ui.set_min_size(egui::vec2(width, ui_style::size::FLOATING_BALL_SIZE));
             let (rect, response) = ui.allocate_exact_size(
                 egui::vec2(width, ui_style::size::FLOATING_BALL_SIZE),
-                egui::Sense::click(),
+                egui::Sense::click_and_drag(),
             );
+            if response.drag_started() {
+                child_ctx.send_viewport_cmd(egui::ViewportCommand::StartDrag);
+            }
             let painter = ui.painter();
             if expanded {
                 let center = rect.center();
-                painter.circle_filled(
-                    center,
-                    ui_style::size::FLOATING_BALL_SIZE * 0.5 - 2.0,
-                    theme().accent,
-                );
+                let radius = ui_style::size::FLOATING_BALL_SIZE * 0.5 - 2.0;
+                painter.circle_filled(center, radius, ball_background);
+                painter.circle_stroke(center, radius, egui::Stroke::new(1.5, theme().accent));
                 painter.circle_stroke(
                     center,
-                    ui_style::size::FLOATING_BALL_SIZE * 0.5 - 2.0,
-                    egui::Stroke::new(1.0, theme().on_accent),
+                    radius - 4.0,
+                    egui::Stroke::new(1.0, theme().chart_fill),
                 );
-                painter.text(
-                    center,
-                    egui::Align2::CENTER_CENTER,
-                    &view.text,
-                    egui::FontId::proportional(font::BODY_SMALL_PLUS),
-                    theme().on_accent,
-                );
-                painter.circle_filled(
-                    rect.right_bottom() - egui::vec2(12.0, 12.0),
-                    4.0,
-                    status_color(view.status),
-                );
+                if let Some(subtext) = view.subtext.as_deref() {
+                    painter.text(
+                        center - egui::vec2(0.0, 7.0),
+                        egui::Align2::CENTER_CENTER,
+                        &view.text,
+                        egui::FontId::proportional(font::BODY_SMALL_PLUS),
+                        theme().text_primary,
+                    );
+                    painter.text(
+                        center + egui::vec2(0.0, 10.0),
+                        egui::Align2::CENTER_CENTER,
+                        subtext,
+                        egui::FontId::proportional(font::CAPTION),
+                        theme().text_secondary,
+                    );
+                } else {
+                    painter.text(
+                        center,
+                        egui::Align2::CENTER_CENTER,
+                        &view.text,
+                        egui::FontId::proportional(font::BODY_SMALL_PLUS),
+                        theme().text_primary,
+                    );
+                }
+                let dot = rect.right_bottom() - egui::vec2(12.0, 12.0);
+                painter.circle_filled(dot, 5.0, theme().panel_bg);
+                painter.circle_filled(dot, 3.5, status_color(view.status));
             } else {
-                let tab = egui::Rect::from_min_max(
-                    egui::pos2(
-                        rect.right() - ui_style::size::FLOATING_BALL_COLLAPSED_WIDTH,
-                        rect.top() + 4.0,
+                let thickness = ui_style::size::FLOATING_BALL_COLLAPSED_WIDTH;
+                let inset = 4.0;
+                let tab = match dock_edge {
+                    Some(FloatingBallDockEdge::Left) => egui::Rect::from_min_max(
+                        egui::pos2(rect.left(), rect.top() + inset),
+                        egui::pos2(rect.left() + thickness, rect.bottom() - inset),
                     ),
-                    rect.right_bottom() - egui::vec2(0.0, 4.0),
-                );
+                    Some(FloatingBallDockEdge::Top) => egui::Rect::from_min_max(
+                        egui::pos2(rect.left() + inset, rect.top()),
+                        egui::pos2(rect.right() - inset, rect.top() + thickness),
+                    ),
+                    Some(FloatingBallDockEdge::Bottom) => egui::Rect::from_min_max(
+                        egui::pos2(rect.left() + inset, rect.bottom() - thickness),
+                        egui::pos2(rect.right() - inset, rect.bottom()),
+                    ),
+                    _ => egui::Rect::from_min_max(
+                        egui::pos2(rect.right() - thickness, rect.top() + inset),
+                        egui::pos2(rect.right(), rect.bottom() - inset),
+                    ),
+                };
                 painter.rect_filled(
                     tab,
                     egui::CornerRadius::same(ui_style::size::RADIUS_LG),
-                    theme().accent,
+                    ball_background,
+                );
+                painter.rect_stroke(
+                    tab,
+                    egui::CornerRadius::same(ui_style::size::RADIUS_LG),
+                    egui::Stroke::new(1.0, theme().accent),
+                    egui::StrokeKind::Inside,
                 );
                 painter.circle_filled(tab.center(), 3.0, status_color(view.status));
             }
             let response = response.on_hover_cursor(egui::CursorIcon::PointingHand);
-            hovered = response.hovered();
+            hovered = response.hovered() || response.dragged();
             if response.clicked() {
                 clicked = true;
             }
         });
 
+        if let Some(position) = next_position {
+            self.floating_ball_position = Some(position);
+        }
+        self.floating_ball_dock_edge = next_dock_edge;
+        self.floating_ball_positioned = true;
+
+        if !self.floating_ball_native_ready {
+            self.floating_ball_native_ready =
+                crate::floating_window::make_borderless("用量统计悬浮球");
+        }
+
         if close_requested {
             self.floating_ball_visible = false;
+            self.floating_ball_native_ready = false;
+            self.floating_ball_positioned = false;
             self.persist_floating_ball_settings();
             self.rebuild_menu();
         }
@@ -1498,6 +1683,8 @@ impl TrayApp {
                 }
                 TrayCommand::ToggleFloatingBall => {
                     self.floating_ball_visible = !self.floating_ball_visible;
+                    self.floating_ball_native_ready = false;
+                    self.floating_ball_positioned = false;
                     if self.floating_ball_visible {
                         self.choose_default_floating_ball_target();
                         self.try_start_refresh(ctx, true);
@@ -1514,6 +1701,9 @@ impl TrayApp {
                 }
                 TrayCommand::SetFloatingBallTarget { account_id, key_id } => {
                     self.set_floating_ball_target(ctx, account_id, key_id);
+                }
+                TrayCommand::RefreshFloatingBallTargets => {
+                    self.refresh_floating_ball_targets(ctx);
                 }
             }
         }
@@ -3239,6 +3429,8 @@ impl TrayApp {
                                 &result.id,
                                 status.role,
                                 status.balance,
+                                status.granted_balance,
+                                status.topped_up_balance,
                                 summary,
                                 now,
                             );
@@ -3654,6 +3846,7 @@ impl TrayApp {
         };
         let toast = self.toast.as_ref().map(|(text, _)| text.clone());
         let cards = self.collect_cards();
+        let floating_target = self.floating_ball_target.clone();
 
         // 顶部按钮的点击结果：闭包里不能直接改 `self`，先记在局部变量里
         let mut open_login = false;
@@ -3665,6 +3858,8 @@ impl TrayApp {
         let mut key_actions = KeyUiActions::default();
         // 用量区交互：区间、API Key、指标与折叠
         let mut usage_actions = UsageUiActions::default();
+        // 总览卡片里的悬浮球主账号/主 Key 选择
+        let mut floating_actions = FloatingBallUiActions::default();
         // 面板内的账号操作：请求删除（标题行右侧按钮触发）
         let mut delete_request: Option<String> = None;
         // 设置页入口的点击结果
@@ -3717,6 +3912,8 @@ impl TrayApp {
                             &mut open_login,
                             &mut refresh_clicked,
                             at_limit,
+                            floating_target.as_ref(),
+                            &mut floating_actions,
                         );
                         ui.add_space(ui_style::space::XL);
 
@@ -3772,6 +3969,13 @@ impl TrayApp {
             }
             self.maybe_request_usage(ctx);
             ctx.request_repaint();
+        }
+
+        if floating_actions.refresh_keys {
+            self.refresh_floating_ball_targets(ctx);
+        }
+        if let Some((account_id, key_id)) = floating_actions.target.take() {
+            self.set_floating_ball_target(ctx, account_id, key_id);
         }
 
         if let Some((account_id, key_id)) = key_actions.copy_request.take() {
@@ -5216,12 +5420,34 @@ fn status_color(status: AccountStatus) -> egui::Color32 {
 ///
 /// `refresh_clicked` 用来把"点了立即刷新"回传给调用方：
 /// 绘制函数拿不到 `&mut TrayApp`，只能通过局部标志传递。
+fn floating_ball_target_label(
+    target: Option<&FloatingBallTarget>,
+    cards: &[AccountCard],
+) -> String {
+    let Some(target) = target else {
+        return "未选择".to_owned();
+    };
+    let Some(card) = cards.iter().find(|card| card.id == target.account_id) else {
+        return "账号已失效".to_owned();
+    };
+    let Some(key_id) = target.key_id.as_ref() else {
+        return format!("{} · 余额", card.display);
+    };
+    card.keys
+        .as_ref()
+        .and_then(|state| state.keys.iter().find(|key| key.id == *key_id))
+        .map(|key| format!("{} · {}", key.name, key.masked))
+        .unwrap_or_else(|| "已选 Key".to_owned())
+}
+
 fn draw_account_summary(
     ui: &mut egui::Ui,
     cards: &[AccountCard],
     login_clicked: &mut bool,
     refresh_clicked: &mut bool,
     at_limit: bool,
+    floating_target: Option<&FloatingBallTarget>,
+    floating_actions: &mut FloatingBallUiActions,
 ) {
     let online = cards
         .iter()
@@ -5288,6 +5514,58 @@ fn draw_account_summary(
                 .size(font::BODY)
                 .color(theme().text_secondary),
             );
+
+            ui.add_space(ui_style::space::SM);
+            ui.horizontal(|ui| {
+                ui.label(
+                    egui::RichText::new("悬浮球")
+                        .size(font::BODY_SMALL)
+                        .color(theme().text_secondary),
+                );
+                egui::ComboBox::from_id_salt("floating-ball-target-picker")
+                    .selected_text(floating_ball_target_label(floating_target, cards))
+                    .width(ui_style::size::FLOATING_BALL_PICKER_WIDTH)
+                    .show_ui(ui, |ui| {
+                        for card in cards {
+                            let account_selected = floating_target.is_some_and(|target| {
+                                target.account_id == card.id && target.key_id.is_none()
+                            });
+                            if ui
+                                .selectable_label(
+                                    account_selected,
+                                    format!("{} · 余额", card.display),
+                                )
+                                .clicked()
+                            {
+                                floating_actions.target = Some((card.id.clone(), None));
+                            }
+                            if let Some(state) = &card.keys {
+                                for key in &state.keys {
+                                    let selected = floating_target.is_some_and(|target| {
+                                        target.account_id == card.id
+                                            && target.key_id.as_deref() == Some(key.id.as_str())
+                                    });
+                                    if ui
+                                        .selectable_label(
+                                            selected,
+                                            format!("    {}  {}", key.name, key.masked),
+                                        )
+                                        .clicked()
+                                    {
+                                        floating_actions.target =
+                                            Some((card.id.clone(), Some(key.id.clone())));
+                                    }
+                                }
+                            }
+                        }
+                    });
+                if ui_style::add_button(ui, "刷新", ButtonTone::Neutral, ButtonSize::Xs)
+                    .on_hover_text("拉取所有账号的 Key 列表")
+                    .clicked()
+                {
+                    floating_actions.refresh_keys = true;
+                }
+            });
         });
 }
 
@@ -5505,6 +5783,14 @@ fn draw_account_card(
                 if let Some(balance) = card.balance {
                     let symbol = if is_deepseek { "¥" } else { "$" };
                     status_line.push_str(&format!(" · 余额 {symbol}{balance:.2}"));
+                }
+                if is_deepseek {
+                    if let Some(reward) = card.granted_balance {
+                        status_line.push_str(&format!(" · 奖励 ¥{reward:.2}"));
+                    }
+                    if let Some(topped_up) = card.topped_up_balance {
+                        status_line.push_str(&format!(" · 充值 ¥{topped_up:.2}"));
+                    }
                 }
                 ui.label(
                     egui::RichText::new(status_line)
