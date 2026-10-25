@@ -299,6 +299,15 @@ struct FloatingBallTarget {
     key_id: Option<String>,
 }
 
+/// 悬浮球贴住的屏幕边缘。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FloatingBallDockEdge {
+    Left,
+    Right,
+    Top,
+    Bottom,
+}
+
 /// 悬浮球当前要展示的内容。
 #[derive(Debug, Clone)]
 struct FloatingBallView {
@@ -774,8 +783,8 @@ pub struct TrayApp {
     floating_ball_position: Option<egui::Pos2>,
     /// 是否已经完成本轮窗口定位（避免每帧重置拖拽位置）。
     floating_ball_positioned: bool,
-    /// 悬浮球当前是否贴着屏幕边缘。
-    floating_ball_at_edge: bool,
+    /// 悬浮球当前贴住的屏幕边缘；None 表示在屏幕中间。
+    floating_ball_dock_edge: Option<FloatingBallDockEdge>,
     /// 是否已经去掉过悬浮球原生窗口边框。
     floating_ball_native_ready: bool,
     /// 主 Key 最近一次刷新时间。
@@ -963,7 +972,7 @@ impl TrayApp {
             floating_ball_hovered: false,
             floating_ball_position: None,
             floating_ball_positioned: false,
-            floating_ball_at_edge: false,
+            floating_ball_dock_edge: None,
             floating_ball_native_ready: false,
             floating_ball_key_refresh_at: None,
             dark_mode,
@@ -1393,9 +1402,9 @@ impl TrayApp {
         }
         let view = self.floating_ball_view();
         // 只有贴边时才允许收起；拖到屏幕中间后始终保持圆形。
-        let expanded = !self.floating_ball_edge_hide
-            || !self.floating_ball_at_edge
-            || self.floating_ball_hovered;
+        let dock_edge = self.floating_ball_dock_edge;
+        let expanded =
+            !self.floating_ball_edge_hide || dock_edge.is_none() || self.floating_ball_hovered;
         let ball_background = if self.floating_ball_hovered {
             theme().hover_card_bg
         } else {
@@ -1428,7 +1437,7 @@ impl TrayApp {
         let mut hovered = false;
         let mut close_requested = false;
         let mut next_position: Option<egui::Pos2> = None;
-        let mut next_at_edge = self.floating_ball_at_edge;
+        let mut next_dock_edge = self.floating_ball_dock_edge;
         ctx.show_viewport_immediate(viewport_id, builder, |ui, _class| {
             let child_ctx = ui.ctx().clone();
             // 某些平台/eframe 路径会忽略 ViewportBuilder 的 decorations 设置，
@@ -1442,10 +1451,23 @@ impl TrayApp {
                     .input(|i| i.viewport().monitor_size)
                     .unwrap_or(egui::vec2(1920.0, 1080.0));
                 let threshold = ui_style::size::FLOATING_BALL_EDGE_THRESHOLD;
-                next_at_edge = outer.left() <= threshold
-                    || outer.top() <= threshold
-                    || monitor.x - outer.right() <= threshold
-                    || monitor.y - outer.bottom() <= threshold;
+                let distances = [
+                    (outer.left(), FloatingBallDockEdge::Left),
+                    (
+                        (monitor.x - outer.right()).max(0.0),
+                        FloatingBallDockEdge::Right,
+                    ),
+                    (outer.top(), FloatingBallDockEdge::Top),
+                    (
+                        (monitor.y - outer.bottom()).max(0.0),
+                        FloatingBallDockEdge::Bottom,
+                    ),
+                ];
+                next_dock_edge = distances
+                    .into_iter()
+                    .filter(|(distance, _)| *distance <= threshold)
+                    .min_by(|left, right| left.0.total_cmp(&right.0))
+                    .map(|(_, edge)| edge);
             }
             // 不套 CentralPanel/Frame：它们会绘制面板底色，透明 viewport 上会留下
             // 一层半透明方形底层。直接在最外层 Ui 上分配矩形并只画圆/窄条。
@@ -1479,13 +1501,26 @@ impl TrayApp {
                 painter.circle_filled(dot, 5.0, theme().panel_bg);
                 painter.circle_filled(dot, 3.5, status_color(view.status));
             } else {
-                let tab = egui::Rect::from_min_max(
-                    egui::pos2(
-                        rect.right() - ui_style::size::FLOATING_BALL_COLLAPSED_WIDTH,
-                        rect.top() + 4.0,
+                let thickness = ui_style::size::FLOATING_BALL_COLLAPSED_WIDTH;
+                let inset = 4.0;
+                let tab = match dock_edge {
+                    Some(FloatingBallDockEdge::Left) => egui::Rect::from_min_max(
+                        egui::pos2(rect.left(), rect.top() + inset),
+                        egui::pos2(rect.left() + thickness, rect.bottom() - inset),
                     ),
-                    rect.right_bottom() - egui::vec2(0.0, 4.0),
-                );
+                    Some(FloatingBallDockEdge::Top) => egui::Rect::from_min_max(
+                        egui::pos2(rect.left() + inset, rect.top()),
+                        egui::pos2(rect.right() - inset, rect.top() + thickness),
+                    ),
+                    Some(FloatingBallDockEdge::Bottom) => egui::Rect::from_min_max(
+                        egui::pos2(rect.left() + inset, rect.bottom() - thickness),
+                        egui::pos2(rect.right() - inset, rect.bottom()),
+                    ),
+                    _ => egui::Rect::from_min_max(
+                        egui::pos2(rect.right() - thickness, rect.top() + inset),
+                        egui::pos2(rect.right(), rect.bottom() - inset),
+                    ),
+                };
                 painter.rect_filled(
                     tab,
                     egui::CornerRadius::same(ui_style::size::RADIUS_LG),
@@ -1509,7 +1544,7 @@ impl TrayApp {
         if let Some(position) = next_position {
             self.floating_ball_position = Some(position);
         }
-        self.floating_ball_at_edge = next_at_edge;
+        self.floating_ball_dock_edge = next_dock_edge;
         self.floating_ball_positioned = true;
 
         if !self.floating_ball_native_ready {
