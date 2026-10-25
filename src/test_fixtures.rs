@@ -29,4 +29,6 @@ fn 演示账号与展示数据保持固定() {
         serde_json::from_str(include_str!("../testdata/demo/api/deepseek_balance.json")).unwrap();
     assert_eq!(deepseek["balance_infos"][0]["currency"], "CNY");
     assert_eq!(deepseek["balance_infos"][0]["total_balance"], "88.88");
+    assert_eq!(deepseek["balance_infos"][0]["granted_balance"], "12.50");
+    assert_eq!(deepseek["balance_infos"][0]["topped_up_balance"], "76.38");
 }

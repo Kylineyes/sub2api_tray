@@ -322,6 +322,10 @@ pub struct MeInfo {
     pub email: Option<String>,
     /// 余额（美元）。后端一定返回，但为了容错用 `Option`。
     pub balance: Option<f64>,
+    /// DeepSeek 赠送/奖励余额；Sub2API 为空。
+    pub granted_balance: Option<f64>,
+    /// DeepSeek 充值余额；Sub2API 为空。
+    pub topped_up_balance: Option<f64>,
 }
 
 /// `/subscriptions/summary` 的摘要信息（0004 的面板展示用）。
@@ -513,6 +517,8 @@ pub fn parse_me_response(status: u16, body: &str) -> Result<MeInfo, ApiError> {
         role,
         email,
         balance,
+        granted_balance: None,
+        topped_up_balance: None,
     })
 }
 

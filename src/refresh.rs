@@ -208,6 +208,8 @@ fn refresh_deepseek(id: &str, api_key: &str, timeout: Duration) -> RoundResult {
                     role: crate::accounts::AccountRole::Unknown,
                     email: Some(crate::deepseek::mask_api_key(api_key)),
                     balance: Some(balance.total_balance),
+                    granted_balance: Some(balance.granted_balance),
+                    topped_up_balance: Some(balance.topped_up_balance),
                 },
                 summary: None,
                 rotated: None,
