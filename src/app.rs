@@ -1418,7 +1418,14 @@ impl TrayApp {
             (monitor.x - width - ui_style::size::FLOATING_BALL_MARGIN).max(0.0),
             ((monitor.y - ui_style::size::FLOATING_BALL_SIZE) * 0.5).max(0.0),
         );
-        let position = self.floating_ball_position.unwrap_or(default_position);
+        let stored_position = self.floating_ball_position.unwrap_or(default_position);
+        let position = egui::pos2(
+            stored_position.x.clamp(0.0, (monitor.x - width).max(0.0)),
+            stored_position.y.clamp(
+                0.0,
+                (monitor.y - ui_style::size::FLOATING_BALL_SIZE).max(0.0),
+            ),
+        );
         let viewport_id = egui::ViewportId::from_hash_of("floating-ball");
         let mut builder = egui::ViewportBuilder::default()
             .with_title("用量统计悬浮球")
@@ -1446,20 +1453,33 @@ impl TrayApp {
             child_ctx.send_viewport_cmd(egui::ViewportCommand::Transparent(true));
             close_requested = child_ctx.input(|i| i.viewport().close_requested());
             if let Some(outer) = child_ctx.input(|i| i.viewport().outer_rect) {
-                next_position = Some(outer.min);
                 let monitor = child_ctx
                     .input(|i| i.viewport().monitor_size)
                     .unwrap_or(egui::vec2(1920.0, 1080.0));
+                // 原生拖拽不会自动限制在屏幕内；这里把整个窗口夹回显示器范围。
+                let clamped = egui::pos2(
+                    outer
+                        .left()
+                        .clamp(0.0, (monitor.x - outer.width()).max(0.0)),
+                    outer
+                        .top()
+                        .clamp(0.0, (monitor.y - outer.height()).max(0.0)),
+                );
+                next_position = Some(clamped);
+                if (clamped - outer.min).length_sq() > 0.01 {
+                    child_ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(clamped));
+                }
+
                 let threshold = ui_style::size::FLOATING_BALL_EDGE_THRESHOLD;
                 let distances = [
-                    (outer.left(), FloatingBallDockEdge::Left),
+                    (clamped.x, FloatingBallDockEdge::Left),
                     (
-                        (monitor.x - outer.right()).max(0.0),
+                        (monitor.x - clamped.x - outer.width()).max(0.0),
                         FloatingBallDockEdge::Right,
                     ),
-                    (outer.top(), FloatingBallDockEdge::Top),
+                    (clamped.y, FloatingBallDockEdge::Top),
                     (
-                        (monitor.y - outer.bottom()).max(0.0),
+                        (monitor.y - clamped.y - outer.height()).max(0.0),
                         FloatingBallDockEdge::Bottom,
                     ),
                 ];
