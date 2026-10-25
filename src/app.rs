@@ -197,6 +197,15 @@ struct UsageUiActions {
     toggle_collapse: Option<String>,
 }
 
+/// 总览卡片里的悬浮球选择动作。
+#[derive(Debug, Default)]
+struct FloatingBallUiActions {
+    /// 选择主账号/主 Key；第二项 None 表示账号余额。
+    target: Option<(String, Option<String>)>,
+    /// 请求刷新 Key 列表。
+    refresh_keys: bool,
+}
+
 /// 用量区汇总指标。
 #[derive(Debug, Clone, Copy, Default)]
 struct UsageTotals {
@@ -1301,6 +1310,27 @@ impl TrayApp {
         ctx.request_repaint();
     }
 
+    /// 刷新所有 Sub2API 账号的 Key 列表，供托盘菜单和面板选择器使用。
+    fn refresh_floating_ball_targets(&mut self, ctx: &egui::Context) {
+        let ids = match &self.data {
+            DataLayer::Ready(store) => store
+                .accounts()
+                .iter()
+                .filter(|account| account.provider == AccountProvider::Sub2Api)
+                .map(|account| account.id.clone())
+                .collect::<Vec<_>>(),
+            DataLayer::Unavailable(_) => Vec::new(),
+        };
+        for id in ids {
+            if !self.keys_rx.contains_key(&id) {
+                self.request_account_keys(ctx, &id);
+            }
+        }
+        self.try_start_refresh(ctx, true);
+        self.toast = Some(("正在刷新 Key 列表".to_owned(), Instant::now()));
+        ctx.request_repaint();
+    }
+
     /// 悬浮球主 Key 的后台刷新；账号余额由现有状态刷新链更新。
     fn maybe_refresh_floating_ball_data(&mut self, ctx: &egui::Context) {
         if !self.floating_ball_visible {
@@ -1631,23 +1661,7 @@ impl TrayApp {
                     self.set_floating_ball_target(ctx, account_id, key_id);
                 }
                 TrayCommand::RefreshFloatingBallTargets => {
-                    let ids = match &self.data {
-                        DataLayer::Ready(store) => store
-                            .accounts()
-                            .iter()
-                            .filter(|account| account.provider == AccountProvider::Sub2Api)
-                            .map(|account| account.id.clone())
-                            .collect::<Vec<_>>(),
-                        DataLayer::Unavailable(_) => Vec::new(),
-                    };
-                    for id in ids {
-                        if !self.keys_rx.contains_key(&id) {
-                            self.request_account_keys(ctx, &id);
-                        }
-                    }
-                    self.try_start_refresh(ctx, true);
-                    self.toast = Some(("正在刷新 Key 列表".to_owned(), Instant::now()));
-                    ctx.request_repaint();
+                    self.refresh_floating_ball_targets(ctx);
                 }
             }
         }
@@ -3788,6 +3802,7 @@ impl TrayApp {
         };
         let toast = self.toast.as_ref().map(|(text, _)| text.clone());
         let cards = self.collect_cards();
+        let floating_target = self.floating_ball_target.clone();
 
         // 顶部按钮的点击结果：闭包里不能直接改 `self`，先记在局部变量里
         let mut open_login = false;
@@ -3799,6 +3814,8 @@ impl TrayApp {
         let mut key_actions = KeyUiActions::default();
         // 用量区交互：区间、API Key、指标与折叠
         let mut usage_actions = UsageUiActions::default();
+        // 总览卡片里的悬浮球主账号/主 Key 选择
+        let mut floating_actions = FloatingBallUiActions::default();
         // 面板内的账号操作：请求删除（标题行右侧按钮触发）
         let mut delete_request: Option<String> = None;
         // 设置页入口的点击结果
@@ -3851,6 +3868,8 @@ impl TrayApp {
                             &mut open_login,
                             &mut refresh_clicked,
                             at_limit,
+                            floating_target.as_ref(),
+                            &mut floating_actions,
                         );
                         ui.add_space(ui_style::space::XL);
 
@@ -3906,6 +3925,13 @@ impl TrayApp {
             }
             self.maybe_request_usage(ctx);
             ctx.request_repaint();
+        }
+
+        if floating_actions.refresh_keys {
+            self.refresh_floating_ball_targets(ctx);
+        }
+        if let Some((account_id, key_id)) = floating_actions.target.take() {
+            self.set_floating_ball_target(ctx, account_id, key_id);
         }
 
         if let Some((account_id, key_id)) = key_actions.copy_request.take() {
@@ -5350,12 +5376,34 @@ fn status_color(status: AccountStatus) -> egui::Color32 {
 ///
 /// `refresh_clicked` 用来把"点了立即刷新"回传给调用方：
 /// 绘制函数拿不到 `&mut TrayApp`，只能通过局部标志传递。
+fn floating_ball_target_label(
+    target: Option<&FloatingBallTarget>,
+    cards: &[AccountCard],
+) -> String {
+    let Some(target) = target else {
+        return "未选择".to_owned();
+    };
+    let Some(card) = cards.iter().find(|card| card.id == target.account_id) else {
+        return "账号已失效".to_owned();
+    };
+    let Some(key_id) = target.key_id.as_ref() else {
+        return format!("{} · 余额", card.display);
+    };
+    card.keys
+        .as_ref()
+        .and_then(|state| state.keys.iter().find(|key| key.id == *key_id))
+        .map(|key| format!("{} · {}", key.name, key.masked))
+        .unwrap_or_else(|| "已选 Key".to_owned())
+}
+
 fn draw_account_summary(
     ui: &mut egui::Ui,
     cards: &[AccountCard],
     login_clicked: &mut bool,
     refresh_clicked: &mut bool,
     at_limit: bool,
+    floating_target: Option<&FloatingBallTarget>,
+    floating_actions: &mut FloatingBallUiActions,
 ) {
     let online = cards
         .iter()
@@ -5422,6 +5470,58 @@ fn draw_account_summary(
                 .size(font::BODY)
                 .color(theme().text_secondary),
             );
+
+            ui.add_space(ui_style::space::SM);
+            ui.horizontal(|ui| {
+                ui.label(
+                    egui::RichText::new("悬浮球")
+                        .size(font::BODY_SMALL)
+                        .color(theme().text_secondary),
+                );
+                egui::ComboBox::from_id_salt("floating-ball-target-picker")
+                    .selected_text(floating_ball_target_label(floating_target, cards))
+                    .width(ui_style::size::FLOATING_BALL_PICKER_WIDTH)
+                    .show_ui(ui, |ui| {
+                        for card in cards {
+                            let account_selected = floating_target.is_some_and(|target| {
+                                target.account_id == card.id && target.key_id.is_none()
+                            });
+                            if ui
+                                .selectable_label(
+                                    account_selected,
+                                    format!("{} · 余额", card.display),
+                                )
+                                .clicked()
+                            {
+                                floating_actions.target = Some((card.id.clone(), None));
+                            }
+                            if let Some(state) = &card.keys {
+                                for key in &state.keys {
+                                    let selected = floating_target.is_some_and(|target| {
+                                        target.account_id == card.id
+                                            && target.key_id.as_deref() == Some(key.id.as_str())
+                                    });
+                                    if ui
+                                        .selectable_label(
+                                            selected,
+                                            format!("    {}  {}", key.name, key.masked),
+                                        )
+                                        .clicked()
+                                    {
+                                        floating_actions.target =
+                                            Some((card.id.clone(), Some(key.id.clone())));
+                                    }
+                                }
+                            }
+                        }
+                    });
+                if ui_style::add_button(ui, "刷新", ButtonTone::Neutral, ButtonSize::Xs)
+                    .on_hover_text("拉取所有账号的 Key 列表")
+                    .clicked()
+                {
+                    floating_actions.refresh_keys = true;
+                }
+            });
         });
 }
 

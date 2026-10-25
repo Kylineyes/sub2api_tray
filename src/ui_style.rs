@@ -269,6 +269,7 @@ pub mod size {
     pub const FLOATING_BALL_COLLAPSED_WIDTH: f32 = 18.0;
     pub const FLOATING_BALL_MARGIN: f32 = 8.0;
     pub const FLOATING_BALL_EDGE_THRESHOLD: f32 = 16.0;
+    pub const FLOATING_BALL_PICKER_WIDTH: f32 = 150.0;
     pub const SETTINGS_SCROLL_RESERVED: f32 = 210.0;
     pub const SETTINGS_SCROLL_MIN: f32 = 220.0;
     pub const BUTTON_XS_W: f32 = 76.0;
