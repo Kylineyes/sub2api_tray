@@ -1129,14 +1129,15 @@ impl TrayApp {
                         "无生效订阅".to_owned()
                     } else if item.group_names.is_empty() {
                         format!(
-                            "{} 个订阅 · 已用 ${:.2}",
-                            item.active_count, item.total_used_usd
+                            "{} 个订阅 · 已用 {}",
+                            item.active_count,
+                            fmt_money("$", item.total_used_usd)
                         )
                     } else {
                         format!(
-                            "{} 个订阅 · 已用 ${:.2} · {}",
+                            "{} 个订阅 · 已用 {} · {}",
                             item.active_count,
-                            item.total_used_usd,
+                            fmt_money("$", item.total_used_usd),
                             item.group_names.join("、")
                         )
                     }
@@ -1408,7 +1409,7 @@ impl TrayApp {
             if let Some(key) = key {
                 let text = match key.quota {
                     Some(quota) if quota > 0.0 => {
-                        format!("${:.2}", (quota - key.quota_used.unwrap_or(0.0)).max(0.0))
+                        fmt_money("$", (quota - key.quota_used.unwrap_or(0.0)).max(0.0))
                     }
                     _ => "不限".to_owned(),
                 };
@@ -1430,16 +1431,16 @@ impl TrayApp {
         let text = balance
             .map(|value| {
                 if account.provider == AccountProvider::DeepSeekPlatform {
-                    format!("¥{value:.2}")
+                    fmt_money("¥", value)
                 } else {
-                    format!("${value:.2}")
+                    fmt_money("$", value)
                 }
             })
             .unwrap_or_else(|| "--".to_owned());
         let subtext = if account.provider == AccountProvider::DeepSeekPlatform {
             runtime
                 .and_then(|runtime| runtime.granted_balance)
-                .map(|reward| format!("奖励 ¥{reward:.2}"))
+                .map(|reward| format!("奖励 {}", fmt_money("¥", reward)))
         } else {
             None
         };
@@ -5782,14 +5783,14 @@ fn draw_account_card(
                 let mut status_line = card.status.label().to_owned();
                 if let Some(balance) = card.balance {
                     let symbol = if is_deepseek { "¥" } else { "$" };
-                    status_line.push_str(&format!(" · 余额 {symbol}{balance:.2}"));
+                    status_line.push_str(&format!(" · 余额 {}", fmt_money(symbol, balance)));
                 }
                 if is_deepseek {
                     if let Some(reward) = card.granted_balance {
-                        status_line.push_str(&format!(" · 奖励 ¥{reward:.2}"));
+                        status_line.push_str(&format!(" · 奖励 {}", fmt_money("¥", reward)));
                     }
                     if let Some(topped_up) = card.topped_up_balance {
-                        status_line.push_str(&format!(" · 充值 ¥{topped_up:.2}"));
+                        status_line.push_str(&format!(" · 充值 {}", fmt_money("¥", topped_up)));
                     }
                 }
                 ui.label(
@@ -5845,6 +5846,24 @@ fn draw_account_card(
         });
 
     hover.store(&hover_key, frame.response.rect);
+}
+
+/// 金额格式化：符号 + 千分位 + 两位小数。
+fn fmt_money(symbol: &str, value: f64) -> String {
+    let negative = value.is_sign_negative();
+    let text = format!("{:.2}", value.abs());
+    let (integer, fraction) = text.split_once('.').unwrap_or((text.as_str(), "00"));
+    let mut grouped = String::with_capacity(integer.len() + integer.len() / 3);
+    for (index, ch) in integer.chars().enumerate() {
+        if index > 0 && (integer.len() - index).is_multiple_of(3) {
+            grouped.push(',');
+        }
+        grouped.push(ch);
+    }
+    format!(
+        "{}{symbol}{grouped}.{fraction}",
+        if negative { "-" } else { "" }
+    )
 }
 
 /// 把 token 数格式化成紧凑文本（`1.2k` / `3.4M`）。
@@ -6440,9 +6459,13 @@ fn draw_account_keys(
         let used = key.quota_used.unwrap_or(0.0);
         let quota_text = match key.quota {
             Some(quota) if quota > 0.0 => {
-                format!("已用 ${used:.2} / 总额度 ${quota:.2}")
+                format!(
+                    "已用 {} / 总额度 {}",
+                    fmt_money("$", used),
+                    fmt_money("$", quota)
+                )
             }
-            _ => format!("已用 ${used:.2} / 总额度 不限"),
+            _ => format!("已用 {} / 总额度 不限", fmt_money("$", used)),
         };
         // 底色随淡入进度插值：0 时完全透明，1 时是比卡片略亮的深蓝，
         // 文字同时提亮，保证高亮后依然清晰（不再"白底盖字"）。
@@ -6516,7 +6539,13 @@ fn draw_account_keys(
                     let rate_stat_texts: Vec<String> = rate_windows
                         .iter()
                         .filter(|(_, limit, _)| *limit > 0.0)
-                        .map(|(label, limit, used)| format!("{label}限速 ${used:.2} / ${limit:.2}"))
+                        .map(|(label, limit, used)| {
+                            format!(
+                                "{label}限速 {} / {}",
+                                fmt_money("$", *used),
+                                fmt_money("$", *limit)
+                            )
+                        })
                         .collect();
                     if !rate_stat_texts.is_empty() {
                         ui.horizontal_wrapped(|ui| {
@@ -6809,6 +6838,13 @@ mod tests {
 
     fn panel() -> egui::Vec2 {
         egui::vec2(PANEL_WIDTH, PANEL_HEIGHT)
+    }
+
+    #[test]
+    fn 金额展示带千分位且保留两位小数() {
+        assert_eq!(fmt_money("$", 9999579.66119408), "$9,999,579.66");
+        assert_eq!(fmt_money("¥", 88.8), "¥88.80");
+        assert_eq!(fmt_money("$", -12.345), "-$12.35");
     }
 
     #[test]
