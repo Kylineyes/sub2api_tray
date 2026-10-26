@@ -202,6 +202,11 @@ pub(crate) fn apply_egui_visuals(ctx: &egui::Context, dark: bool) {
 }
 
 /// 线性插值两个颜色（用于悬浮淡入淡出）。
+/// 给任意主题色附加透明度。
+pub fn with_alpha(color: egui::Color32, alpha: u8) -> egui::Color32 {
+    egui::Color32::from_rgba_unmultiplied(color.r(), color.g(), color.b(), alpha)
+}
+
 pub(crate) fn lerp_color(from: egui::Color32, to: egui::Color32, t: f32) -> egui::Color32 {
     let t = t.clamp(0.0, 1.0);
     let mix = |a: u8, b: u8| (a as f32 + (b as f32 - a as f32) * t).round() as u8;
@@ -265,7 +270,9 @@ pub mod size {
     pub const CURRENCY_PREFIX_WIDTH: f32 = 16.0;
     pub const NUMBER_INPUT_WIDTH: f32 = 80.0;
     pub const TOOLTIP_MAX_WIDTH: f32 = 240.0;
-    pub const FLOATING_BALL_SIZE: f32 = 64.0;
+    pub const FLOATING_BALL_SIZE_SMALL: f32 = 52.0;
+    pub const FLOATING_BALL_SIZE_MEDIUM: f32 = 64.0;
+    pub const FLOATING_BALL_SIZE_LARGE: f32 = 80.0;
     pub const FLOATING_BALL_COLLAPSED_WIDTH: f32 = 18.0;
     pub const FLOATING_BALL_MARGIN: f32 = 8.0;
     pub const FLOATING_BALL_EDGE_THRESHOLD: f32 = 16.0;
