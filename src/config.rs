@@ -86,6 +86,9 @@ pub struct AppConfig {
 
     /// 悬浮球主 API Key id；为空表示展示账号余额。
     pub floating_ball_api_key_id: Option<String>,
+
+    /// 悬浮球尺寸：`small` / `medium` / `large`。
+    pub floating_ball_size: String,
 }
 
 impl Default for AppConfig {
@@ -104,6 +107,7 @@ impl Default for AppConfig {
             floating_ball_edge_hide: true,
             floating_ball_account_id: None,
             floating_ball_api_key_id: None,
+            floating_ball_size: "medium".to_owned(),
         }
     }
 }
@@ -161,6 +165,18 @@ impl AppConfig {
             let actual = "dark".to_owned();
             adjustments.push(format!("theme: {} -> {actual}", self.theme));
             self.theme = actual;
+        }
+
+        if !matches!(
+            self.floating_ball_size.as_str(),
+            "small" | "medium" | "large"
+        ) {
+            let actual = "medium".to_owned();
+            adjustments.push(format!(
+                "floatingBallSize: {} -> {actual}",
+                self.floating_ball_size
+            ));
+            self.floating_ball_size = actual;
         }
 
         adjustments
@@ -238,12 +254,28 @@ mod tests {
     use super::*;
 
     #[test]
+    fn 非法悬浮球尺寸回落到中档() {
+        let mut config = AppConfig {
+            floating_ball_size: "huge".to_owned(),
+            ..AppConfig::default()
+        };
+        let adjustments = config.sanitize();
+        assert_eq!(config.floating_ball_size, "medium");
+        assert!(
+            adjustments
+                .iter()
+                .any(|item| item.contains("floatingBallSize"))
+        );
+    }
+
+    #[test]
     fn 悬浮球字段缺失时使用默认值() {
         let config: AppConfig = serde_json::from_str(r#"{"schemaVersion":1}"#).unwrap();
         assert!(!config.floating_ball_visible);
         assert!(config.floating_ball_edge_hide);
         assert!(config.floating_ball_account_id.is_none());
         assert!(config.floating_ball_api_key_id.is_none());
+        assert_eq!(config.floating_ball_size, "medium");
     }
 
     #[test]

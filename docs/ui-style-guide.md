@@ -142,6 +142,8 @@ ui_style::add_enabled_button(ui, enabled, "删除", ButtonTone::Danger, ButtonSi
 - 数值文字：`theme().text_primary`
 - 状态点：`status_color`
 - 不使用整块高饱和品牌色填充
+- 尺寸：`FLOATING_BALL_SIZE_SMALL/MEDIUM/LARGE`
+- 更新气泡：`accent` 低透明度填充 + `text_primary` 高光
 
 ## 十、异步操作
 
