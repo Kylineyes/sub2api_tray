@@ -1243,7 +1243,7 @@ impl TrayApp {
                 targets.push(crate::tray::BallTargetMenuItem {
                     account_id: account.id.clone(),
                     key_id: Some(key.id.clone()),
-                    label: format!("{}  {}", key.name, key.masked),
+                    label: crate::tray::ball_key_label(&key.name, &key.masked),
                     selected,
                 });
             }
@@ -5548,7 +5548,7 @@ fn draw_account_summary(
                                     if ui
                                         .selectable_label(
                                             selected,
-                                            format!("    {}  {}", key.name, key.masked),
+                                            crate::tray::ball_key_label(&key.name, &key.masked),
                                         )
                                         .clicked()
                                     {

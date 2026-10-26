@@ -95,6 +95,14 @@ pub struct BallTargetMenuItem {
     pub selected: bool,
 }
 
+/// 悬浮球菜单里 API Key 的二级缩进。
+const BALL_KEY_INDENT: &str = "    ";
+
+/// 生成悬浮球「主 Key」菜单文案：账号保持一级，Key 另外缩进一级。
+pub fn ball_key_label(name: &str, masked: &str) -> String {
+    format!("{BALL_KEY_INDENT}{name}  {masked}")
+}
+
 /// 托盘菜单需要的悬浮球状态快照。
 #[derive(Debug, Clone, Default)]
 pub struct TrayMenuModel {
@@ -489,6 +497,13 @@ pub fn install(bridge: Arc<TrayBridge>) -> Result<TrayHandle> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn 悬浮球主key菜单带二级缩进() {
+        let label = ball_key_label("Demo Key A", "sk-d...cdef");
+        assert!(label.starts_with("    Demo Key A"));
+        assert_eq!(label.trim_start(), "Demo Key A  sk-d...cdef");
+    }
 
     #[test]
     fn 菜单常量互不相同() {
