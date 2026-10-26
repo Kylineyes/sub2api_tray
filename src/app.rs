@@ -881,6 +881,8 @@ pub struct TrayApp {
 
     /// 打开设置页前的主题，用于取消/关闭时回滚实时预览。
     settings_original_dark_mode: Option<bool>,
+    /// 打开设置页前的悬浮球尺寸，用于取消/关闭时回滚实时预览。
+    settings_original_ball_size: Option<FloatingBallSize>,
 
     /// 设置保存后台通道；Some 时界面显示「正在保存设置」遮罩。
     settings_save_rx: Option<Receiver<Result<SettingsSaveResult, String>>>,
@@ -1053,6 +1055,7 @@ impl TrayApp {
             restored_expansion: false,
             settings: None,
             settings_original_dark_mode: None,
+            settings_original_ball_size: None,
             settings_save_rx: None,
             autostart_enabled: None,
             autostart_rx: None,
@@ -2973,6 +2976,28 @@ impl TrayApp {
         ctx.request_repaint();
     }
 
+    /// 设置页内实时预览悬浮球尺寸。
+    fn preview_floating_ball_size(&mut self, ctx: &egui::Context, size: FloatingBallSize) {
+        if self.floating_ball_size == size {
+            return;
+        }
+        self.floating_ball_size = size;
+        self.floating_ball_positioned = false;
+        ctx.request_repaint();
+    }
+
+    /// 关闭设置页时回滚未保存的主题与悬浮球尺寸预览。
+    fn restore_settings_preview(&mut self, ctx: &egui::Context) {
+        if let Some(original) = self.settings_original_ball_size.take()
+            && self.floating_ball_size != original
+        {
+            self.floating_ball_size = original;
+            self.floating_ball_positioned = false;
+            ctx.request_repaint();
+        }
+        self.restore_settings_theme(ctx);
+    }
+
     /// 关闭设置页时回滚未保存的主题预览。
     fn restore_settings_theme(&mut self, ctx: &egui::Context) {
         let Some(original) = self.settings_original_dark_mode.take() else {
@@ -3037,6 +3062,7 @@ impl TrayApp {
         };
         let config = store.config();
         self.settings_original_dark_mode = Some(self.dark_mode);
+        self.settings_original_ball_size = Some(self.floating_ball_size);
         self.settings = Some(SettingsDraft {
             mask_accounts: config.mask_accounts,
             autostart: self.autostart_enabled.unwrap_or(false),
@@ -3136,6 +3162,7 @@ impl TrayApp {
                 self.floating_ball_size = saved_ball_size;
                 self.floating_ball_positioned = false;
                 self.settings_original_dark_mode = None;
+                self.settings_original_ball_size = None;
                 self.settings = None;
                 self.rebuild_menu();
                 self.update_badge();
@@ -3200,6 +3227,7 @@ impl TrayApp {
         let mut check_update = false;
         let mut copy_update_url: Option<String> = None;
         let mut preview_dark_mode: Option<bool> = None;
+        let mut preview_ball_size: Option<FloatingBallSize> = None;
 
         let modal = egui::Modal::new(egui::Id::unique("settings-dialog"))
             .backdrop_color(ui_style::modal_backdrop())
@@ -3329,6 +3357,7 @@ impl TrayApp {
                                         .clicked()
                                     {
                                         draft.floating_ball_size = size;
+                                        preview_ball_size = Some(size);
                                     }
                                 }
                             });
@@ -3468,6 +3497,9 @@ impl TrayApp {
         if let Some(dark_mode) = preview_dark_mode {
             self.preview_dark_mode(ctx, dark_mode);
         }
+        if let Some(size) = preview_ball_size {
+            self.preview_floating_ball_size(ctx, size);
+        }
         if let Some(url) = copy_update_url {
             ctx.copy_text(url);
             self.toast = Some(("已复制下载链接".to_owned(), Instant::now()));
@@ -3481,7 +3513,7 @@ impl TrayApp {
         }
         if close {
             self.settings = None;
-            self.restore_settings_theme(ctx);
+            self.restore_settings_preview(ctx);
         }
     }
 
@@ -3774,7 +3806,7 @@ impl TrayApp {
             }
             log::debug!("Esc：关闭设置页");
             self.settings = None;
-            self.restore_settings_theme(ctx);
+            self.restore_settings_preview(ctx);
         } else if let Some(edit) = self.quota_edit.as_ref() {
             // 保存请求在途时 Esc 不关闭弹窗，避免用户以为已经取消但服务端仍在改额度。
             if !edit.submitting {
