@@ -16,7 +16,7 @@
 ## 二、实现
 
 * `app.json` 新增 `floatingBallSize`，默认 `medium`；
-* 设置页「外观」增加尺寸三档按钮；
+* 设置页「外观」增加尺寸三档按钮，点击后实时预览，取消/关闭恢复原尺寸，保存才写盘；
 * 尺寸 token：
   - `FLOATING_BALL_SIZE_SMALL = 52`
   - `FLOATING_BALL_SIZE_MEDIUM = 64`
