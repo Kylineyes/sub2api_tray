@@ -5306,6 +5306,23 @@ fn draw_header(
             );
         },
     );
+    // 整个左侧标题区（抓手、标题、中间空白）都可以拖动窗口；
+    // 右侧工具按钮单独响应点击，不会被这个热区覆盖。
+    let drag = ui.interact(
+        left_rect,
+        ui.scope_id().with("header-drag-area"),
+        egui::Sense::drag(),
+    );
+    if drag.drag_started() {
+        ui.ctx().send_viewport_cmd(egui::ViewportCommand::StartDrag);
+    }
+    if drag.hovered() || drag.dragged() {
+        ui.ctx().set_cursor_icon(if drag.dragged() {
+            egui::CursorIcon::Grabbing
+        } else {
+            egui::CursorIcon::Grab
+        });
+    }
     ui.advance_cursor_after_rect(row_rect);
 
     // 标题下的品牌色细线：让面板在深色任务栏旁也能一眼认出是哪个产品。
