@@ -5972,25 +5972,27 @@ fn draw_floating_ball_bubbles(
     let bottom = center.y + radius * 0.55;
     let travel = radius * 1.05;
     let elapsed = elapsed.as_secs_f32();
+    // 气泡随球体尺寸缩放，整体比首版更大、更容易看清。
+    let scale = (radius / 28.0).clamp(0.95, 1.4);
     for index in 0..4 {
         let progress = (elapsed - index as f32 * 0.09) / 1.15;
         if !(0.0..1.0).contains(&progress) {
             continue;
         }
         let wave = (progress * 6.0 + index as f32 * 1.7).sin();
-        let x = center.x + (index as f32 - 1.5) * 3.5 + wave * 2.2;
+        let x = center.x + (index as f32 - 1.5) * 4.8 * scale + wave * 2.8 * scale;
         let y = bottom - progress * travel;
-        let bubble_radius = 1.8 + (index % 3) as f32 * 0.6;
-        let alpha = ((1.0 - progress).powf(1.3) * 150.0) as u8;
+        let bubble_radius = (2.8 + (index % 3) as f32 * 0.95) * scale;
+        let alpha = ((1.0 - progress).powf(1.25) * 165.0) as u8;
         let fill = ui_style::with_alpha(theme().accent, alpha);
         let edge = ui_style::with_alpha(theme().text_primary, alpha / 2);
         let position = egui::pos2(x, y);
         painter.circle_filled(position, bubble_radius, fill);
-        painter.circle_stroke(position, bubble_radius, egui::Stroke::new(0.6, edge));
+        painter.circle_stroke(position, bubble_radius, egui::Stroke::new(0.7, edge));
         painter.circle_filled(
             position - egui::vec2(bubble_radius * 0.3, bubble_radius * 0.3),
             bubble_radius * 0.24,
-            ui_style::with_alpha(theme().text_primary, ((alpha as f32) * 0.7) as u8),
+            ui_style::with_alpha(theme().text_primary, ((alpha as f32) * 0.72) as u8),
         );
     }
 }
