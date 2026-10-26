@@ -6,7 +6,7 @@
 
 /// 把指定标题的窗口改成无边框弹出窗口。
 #[cfg(windows)]
-pub fn make_borderless(title: &str) -> bool {
+pub fn make_borderless(title: &str) -> Option<(i32, i32)> {
     use windows_sys::Win32::Foundation::RECT;
     use windows_sys::Win32::Graphics::Dwm::{
         DWMNCRP_DISABLED, DWMWA_BORDER_COLOR, DWMWA_COLOR_NONE, DWMWA_NCRENDERING_POLICY,
@@ -22,7 +22,7 @@ pub fn make_borderless(title: &str) -> bool {
     let title: Vec<u16> = title.encode_utf16().chain(std::iter::once(0)).collect();
     let hwnd = unsafe { FindWindowW(std::ptr::null(), title.as_ptr()) };
     if hwnd.is_null() {
-        return false;
+        return None;
     }
 
     let style = unsafe { GetWindowLongW(hwnd, GWL_STYLE) } as u32;
@@ -34,6 +34,7 @@ pub fn make_borderless(title: &str) -> bool {
         | WS_BORDER
         | WS_DLGFRAME;
     let new_style = (style & !remove) | WS_POPUP;
+    let mut client = RECT::default();
     unsafe {
         SetWindowLongW(hwnd, GWL_STYLE, new_style as i32);
         SetWindowPos(
@@ -71,7 +72,6 @@ pub fn make_borderless(title: &str) -> bool {
 
         // 某些 Windows 版本即使关掉 DWM 边框，客户区顶部仍会保留 1px 亮线。
         // 把客户区四周各裁掉 1px，圆形本身留了边距，不会影响绘制。
-        let mut client = RECT::default();
         if GetClientRect(hwnd, &mut client) != 0 {
             let region = CreateRectRgn(1, 1, client.right - 1, client.bottom - 1);
             if !region.is_null() {
@@ -79,11 +79,11 @@ pub fn make_borderless(title: &str) -> bool {
             }
         }
     }
-    true
+    Some((client.right, client.bottom))
 }
 
 /// 非 Windows 平台暂不处理。
 #[cfg(not(windows))]
-pub fn make_borderless(_title: &str) -> bool {
-    false
+pub fn make_borderless(_title: &str) -> Option<(i32, i32)> {
+    None
 }

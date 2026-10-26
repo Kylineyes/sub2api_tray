@@ -840,6 +840,8 @@ pub struct TrayApp {
     floating_ball_dock_edge: Option<FloatingBallDockEdge>,
     /// 是否已经去掉过悬浮球原生窗口边框。
     floating_ball_native_ready: bool,
+    /// 已刷新生效区域的物理尺寸。
+    floating_ball_native_size: Option<i32>,
     /// 主 Key 最近一次刷新时间。
     floating_ball_key_refresh_at: Option<Instant>,
     /// 悬浮球数据更新时的气泡动画起点。
@@ -1036,6 +1038,7 @@ impl TrayApp {
             floating_ball_positioned: false,
             floating_ball_dock_edge: None,
             floating_ball_native_ready: false,
+            floating_ball_native_size: None,
             floating_ball_key_refresh_at: None,
             floating_ball_bubble_started_at: None,
             dark_mode,
@@ -1707,14 +1710,25 @@ impl TrayApp {
         self.floating_ball_dock_edge = next_dock_edge;
         self.floating_ball_positioned = true;
 
-        if !self.floating_ball_native_ready {
-            self.floating_ball_native_ready =
-                crate::floating_window::make_borderless("用量统计悬浮球");
+        // 原生窗口区域必须在尺寸变化后重新设置；否则旧区域会裁切新尺寸的圆。
+        let expected_native_size = (width * ctx.pixels_per_point()).round() as i32;
+        if (!self.floating_ball_native_ready
+            || self.floating_ball_native_size != Some(expected_native_size))
+            && let Some((client_width, client_height)) =
+                crate::floating_window::make_borderless("用量统计悬浮球")
+        {
+            self.floating_ball_native_ready = true;
+            if (client_width - expected_native_size).abs() <= 1
+                && (client_height - expected_native_size).abs() <= 1
+            {
+                self.floating_ball_native_size = Some(expected_native_size);
+            }
         }
 
         if close_requested {
             self.floating_ball_visible = false;
             self.floating_ball_native_ready = false;
+            self.floating_ball_native_size = None;
             self.floating_ball_positioned = false;
             self.persist_floating_ball_settings();
             self.rebuild_menu();
@@ -1752,6 +1766,7 @@ impl TrayApp {
                 TrayCommand::ToggleFloatingBall => {
                     self.floating_ball_visible = !self.floating_ball_visible;
                     self.floating_ball_native_ready = false;
+                    self.floating_ball_native_size = None;
                     self.floating_ball_positioned = false;
                     if self.floating_ball_visible {
                         self.choose_default_floating_ball_target();
