@@ -287,6 +287,8 @@ struct SettingsDraft {
     refresh_interval_seconds: u64,
     /// 单次请求超时（秒）。
     request_timeout_seconds: u64,
+    /// 悬浮球尺寸档位。
+    floating_ball_size: FloatingBallSize,
     dark_mode: bool,
 }
 
@@ -317,8 +319,42 @@ enum FloatingBallDockEdge {
     Bottom,
 }
 
+/// 悬浮球尺寸档位。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FloatingBallSize {
+    Small,
+    Medium,
+    Large,
+}
+
+impl FloatingBallSize {
+    fn from_config(value: &str) -> Self {
+        match value {
+            "small" => Self::Small,
+            "large" => Self::Large,
+            _ => Self::Medium,
+        }
+    }
+
+    fn as_config(self) -> &'static str {
+        match self {
+            Self::Small => "small",
+            Self::Medium => "medium",
+            Self::Large => "large",
+        }
+    }
+
+    fn pixels(self) -> f32 {
+        match self {
+            Self::Small => ui_style::size::FLOATING_BALL_SIZE_SMALL,
+            Self::Medium => ui_style::size::FLOATING_BALL_SIZE_MEDIUM,
+            Self::Large => ui_style::size::FLOATING_BALL_SIZE_LARGE,
+        }
+    }
+}
+
 /// 悬浮球当前要展示的内容。
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct FloatingBallView {
     /// 正中心大字。
     text: String,
@@ -788,6 +824,8 @@ pub struct TrayApp {
 
     /// 是否显示桌面悬浮球。
     floating_ball_visible: bool,
+    /// 悬浮球尺寸。
+    floating_ball_size: FloatingBallSize,
     /// 悬浮球是否启用贴边自动收起。
     floating_ball_edge_hide: bool,
     /// 悬浮球主目标。
@@ -802,8 +840,12 @@ pub struct TrayApp {
     floating_ball_dock_edge: Option<FloatingBallDockEdge>,
     /// 是否已经去掉过悬浮球原生窗口边框。
     floating_ball_native_ready: bool,
+    /// 已刷新生效区域的物理尺寸。
+    floating_ball_native_size: Option<i32>,
     /// 主 Key 最近一次刷新时间。
     floating_ball_key_refresh_at: Option<Instant>,
+    /// 悬浮球数据更新时的气泡动画起点。
+    floating_ball_bubble_started_at: Option<Instant>,
 
     dark_mode: bool,
 
@@ -839,6 +881,8 @@ pub struct TrayApp {
 
     /// 打开设置页前的主题，用于取消/关闭时回滚实时预览。
     settings_original_dark_mode: Option<bool>,
+    /// 打开设置页前的悬浮球尺寸，用于取消/关闭时回滚实时预览。
+    settings_original_ball_size: Option<FloatingBallSize>,
 
     /// 设置保存后台通道；Some 时界面显示「正在保存设置」遮罩。
     settings_save_rx: Option<Receiver<Result<SettingsSaveResult, String>>>,
@@ -924,7 +968,12 @@ impl TrayApp {
             DataLayer::Unavailable(_) => false,
         };
 
-        let (floating_ball_visible, floating_ball_edge_hide, floating_ball_target) =
+        let (
+            floating_ball_visible,
+            floating_ball_edge_hide,
+            floating_ball_size,
+            floating_ball_target,
+        ) =
             match &data {
                 DataLayer::Ready(store) => {
                     let config = store.config();
@@ -937,10 +986,11 @@ impl TrayApp {
                     (
                         config.floating_ball_visible,
                         config.floating_ball_edge_hide,
+                        FloatingBallSize::from_config(&config.floating_ball_size),
                         target,
                     )
                 }
-                DataLayer::Unavailable(_) => (false, true, None),
+                DataLayer::Unavailable(_) => (false, true, FloatingBallSize::Medium, None),
             };
 
         let bridge = TrayBridge::new(cc.egui_ctx.clone());
@@ -982,6 +1032,7 @@ impl TrayApp {
             keys_rx: HashMap::new(),
             pinned,
             floating_ball_visible,
+            floating_ball_size,
             floating_ball_edge_hide,
             floating_ball_target,
             floating_ball_hovered: false,
@@ -989,7 +1040,9 @@ impl TrayApp {
             floating_ball_positioned: false,
             floating_ball_dock_edge: None,
             floating_ball_native_ready: false,
+            floating_ball_native_size: None,
             floating_ball_key_refresh_at: None,
+            floating_ball_bubble_started_at: None,
             dark_mode,
             usage_range: HashMap::new(),
             usage_metric: HashMap::new(),
@@ -1002,6 +1055,7 @@ impl TrayApp {
             restored_expansion: false,
             settings: None,
             settings_original_dark_mode: None,
+            settings_original_ball_size: None,
             settings_save_rx: None,
             autostart_enabled: None,
             autostart_rx: None,
@@ -1129,14 +1183,15 @@ impl TrayApp {
                         "无生效订阅".to_owned()
                     } else if item.group_names.is_empty() {
                         format!(
-                            "{} 个订阅 · 已用 ${:.2}",
-                            item.active_count, item.total_used_usd
+                            "{} 个订阅 · 已用 {}",
+                            item.active_count,
+                            fmt_money("$", item.total_used_usd)
                         )
                     } else {
                         format!(
-                            "{} 个订阅 · 已用 ${:.2} · {}",
+                            "{} 个订阅 · 已用 {} · {}",
                             item.active_count,
-                            item.total_used_usd,
+                            fmt_money("$", item.total_used_usd),
                             item.group_names.join("、")
                         )
                     }
@@ -1243,7 +1298,7 @@ impl TrayApp {
                 targets.push(crate::tray::BallTargetMenuItem {
                     account_id: account.id.clone(),
                     key_id: Some(key.id.clone()),
-                    label: format!("{}  {}", key.name, key.masked),
+                    label: crate::tray::ball_key_label(&key.name, &key.masked),
                     selected,
                 });
             }
@@ -1339,6 +1394,15 @@ impl TrayApp {
         ctx.request_repaint();
     }
 
+    /// 悬浮球数据发生变化时启动气泡动画。
+    fn start_floating_ball_bubbles(&mut self, ctx: &egui::Context) {
+        if !self.floating_ball_visible {
+            return;
+        }
+        self.floating_ball_bubble_started_at = Some(Instant::now());
+        ctx.request_repaint();
+    }
+
     /// 悬浮球主 Key 的后台刷新；账号余额由现有状态刷新链更新。
     fn maybe_refresh_floating_ball_data(&mut self, ctx: &egui::Context) {
         if !self.floating_ball_visible {
@@ -1408,7 +1472,7 @@ impl TrayApp {
             if let Some(key) = key {
                 let text = match key.quota {
                     Some(quota) if quota > 0.0 => {
-                        format!("${:.2}", (quota - key.quota_used.unwrap_or(0.0)).max(0.0))
+                        fmt_money("$", (quota - key.quota_used.unwrap_or(0.0)).max(0.0))
                     }
                     _ => "不限".to_owned(),
                 };
@@ -1430,16 +1494,16 @@ impl TrayApp {
         let text = balance
             .map(|value| {
                 if account.provider == AccountProvider::DeepSeekPlatform {
-                    format!("¥{value:.2}")
+                    fmt_money("¥", value)
                 } else {
-                    format!("${value:.2}")
+                    fmt_money("$", value)
                 }
             })
             .unwrap_or_else(|| "--".to_owned());
         let subtext = if account.provider == AccountProvider::DeepSeekPlatform {
             runtime
                 .and_then(|runtime| runtime.granted_balance)
-                .map(|reward| format!("奖励 ¥{reward:.2}"))
+                .map(|reward| format!("奖励 {}", fmt_money("¥", reward)))
         } else {
             None
         };
@@ -1465,27 +1529,24 @@ impl TrayApp {
         } else {
             theme().card_bg
         };
-        let width = ui_style::size::FLOATING_BALL_SIZE;
+        let width = self.floating_ball_size.pixels();
         let monitor = ctx
             .input(|i| i.viewport().monitor_size)
             .unwrap_or(egui::vec2(1920.0, 1080.0));
         let default_position = egui::pos2(
             (monitor.x - width - ui_style::size::FLOATING_BALL_MARGIN).max(0.0),
-            ((monitor.y - ui_style::size::FLOATING_BALL_SIZE) * 0.5).max(0.0),
+            ((monitor.y - width) * 0.5).max(0.0),
         );
         let stored_position = self.floating_ball_position.unwrap_or(default_position);
         let position = egui::pos2(
             stored_position.x.clamp(0.0, (monitor.x - width).max(0.0)),
-            stored_position.y.clamp(
-                0.0,
-                (monitor.y - ui_style::size::FLOATING_BALL_SIZE).max(0.0),
-            ),
+            stored_position.y.clamp(0.0, (monitor.y - width).max(0.0)),
         );
         let viewport_id = egui::ViewportId::from_hash_of("floating-ball");
         let mut builder = egui::ViewportBuilder::default()
             .with_title("用量统计悬浮球")
-            .with_inner_size([width, ui_style::size::FLOATING_BALL_SIZE])
-            .with_min_inner_size([width, ui_style::size::FLOATING_BALL_SIZE])
+            .with_inner_size([width, width])
+            .with_min_inner_size([width, width])
             .with_decorations(false)
             .with_transparent(true)
             .with_always_on_top()
@@ -1495,6 +1556,10 @@ impl TrayApp {
             builder = builder.with_position(position);
         }
 
+        let bubble_started = self.floating_ball_bubble_started_at;
+        let bubble_elapsed = bubble_started
+            .map(|at| at.elapsed())
+            .filter(|elapsed| *elapsed < Duration::from_millis(1500));
         let mut clicked = false;
         let mut hovered = false;
         let mut close_requested = false;
@@ -1546,18 +1611,16 @@ impl TrayApp {
             }
             // 不套 CentralPanel/Frame：它们会绘制面板底色，透明 viewport 上会留下
             // 一层半透明方形底层。直接在最外层 Ui 上分配矩形并只画圆/窄条。
-            ui.set_min_size(egui::vec2(width, ui_style::size::FLOATING_BALL_SIZE));
-            let (rect, response) = ui.allocate_exact_size(
-                egui::vec2(width, ui_style::size::FLOATING_BALL_SIZE),
-                egui::Sense::click_and_drag(),
-            );
+            ui.set_min_size(egui::vec2(width, width));
+            let (rect, response) =
+                ui.allocate_exact_size(egui::vec2(width, width), egui::Sense::click_and_drag());
             if response.drag_started() {
                 child_ctx.send_viewport_cmd(egui::ViewportCommand::StartDrag);
             }
             let painter = ui.painter();
             if expanded {
                 let center = rect.center();
-                let radius = ui_style::size::FLOATING_BALL_SIZE * 0.5 - 2.0;
+                let radius = width * 0.5 - 2.0;
                 painter.circle_filled(center, radius, ball_background);
                 painter.circle_stroke(center, radius, egui::Stroke::new(1.5, theme().accent));
                 painter.circle_stroke(
@@ -1565,6 +1628,9 @@ impl TrayApp {
                     radius - 4.0,
                     egui::Stroke::new(1.0, theme().chart_fill),
                 );
+                if let Some(elapsed) = bubble_elapsed {
+                    draw_floating_ball_bubbles(painter, center, radius, elapsed);
+                }
                 if let Some(subtext) = view.subtext.as_deref() {
                     painter.text(
                         center - egui::vec2(0.0, 7.0),
@@ -1633,20 +1699,39 @@ impl TrayApp {
             }
         });
 
+        if let Some(started) = bubble_started {
+            if started.elapsed() < Duration::from_millis(1500) {
+                ctx.request_repaint_after(Duration::from_millis(16));
+            } else {
+                self.floating_ball_bubble_started_at = None;
+            }
+        }
+
         if let Some(position) = next_position {
             self.floating_ball_position = Some(position);
         }
         self.floating_ball_dock_edge = next_dock_edge;
         self.floating_ball_positioned = true;
 
-        if !self.floating_ball_native_ready {
-            self.floating_ball_native_ready =
-                crate::floating_window::make_borderless("用量统计悬浮球");
+        // 原生窗口区域必须在尺寸变化后重新设置；否则旧区域会裁切新尺寸的圆。
+        let expected_native_size = (width * ctx.pixels_per_point()).round() as i32;
+        if (!self.floating_ball_native_ready
+            || self.floating_ball_native_size != Some(expected_native_size))
+            && let Some((client_width, client_height)) =
+                crate::floating_window::make_borderless("用量统计悬浮球")
+        {
+            self.floating_ball_native_ready = true;
+            if (client_width - expected_native_size).abs() <= 1
+                && (client_height - expected_native_size).abs() <= 1
+            {
+                self.floating_ball_native_size = Some(expected_native_size);
+            }
         }
 
         if close_requested {
             self.floating_ball_visible = false;
             self.floating_ball_native_ready = false;
+            self.floating_ball_native_size = None;
             self.floating_ball_positioned = false;
             self.persist_floating_ball_settings();
             self.rebuild_menu();
@@ -1684,6 +1769,7 @@ impl TrayApp {
                 TrayCommand::ToggleFloatingBall => {
                     self.floating_ball_visible = !self.floating_ball_visible;
                     self.floating_ball_native_ready = false;
+                    self.floating_ball_native_size = None;
                     self.floating_ball_positioned = false;
                     if self.floating_ball_visible {
                         self.choose_default_floating_ball_target();
@@ -2008,6 +2094,7 @@ impl TrayApp {
         }
 
         let account_ids: Vec<String> = self.keys_rx.keys().cloned().collect();
+        let ball_before = self.floating_ball_view();
         let mut changed = false;
         for account_id in account_ids {
             let received = self
@@ -2043,6 +2130,9 @@ impl TrayApp {
             self.request_next_keys(ctx);
             // Key 列表变化会影响托盘的「主账号 / 主 Key」菜单。
             self.rebuild_menu();
+            if self.floating_ball_view() != ball_before {
+                self.start_floating_ball_bubbles(ctx);
+            }
             ctx.request_repaint();
         }
     }
@@ -2886,6 +2976,28 @@ impl TrayApp {
         ctx.request_repaint();
     }
 
+    /// 设置页内实时预览悬浮球尺寸。
+    fn preview_floating_ball_size(&mut self, ctx: &egui::Context, size: FloatingBallSize) {
+        if self.floating_ball_size == size {
+            return;
+        }
+        self.floating_ball_size = size;
+        self.floating_ball_positioned = false;
+        ctx.request_repaint();
+    }
+
+    /// 关闭设置页时回滚未保存的主题与悬浮球尺寸预览。
+    fn restore_settings_preview(&mut self, ctx: &egui::Context) {
+        if let Some(original) = self.settings_original_ball_size.take()
+            && self.floating_ball_size != original
+        {
+            self.floating_ball_size = original;
+            self.floating_ball_positioned = false;
+            ctx.request_repaint();
+        }
+        self.restore_settings_theme(ctx);
+    }
+
     /// 关闭设置页时回滚未保存的主题预览。
     fn restore_settings_theme(&mut self, ctx: &egui::Context) {
         let Some(original) = self.settings_original_dark_mode.take() else {
@@ -2950,11 +3062,13 @@ impl TrayApp {
         };
         let config = store.config();
         self.settings_original_dark_mode = Some(self.dark_mode);
+        self.settings_original_ball_size = Some(self.floating_ball_size);
         self.settings = Some(SettingsDraft {
             mask_accounts: config.mask_accounts,
             autostart: self.autostart_enabled.unwrap_or(false),
             refresh_interval_seconds: config.refresh_interval_seconds,
             request_timeout_seconds: config.request_timeout_seconds,
+            floating_ball_size: self.floating_ball_size,
             dark_mode: self.dark_mode,
         });
         // 如果启动时的后台读取还没完成（或失败），打开设置页时再补一次。
@@ -2987,6 +3101,7 @@ impl TrayApp {
         config.mask_accounts = draft.mask_accounts;
         config.refresh_interval_seconds = draft.refresh_interval_seconds.clamp(30, 86400);
         config.request_timeout_seconds = draft.request_timeout_seconds.clamp(1, 120);
+        config.floating_ball_size = draft.floating_ball_size.as_config().to_owned();
         config.theme = if draft.dark_mode { "dark" } else { "light" }.to_owned();
         let dir = store.dir().to_path_buf();
 
@@ -3035,6 +3150,8 @@ impl TrayApp {
         match reply {
             Ok(Ok(result)) => {
                 self.settings_save_rx = None;
+                let saved_ball_size =
+                    FloatingBallSize::from_config(&result.config.floating_ball_size);
                 if let DataLayer::Ready(store) = &mut self.data {
                     *store.config_mut() = result.config;
                 }
@@ -3042,7 +3159,10 @@ impl TrayApp {
                 if let Some(draft) = self.settings.as_ref() {
                     self.dark_mode = draft.dark_mode;
                 }
+                self.floating_ball_size = saved_ball_size;
+                self.floating_ball_positioned = false;
                 self.settings_original_dark_mode = None;
+                self.settings_original_ball_size = None;
                 self.settings = None;
                 self.rebuild_menu();
                 self.update_badge();
@@ -3107,6 +3227,7 @@ impl TrayApp {
         let mut check_update = false;
         let mut copy_update_url: Option<String> = None;
         let mut preview_dark_mode: Option<bool> = None;
+        let mut preview_ball_size: Option<FloatingBallSize> = None;
 
         let modal = egui::Modal::new(egui::Id::unique("settings-dialog"))
             .backdrop_color(ui_style::modal_backdrop())
@@ -3204,6 +3325,40 @@ impl TrayApp {
                                 {
                                     draft.dark_mode = true;
                                     preview_dark_mode = Some(true);
+                                }
+                            });
+
+                            ui.add_space(ui_style::space::XS);
+                            ui.horizontal(|ui| {
+                                ui_style::field_label(ui, "悬浮球尺寸");
+                                for (size, label) in [
+                                    (FloatingBallSize::Small, "小"),
+                                    (FloatingBallSize::Medium, "中"),
+                                    (FloatingBallSize::Large, "大"),
+                                ] {
+                                    let selected = draft.floating_ball_size == size;
+                                    let text = egui::RichText::new(label).size(font::BODY).color(
+                                        if selected {
+                                            theme().on_accent
+                                        } else {
+                                            theme().text_secondary
+                                        },
+                                    );
+                                    if ui
+                                        .add(ui_style::rich_button(
+                                            text,
+                                            if selected {
+                                                ButtonTone::Primary
+                                            } else {
+                                                ButtonTone::Ghost
+                                            },
+                                            ButtonSize::Auto,
+                                        ))
+                                        .clicked()
+                                    {
+                                        draft.floating_ball_size = size;
+                                        preview_ball_size = Some(size);
+                                    }
                                 }
                             });
                         });
@@ -3342,6 +3497,9 @@ impl TrayApp {
         if let Some(dark_mode) = preview_dark_mode {
             self.preview_dark_mode(ctx, dark_mode);
         }
+        if let Some(size) = preview_ball_size {
+            self.preview_floating_ball_size(ctx, size);
+        }
         if let Some(url) = copy_update_url {
             ctx.copy_text(url);
             self.toast = Some(("已复制下载链接".to_owned(), Instant::now()));
@@ -3355,7 +3513,7 @@ impl TrayApp {
         }
         if close {
             self.settings = None;
-            self.restore_settings_theme(ctx);
+            self.restore_settings_preview(ctx);
         }
     }
 
@@ -3416,6 +3574,7 @@ impl TrayApp {
                 self.refresh_rx = None;
                 self.last_round = Some(Instant::now());
                 let now = Instant::now();
+                let ball_before = self.floating_ball_view();
                 let mut rotated_count = 0_usize;
 
                 for result in results {
@@ -3457,6 +3616,9 @@ impl TrayApp {
 
                 if rotated_count > 0 {
                     log::info!("本轮有 {rotated_count} 个账号的凭据已更新并落库");
+                }
+                if self.floating_ball_view() != ball_before {
+                    self.start_floating_ball_bubbles(ctx);
                 }
 
                 // 每轮记一行汇总，便于排障时确认"刷新确实跑过、结果是什么"
@@ -3644,7 +3806,7 @@ impl TrayApp {
             }
             log::debug!("Esc：关闭设置页");
             self.settings = None;
-            self.restore_settings_theme(ctx);
+            self.restore_settings_preview(ctx);
         } else if let Some(edit) = self.quota_edit.as_ref() {
             // 保存请求在途时 Esc 不关闭弹窗，避免用户以为已经取消但服务端仍在改额度。
             if !edit.submitting {
@@ -5191,6 +5353,23 @@ fn draw_header(
             );
         },
     );
+    // 整个左侧标题区（抓手、标题、中间空白）都可以拖动窗口；
+    // 右侧工具按钮单独响应点击，不会被这个热区覆盖。
+    let drag = ui.interact(
+        left_rect,
+        ui.scope_id().with("header-drag-area"),
+        egui::Sense::drag(),
+    );
+    if drag.drag_started() {
+        ui.ctx().send_viewport_cmd(egui::ViewportCommand::StartDrag);
+    }
+    if drag.hovered() || drag.dragged() {
+        ui.ctx().set_cursor_icon(if drag.dragged() {
+            egui::CursorIcon::Grabbing
+        } else {
+            egui::CursorIcon::Grab
+        });
+    }
     ui.advance_cursor_after_rect(row_rect);
 
     // 标题下的品牌色细线：让面板在深色任务栏旁也能一眼认出是哪个产品。
@@ -5548,7 +5727,7 @@ fn draw_account_summary(
                                     if ui
                                         .selectable_label(
                                             selected,
-                                            format!("    {}  {}", key.name, key.masked),
+                                            crate::tray::ball_key_label(&key.name, &key.masked),
                                         )
                                         .clicked()
                                     {
@@ -5782,14 +5961,14 @@ fn draw_account_card(
                 let mut status_line = card.status.label().to_owned();
                 if let Some(balance) = card.balance {
                     let symbol = if is_deepseek { "¥" } else { "$" };
-                    status_line.push_str(&format!(" · 余额 {symbol}{balance:.2}"));
+                    status_line.push_str(&format!(" · 余额 {}", fmt_money(symbol, balance)));
                 }
                 if is_deepseek {
                     if let Some(reward) = card.granted_balance {
-                        status_line.push_str(&format!(" · 奖励 ¥{reward:.2}"));
+                        status_line.push_str(&format!(" · 奖励 {}", fmt_money("¥", reward)));
                     }
                     if let Some(topped_up) = card.topped_up_balance {
-                        status_line.push_str(&format!(" · 充值 ¥{topped_up:.2}"));
+                        status_line.push_str(&format!(" · 充值 {}", fmt_money("¥", topped_up)));
                     }
                 }
                 ui.label(
@@ -5845,6 +6024,59 @@ fn draw_account_card(
         });
 
     hover.store(&hover_key, frame.response.rect);
+}
+
+/// 数据更新时从球体底部升起的 4 个气泡。
+fn draw_floating_ball_bubbles(
+    painter: &egui::Painter,
+    center: egui::Pos2,
+    radius: f32,
+    elapsed: Duration,
+) {
+    let bottom = center.y + radius * 0.55;
+    let travel = radius * 1.05;
+    let elapsed = elapsed.as_secs_f32();
+    // 气泡随球体尺寸缩放，整体比首版更大、更容易看清。
+    let scale = (radius / 28.0).clamp(0.95, 1.4);
+    for index in 0..4 {
+        let progress = (elapsed - index as f32 * 0.09) / 1.15;
+        if !(0.0..1.0).contains(&progress) {
+            continue;
+        }
+        let wave = (progress * 6.0 + index as f32 * 1.7).sin();
+        let x = center.x + (index as f32 - 1.5) * 4.8 * scale + wave * 2.8 * scale;
+        let y = bottom - progress * travel;
+        let bubble_radius = (2.8 + (index % 3) as f32 * 0.95) * scale;
+        let alpha = ((1.0 - progress).powf(1.25) * 165.0) as u8;
+        let fill = ui_style::with_alpha(theme().accent, alpha);
+        let edge = ui_style::with_alpha(theme().text_primary, alpha / 2);
+        let position = egui::pos2(x, y);
+        painter.circle_filled(position, bubble_radius, fill);
+        painter.circle_stroke(position, bubble_radius, egui::Stroke::new(0.7, edge));
+        painter.circle_filled(
+            position - egui::vec2(bubble_radius * 0.3, bubble_radius * 0.3),
+            bubble_radius * 0.24,
+            ui_style::with_alpha(theme().text_primary, ((alpha as f32) * 0.72) as u8),
+        );
+    }
+}
+
+/// 金额格式化：符号 + 千分位 + 两位小数。
+fn fmt_money(symbol: &str, value: f64) -> String {
+    let negative = value.is_sign_negative();
+    let text = format!("{:.2}", value.abs());
+    let (integer, fraction) = text.split_once('.').unwrap_or((text.as_str(), "00"));
+    let mut grouped = String::with_capacity(integer.len() + integer.len() / 3);
+    for (index, ch) in integer.chars().enumerate() {
+        if index > 0 && (integer.len() - index).is_multiple_of(3) {
+            grouped.push(',');
+        }
+        grouped.push(ch);
+    }
+    format!(
+        "{}{symbol}{grouped}.{fraction}",
+        if negative { "-" } else { "" }
+    )
 }
 
 /// 把 token 数格式化成紧凑文本（`1.2k` / `3.4M`）。
@@ -6440,9 +6672,13 @@ fn draw_account_keys(
         let used = key.quota_used.unwrap_or(0.0);
         let quota_text = match key.quota {
             Some(quota) if quota > 0.0 => {
-                format!("已用 ${used:.2} / 总额度 ${quota:.2}")
+                format!(
+                    "已用 {} / 总额度 {}",
+                    fmt_money("$", used),
+                    fmt_money("$", quota)
+                )
             }
-            _ => format!("已用 ${used:.2} / 总额度 不限"),
+            _ => format!("已用 {} / 总额度 不限", fmt_money("$", used)),
         };
         // 底色随淡入进度插值：0 时完全透明，1 时是比卡片略亮的深蓝，
         // 文字同时提亮，保证高亮后依然清晰（不再"白底盖字"）。
@@ -6516,7 +6752,13 @@ fn draw_account_keys(
                     let rate_stat_texts: Vec<String> = rate_windows
                         .iter()
                         .filter(|(_, limit, _)| *limit > 0.0)
-                        .map(|(label, limit, used)| format!("{label}限速 ${used:.2} / ${limit:.2}"))
+                        .map(|(label, limit, used)| {
+                            format!(
+                                "{label}限速 {} / {}",
+                                fmt_money("$", *used),
+                                fmt_money("$", *limit)
+                            )
+                        })
                         .collect();
                     if !rate_stat_texts.is_empty() {
                         ui.horizontal_wrapped(|ui| {
@@ -6809,6 +7051,35 @@ mod tests {
 
     fn panel() -> egui::Vec2 {
         egui::vec2(PANEL_WIDTH, PANEL_HEIGHT)
+    }
+
+    #[test]
+    fn 悬浮球尺寸档位可解析且递增() {
+        assert_eq!(
+            FloatingBallSize::from_config("small"),
+            FloatingBallSize::Small
+        );
+        assert_eq!(
+            FloatingBallSize::from_config("medium"),
+            FloatingBallSize::Medium
+        );
+        assert_eq!(
+            FloatingBallSize::from_config("large"),
+            FloatingBallSize::Large
+        );
+        assert_eq!(
+            FloatingBallSize::from_config("bogus"),
+            FloatingBallSize::Medium
+        );
+        assert!(FloatingBallSize::Small.pixels() < FloatingBallSize::Medium.pixels());
+        assert!(FloatingBallSize::Medium.pixels() < FloatingBallSize::Large.pixels());
+    }
+
+    #[test]
+    fn 金额展示带千分位且保留两位小数() {
+        assert_eq!(fmt_money("$", 9999579.66119408), "$9,999,579.66");
+        assert_eq!(fmt_money("¥", 88.8), "¥88.80");
+        assert_eq!(fmt_money("$", -12.345), "-$12.35");
     }
 
     #[test]
